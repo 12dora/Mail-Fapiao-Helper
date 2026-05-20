@@ -30,9 +30,8 @@ export function resolveDateWindow(cfg: Config, now: Date = new Date()): DateWind
   }
   let before: Date | undefined;
   if (cfg.filter.until) {
-    const t = Date.parse(cfg.filter.until);
     // make --until inclusive by advancing one day
-    before = new Date(t + 86_400_000);
+    before = new Date(Date.parse(cfg.filter.until) + 86_400_000);
   }
   return { since, before };
 }
@@ -62,8 +61,11 @@ function buildSearch(cfg: Config): SearchObject {
     }
     keywordPart = acc;
   }
+  // Only send `since` to the server. Some IMAP servers (notably QQ) silently
+  // return 0 results when an OR'd keyword expression is combined with a
+  // `before:` predicate, even though SINCE+OR works fine. We apply the upper
+  // bound (`before`) client-side via the per-message date filter below.
   const out: SearchObject = { ...keywordPart, since: win.since };
-  if (win.before) out.before = win.before;
   return out;
 }
 
@@ -102,7 +104,7 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
     }
     log.info(`IMAP SEARCH: ${uids.length} matches`);
 
-    for await (const msg of client.fetch(uids, { uid: true, source: true, envelope: true })) {
+    for await (const msg of client.fetch(uids, { source: true, envelope: true }, { uid: true })) {
       if (!msg.source) continue;
       const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
       let parsed;
