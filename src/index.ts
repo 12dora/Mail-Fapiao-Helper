@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { simpleParser } from 'mailparser';
 import { loadConfig, type Config } from './config.js';
 import { fetchMails, type RawMail } from './mail/fetcher.js';
 import { log } from './log.js';
 import { loadState, saveState, type State } from './state.js';
 import { msgIdHash } from './util/hash.js';
+import { processMail } from './pipeline.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -14,6 +16,7 @@ Usage:
 
 Commands:
   fetch    Fetch matching mails as .eml into samples/raw/
+  run      Process emails and extract invoices
 
 Options:
   -h, --help    Show this help
@@ -248,6 +251,111 @@ async function cmdFetch(argv: string[]): Promise<number> {
   return 0;
 }
 
+const RUN_USAGE = `mfh run — process emails and extract invoices
+
+Usage:
+  mfh run [options]
+
+Options:
+  --config <path>      Path to config.json        (default: ./config.json)
+  --state <path>       Path to state.json         (default: ./state.json)
+  -h, --help           Show this help
+`;
+
+interface RunOpts {
+  configPath: string;
+  statePath: string;
+}
+
+function parseRunArgs(argv: string[]): RunOpts | 'help' {
+  const opts: RunOpts = {
+    configPath: './config.json',
+    statePath: './state.json',
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
+    if (a === '--state') { opts.statePath = requireValue(argv, ++i, a); continue; }
+    throw new Error(`unknown option: ${a}`);
+  }
+  return opts;
+}
+
+async function* walkEmls(dir: string): AsyncGenerator<string> {
+  if (!existsSync(dir)) return;
+
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      yield* walkEmls(fullPath);
+    } else if (entry.isFile() && entry.name.endsWith('.eml')) {
+      yield fullPath;
+    }
+  }
+}
+
+async function cmdRun(argv: string[]): Promise<number> {
+  let parsed: RunOpts | 'help';
+  try {
+    parsed = parseRunArgs(argv);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n`);
+    process.stderr.write(RUN_USAGE);
+    return 2;
+  }
+  if (parsed === 'help') { process.stdout.write(RUN_USAGE); return 0; }
+  const opts = parsed;
+
+  let cfg: Config;
+  try {
+    cfg = loadConfig(resolve(opts.configPath));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 2;
+  }
+
+  const statePath = resolve(opts.statePath);
+  const state: State = loadState(statePath);
+
+  const saveStateFn = () => saveState(statePath, state);
+
+  log.info('Starting run...');
+
+  const rawDir = cfg.paths.samples;
+  let processed = 0;
+  let skipped = 0;
+
+  try {
+    for await (const emlPath of walkEmls(rawDir)) {
+      const raw = readFileSync(emlPath);
+      const mail = await simpleParser(raw);
+
+      const hash = msgIdHash(
+        mail.messageId ?? undefined,
+        mail.from?.text ?? '',
+        mail.date?.toISOString() ?? '',
+        mail.subject ?? '',
+      );
+
+      if (state.processedHashes.includes(hash)) {
+        skipped++;
+        continue;
+      }
+
+      await processMail(mail, cfg, log, state, saveStateFn);
+      processed++;
+    }
+  } catch (e) {
+    log.error(`run aborted: ${(e as Error).message}`);
+    return 1;
+  }
+
+  log.info(`Run complete: processed=${processed}, skipped=${skipped}`);
+  return 0;
+}
+
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') {
@@ -258,6 +366,8 @@ async function main(): Promise<number> {
   switch (cmd) {
     case 'fetch':
       return cmdFetch(rest);
+    case 'run':
+      return cmdRun(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n`);
       process.stderr.write(ROOT_USAGE);

@@ -17,6 +17,11 @@ export interface Config {
     since: string | undefined;
     until: string | undefined;
   };
+  paths: {
+    samples: string;
+    invoices: string;
+    pending: string;
+  };
   output: {
     dir: string;
     pendingDir: string;
@@ -40,6 +45,9 @@ export interface Config {
   playwright: {
     headless: boolean;
     timeoutMs: number;
+  };
+  log: {
+    level: 'debug' | 'info' | 'warn' | 'error';
   };
 }
 
@@ -131,6 +139,11 @@ export function loadConfig(path: string): Config {
       since: optDateString((raw as { filter?: { since?: unknown } }).filter?.since, 'filter.since'),
       until: optDateString((raw as { filter?: { until?: unknown } }).filter?.until, 'filter.until'),
     },
+    paths: {
+      samples: asString(requireField(raw, 'paths.samples'), 'paths.samples'),
+      invoices: asString(requireField(raw, 'paths.invoices'), 'paths.invoices'),
+      pending: asString(requireField(raw, 'paths.pending'), 'paths.pending'),
+    },
     output: {
       dir: asString(requireField(raw, 'output.dir'), 'output.dir'),
       pendingDir: asString(requireField(raw, 'output.pendingDir'), 'output.pendingDir'),
@@ -156,6 +169,13 @@ export function loadConfig(path: string): Config {
     playwright: {
       headless: asBool(requireField(raw, 'playwright.headless'), 'playwright.headless'),
       timeoutMs: asNumber(requireField(raw, 'playwright.timeoutMs'), 'playwright.timeoutMs'),
+    },
+    log: {
+      level: (() => {
+        const v = (raw as { log?: { level?: unknown } }).log?.level;
+        if (v === 'debug' || v === 'info' || v === 'warn' || v === 'error') return v;
+        return 'info';
+      })(),
     },
   };
 

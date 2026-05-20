@@ -1,11 +1,12 @@
 import type { ParsedMail } from 'mailparser';
+import type { Browser } from 'playwright';
 import type { Config } from '../config.js';
 import type { Logger } from '../log.js';
 
 export interface Ctx {
   cfg: Config;
   log: Logger;
-  browser: () => Promise<unknown>;
+  browser: () => Promise<Browser>;
   http: typeof fetch;
 }
 
