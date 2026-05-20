@@ -3,279 +3,256 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>邮件清册 · 发票助手</title>
+    <title>收件箱 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="inbox">
 <div class="app">
+    <div id="titlebar-mount"></div>
     <div id="app-shell"></div>
 
     <main class="main">
-        <header class="masthead">
-            <div>
-                <div class="masthead-eyebrow">No. 02 · Inbox Ledger</div>
-                <h1 class="masthead-title">邮件清册 <em>/ raw inbox</em></h1>
-                <p class="masthead-sub">所有由 <code style="font-family:var(--f-mono)">mfh fetch</code> 落到本地的 .eml 文件，对应 samples/raw/INDEX.csv 中每一行。可按月份、发件人、附件、链接数过滤。</p>
-            </div>
-            <div class="masthead-meta">
-                <div>累计 <b>1,284</b> 封</div>
-                <div>最早 <b>2024-11-03</b></div>
-                <div>最近 <b>14:02 今日</b></div>
-            </div>
-        </header>
-
-        <div class="dateline">
-            <span>路径 · <b>./samples/raw/</b> · INDEX.csv (UTF-8 BOM)</span>
-            <span>显示 <b>32</b> / 共 <b>1,284</b> 行 · 第 <b>1</b> 页</span>
+        <div class="toolbar">
+            <span class="toolbar__crumb">工作流</span>
+            <span class="toolbar__title">收件箱</span>
+            <div class="toolbar__spacer"></div>
+            <span class="toolbar__meta">1,284 封邮件 · INDEX.csv</span>
         </div>
 
-        <section class="content">
+        <div class="page stagger">
+            <!-- 统计卡片 -->
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat__label">累计邮件</div>
+                    <div class="stat__value">1,284</div>
+                    <div class="stat__delta">+24 本月</div>
+                </div>
+                <div class="stat">
+                    <div class="stat__label">有附件</div>
+                    <div class="stat__value">892</div>
+                    <div class="stat__delta">69% 比例</div>
+                </div>
+                <div class="stat">
+                    <div class="stat__label">含链接</div>
+                    <div class="stat__value">1,108</div>
+                    <div class="stat__delta">86% 比例</div>
+                </div>
+                <div class="stat">
+                    <div class="stat__label">最早邮件</div>
+                    <div class="stat__value mono" style="font-size: 16px;">2024-11</div>
+                    <div class="stat__delta is-flat">18 个月</div>
+                </div>
+            </div>
 
-            <!-- filter bar -->
+            <!-- 过滤栏 -->
             <div class="filterbar">
-                <div class="search">
-                    <span class="search-key">⌘ K</span>
-                    <input placeholder="按主题、发件人、messageId 搜索…">
+                <input class="input" placeholder="按主题、发件人、messageId 搜索…" style="width: 280px;">
+
+                <div class="chip is-active" data-toggle>
+                    <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                    有附件
+                </div>
+                <div class="chip" data-toggle>
+                    <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                    含链接
                 </div>
 
-                <div class="seg" data-seg>
-                    <button class="is-active">全部</button>
-                    <button>本月</button>
-                    <button>上月</button>
-                    <button>季度</button>
-                    <button>自定义</button>
-                </div>
-
-                <label class="check"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:12.5px">有附件</span></label>
-                <label class="check"><input type="checkbox"><span class="check-box"></span><span style="font-size:12.5px">含正文链接</span></label>
-                <label class="check"><input type="checkbox"><span class="check-box"></span><span style="font-size:12.5px">仅未处理</span></label>
-
-                <div style="flex:1"></div>
-                <button class="btn btn-ghost btn-mono">导出 csv</button>
-                <button class="btn btn-mono">在 finder 中打开</button>
+                <div class="spacer"></div>
+                <button class="btn btn--sm">导出 CSV</button>
+                <button class="btn btn--sm">在 Finder 中打开</button>
             </div>
 
-            <!-- group divider -->
-            <div style="display:flex; align-items:baseline; gap:12px; margin: 18px 0 10px;">
-                <span style="font-family:var(--f-display); font-weight:600; font-size:17px;">二〇二六年 · 五月</span>
-                <span style="font-family:var(--f-mono); font-size:10.5px; letter-spacing:0.22em; color:var(--ink-mute); text-transform:uppercase;">2026-05 · 32 mails · 18 with pdf</span>
-                <div style="flex:1; height:1px; background:var(--rule-faint); margin-bottom:4px"></div>
+            <!-- 月份分组 -->
+            <div class="section-head">
+                <div class="section-head__title">2026 年 5 月</div>
+                <div class="section-head__hint">32 封邮件 · 18 个附件</div>
             </div>
 
-            <table class="ledger">
-                <thead>
-                    <tr>
-                        <th style="width:32px"></th>
-                        <th style="width:130px">日期 · date</th>
-                        <th style="width:240px">发件人 · from</th>
-                        <th>主题 · subject</th>
-                        <th style="width:96px">附件</th>
-                        <th style="width:84px">链接</th>
-                        <th style="width:110px">提取器</th>
-                        <th style="width:120px">状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-20 13:58</td>
-                        <td class="cell-cn">国家电网 <span class="cell-tiny">noreply@95598.cn</span></td>
-                        <td class="cell-cn">国家电网电子发票通知 · 户号 0210***318</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">3</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-20 12:12</td>
-                        <td class="cell-cn">高德地图 <span class="cell-tiny">invoice@amap.com</span></td>
-                        <td class="cell-cn">【高德打车】您的发票已开具，请查收</td>
-                        <td class="cell-num">—</td>
-                        <td class="cell-num">2</td>
-                        <td><span class="chip chip--mute">directLink</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-20 11:04</td>
-                        <td class="cell-cn">携程旅行 <span class="cell-tiny">ticket@ctrip.com</span></td>
-                        <td class="cell-cn">携程电子发票 - 行程 7DK33B · ¥1,280.00</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">1</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--pend"></span></td>
-                        <td>05-20 10:48</td>
-                        <td class="cell-cn">飞猪旅行 <span class="cell-tiny">invoice@fliggy.com</span></td>
-                        <td class="cell-cn">飞猪机票发票 PNR 4G7K2L · 待开具</td>
-                        <td class="cell-num">—</td>
-                        <td class="cell-num">4</td>
-                        <td><span class="chip chip--mute">thirdParty</span></td>
-                        <td><span class="chip chip--pend">待识别</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-20 09:31</td>
-                        <td class="cell-cn">京东 <span class="cell-tiny">invoice@jd.com</span></td>
-                        <td class="cell-cn">京东企业购 · 5 月汇总发票（2 张）</td>
-                        <td class="cell-num">2 PDF</td>
-                        <td class="cell-num">1</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-20 08:17</td>
-                        <td class="cell-cn">阿里云 <span class="cell-tiny">invoice@aliyun.com</span></td>
-                        <td class="cell-cn">阿里云电子发票（合并 04 月）· ¥3,418.20</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">2</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--err"></span></td>
-                        <td>05-19 22:04</td>
-                        <td class="cell-cn">某第三方平台 <span class="cell-tiny">noreply@vendor-x.cn</span></td>
-                        <td class="cell-cn">您的发票已开具，点击链接下载（需要登录）</td>
-                        <td class="cell-num">—</td>
-                        <td class="cell-num">5</td>
-                        <td><span class="chip chip--mute">thirdParty</span></td>
-                        <td><span class="chip chip--err">需登录</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--new"></span></td>
-                        <td>05-19 16:33</td>
-                        <td class="cell-cn">滴滴出行 <span class="cell-tiny">invoice@didi.cn</span></td>
-                        <td class="cell-cn">滴滴出行 5 月专车汇总发票</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">2</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-19 14:11</td>
-                        <td class="cell-cn">美团企业版 <span class="cell-tiny">noreply@meituan.com</span></td>
-                        <td class="cell-cn">美团企业版 5 月发票（餐饮、出行）</td>
-                        <td class="cell-num">3 PDF</td>
-                        <td class="cell-num">1</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--pend"></span></td>
-                        <td>05-19 11:58</td>
-                        <td class="cell-cn">百望云开票 <span class="cell-tiny">no-reply@baiwang.com</span></td>
-                        <td class="cell-cn">您的电子发票已开具 · 请点击查看 PDF</td>
-                        <td class="cell-num">—</td>
-                        <td class="cell-num">1</td>
-                        <td><span class="chip chip--mute">thirdParty</span></td>
-                        <td><span class="chip chip--pend">待识别</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>05-19 09:12</td>
-                        <td class="cell-cn">腾讯云 <span class="cell-tiny">invoice@tencent.com</span></td>
-                        <td class="cell-cn">腾讯云 04 月增值税电子专用发票</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">3</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <!-- group divider -->
-            <div style="display:flex; align-items:baseline; gap:12px; margin: 32px 0 10px;">
-                <span style="font-family:var(--f-display); font-weight:600; font-size:17px;">二〇二六年 · 四月</span>
-                <span style="font-family:var(--f-mono); font-size:10.5px; letter-spacing:0.22em; color:var(--ink-mute); text-transform:uppercase;">2026-04 · 41 mails</span>
-                <div style="flex:1; height:1px; background:var(--rule-faint); margin-bottom:4px"></div>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th style="width: 140px;">日期</th>
+                            <th style="width: 220px;">发件人</th>
+                            <th>主题</th>
+                            <th style="width: 90px;">附件</th>
+                            <th style="width: 70px;">链接</th>
+                            <th style="width: 110px;">提取器</th>
+                            <th style="width: 100px;">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="mono">05-20 13:58</td>
+                            <td>国家电网<br><span class="small muted">noreply@95598.cn</span></td>
+                            <td>国家电网电子发票通知 · 户号 0210***318</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">3</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-20 12:12</td>
+                            <td>高德地图<br><span class="small muted">invoice@amap.com</span></td>
+                            <td>【高德打车】您的发票已开具，请查收</td>
+                            <td class="mono col-num">—</td>
+                            <td class="mono col-num">2</td>
+                            <td><span class="pill">directLink</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-20 11:04</td>
+                            <td>携程旅行<br><span class="small muted">ticket@ctrip.com</span></td>
+                            <td>携程电子发票 - 行程 7DK33B · ¥1,280.00</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">1</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-20 10:48</td>
+                            <td>飞猪旅行<br><span class="small muted">invoice@fliggy.com</span></td>
+                            <td>飞猪机票发票 PNR 4G7K2L · 待开具</td>
+                            <td class="mono col-num">—</td>
+                            <td class="mono col-num">4</td>
+                            <td><span class="pill">thirdParty</span></td>
+                            <td><span class="pill pill--warn">待识别</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-20 09:31</td>
+                            <td>京东<br><span class="small muted">invoice@jd.com</span></td>
+                            <td>京东企业购 · 5 月汇总发票（2 张）</td>
+                            <td class="mono col-num">2 PDF</td>
+                            <td class="mono col-num">1</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-20 08:17</td>
+                            <td>阿里云<br><span class="small muted">invoice@aliyun.com</span></td>
+                            <td>阿里云电子发票（合并 04 月）· ¥3,418.20</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">2</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-19 22:04</td>
+                            <td>某第三方平台<br><span class="small muted">noreply@vendor-x.cn</span></td>
+                            <td>您的发票已开具，点击链接下载（需要登录）</td>
+                            <td class="mono col-num">—</td>
+                            <td class="mono col-num">5</td>
+                            <td><span class="pill">thirdParty</span></td>
+                            <td><span class="pill pill--err">需登录</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-19 16:33</td>
+                            <td>滴滴出行<br><span class="small muted">invoice@didi.cn</span></td>
+                            <td>滴滴出行 5 月专车汇总发票</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">2</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-19 14:11</td>
+                            <td>美团企业版<br><span class="small muted">noreply@meituan.com</span></td>
+                            <td>美团企业版 5 月发票（餐饮、出行）</td>
+                            <td class="mono col-num">3 PDF</td>
+                            <td class="mono col-num">1</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-19 11:58</td>
+                            <td>百望云开票<br><span class="small muted">no-reply@baiwang.com</span></td>
+                            <td>您的电子发票已开具 · 请点击查看 PDF</td>
+                            <td class="mono col-num">—</td>
+                            <td class="mono col-num">1</td>
+                            <td><span class="pill">thirdParty</span></td>
+                            <td><span class="pill pill--warn">待识别</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">05-19 09:12</td>
+                            <td>腾讯云<br><span class="small muted">invoice@tencent.com</span></td>
+                            <td>腾讯云 04 月增值税电子专用发票</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">3</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
 
-            <table class="ledger">
-                <thead>
-                    <tr>
-                        <th style="width:32px"></th>
-                        <th style="width:130px">日期 · date</th>
-                        <th style="width:240px">发件人 · from</th>
-                        <th>主题 · subject</th>
-                        <th style="width:96px">附件</th>
-                        <th style="width:84px">链接</th>
-                        <th style="width:110px">提取器</th>
-                        <th style="width:120px">状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>04-30 23:48</td>
-                        <td class="cell-cn">国家电网 <span class="cell-tiny">noreply@95598.cn</span></td>
-                        <td class="cell-cn">国家电网电子发票通知（04 月）</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">3</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>04-28 16:12</td>
-                        <td class="cell-cn">中国移动 <span class="cell-tiny">10086@chinamobile.com</span></td>
-                        <td class="cell-cn">中国移动通信集团 · 4 月电子发票</td>
-                        <td class="cell-num">1 PDF</td>
-                        <td class="cell-num">2</td>
-                        <td><span class="chip chip--mute">attachment</span></td>
-                        <td><span class="chip chip--ok">已归档</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--pend"></span></td>
-                        <td>04-26 10:30</td>
-                        <td class="cell-cn">某第三方 <span class="cell-tiny">notify@vendor-y.cn</span></td>
-                        <td class="cell-cn">您的发票已上传至开票平台，请前往下载</td>
-                        <td class="cell-num">—</td>
-                        <td class="cell-num">2</td>
-                        <td><span class="chip chip--mute">thirdParty</span></td>
-                        <td><span class="chip chip--pend">vendor 未注册</span></td>
-                    </tr>
-                </tbody>
-            </table>
+            <!-- 月份分组 -->
+            <div class="section-head mt-24">
+                <div class="section-head__title">2026 年 4 月</div>
+                <div class="section-head__hint">41 封邮件</div>
+            </div>
 
-            <!-- pagination -->
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:28px;">
-                <div style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.06em;">
-                    显示 <b style="color:var(--ink); font-weight:500">1–32</b> · 共 <b style="color:var(--ink); font-weight:500">1,284</b> 行
-                </div>
-                <div style="display:flex; gap:6px;">
-                    <button class="btn btn-ghost btn-mono">← prev</button>
-                    <button class="btn btn-mono" style="background:var(--ink); color:var(--paper)">1</button>
-                    <button class="btn btn-ghost btn-mono">2</button>
-                    <button class="btn btn-ghost btn-mono">3</button>
-                    <button class="btn btn-ghost btn-mono">…</button>
-                    <button class="btn btn-ghost btn-mono">41</button>
-                    <button class="btn btn-ghost btn-mono">next →</button>
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th style="width: 140px;">日期</th>
+                            <th style="width: 220px;">发件人</th>
+                            <th>主题</th>
+                            <th style="width: 90px;">附件</th>
+                            <th style="width: 70px;">链接</th>
+                            <th style="width: 110px;">提取器</th>
+                            <th style="width: 100px;">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="mono">04-30 23:48</td>
+                            <td>国家电网<br><span class="small muted">noreply@95598.cn</span></td>
+                            <td>国家电网电子发票通知（04 月）</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">3</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">04-28 16:12</td>
+                            <td>中国移动<br><span class="small muted">10086@chinamobile.com</span></td>
+                            <td>中国移动通信集团 · 4 月电子发票</td>
+                            <td class="mono col-num">1 PDF</td>
+                            <td class="mono col-num">2</td>
+                            <td><span class="pill">attachment</span></td>
+                            <td><span class="pill pill--ok">已归档</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">04-26 10:30</td>
+                            <td>某第三方<br><span class="small muted">notify@vendor-y.cn</span></td>
+                            <td>您的发票已上传至开票平台，请前往下载</td>
+                            <td class="mono col-num">—</td>
+                            <td class="mono col-num">2</td>
+                            <td><span class="pill">thirdParty</span></td>
+                            <td><span class="pill pill--warn">vendor 未注册</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 分页 -->
+            <div class="row row--between mt-24">
+                <div class="small mono muted">显示 1–32 · 共 1,284 行</div>
+                <div class="row gap-4">
+                    <button class="btn btn--sm btn--ghost">← 上一页</button>
+                    <button class="btn btn--sm btn--primary">1</button>
+                    <button class="btn btn--sm">2</button>
+                    <button class="btn btn--sm">3</button>
+                    <button class="btn btn--sm btn--ghost">…</button>
+                    <button class="btn btn--sm">41</button>
+                    <button class="btn btn--sm btn--ghost">下一页 →</button>
                 </div>
             </div>
-
-        </section>
-
-        <footer class="colophon">
-            <span>02 · Inbox Ledger</span>
-            <span>samples/raw/INDEX.csv</span>
-        </footer>
+        </div>
     </main>
 </div>
 
 <script src="../scripts/shell.js"></script>
-<script>
-    document.querySelectorAll('[data-seg] button').forEach(b => {
-        b.addEventListener('click', () => {
-            b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('is-active'));
-            b.classList.add('is-active');
-        });
-    });
-</script>
 </body>
 </html>

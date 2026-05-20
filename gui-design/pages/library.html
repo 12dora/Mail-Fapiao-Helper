@@ -3,71 +3,57 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>发票档案 · 发票助手</title>
+    <title>发票库 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="library">
 <div class="app">
+    <div id="titlebar-mount"></div>
     <div id="app-shell"></div>
 
     <main class="main">
-        <header class="masthead">
-            <div>
-                <div class="masthead-eyebrow">No. 03 · Invoice Library</div>
-                <h1 class="masthead-title">发票档案 <em>/ filed invoices</em></h1>
-                <p class="masthead-sub">已成功下载并写入 <code style="font-family:var(--f-mono)">invoices.csv</code> 的全部 PDF 发票。OCR 字段（销售方、金额、票号、日期）按提供商解析；缺失字段不阻塞归档。</p>
-            </div>
-            <div class="masthead-meta">
-                <div>已归档 <b>1,142</b> 张</div>
-                <div>本月金额 <b>¥ 28,431.60</b></div>
-                <div>OCR 完整率 <b>88.4%</b></div>
-            </div>
-        </header>
-
-        <div class="dateline">
-            <span>路径 · <b>./invoices/</b> · invoices.csv</span>
-            <span>归档策略 · <b>{seller}-{amount}.pdf</b> · fallback {date}-{messageId}.pdf</span>
+        <div class="toolbar">
+            <span class="toolbar__crumb">工作流</span>
+            <span class="toolbar__title">发票库</span>
+            <div class="toolbar__spacer"></div>
+            <span class="toolbar__meta">1,142 张发票 · invoices.csv</span>
         </div>
 
-        <section class="content">
-
-            <!-- KPI strip -->
-            <div class="kpis">
-                <div class="kpi">
-                    <div class="kpi-label">本月归档 <span class="kpi-delta">+18 vs 上月</span></div>
-                    <div class="kpi-value">96 <span class="unit">张</span></div>
-                    <div class="kpi-foot">2026-05 至今</div>
+        <div class="page stagger">
+            <!-- 统计卡片 -->
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat__label">本月归档</div>
+                    <div class="stat__value">96</div>
+                    <div class="stat__delta">+18 vs 上月</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">本月金额 <span class="kpi-delta">+¥3,118</span></div>
-                    <div class="kpi-value">¥ 28,431<span class="unit">.60</span></div>
-                    <div class="kpi-foot">含税合计</div>
+                <div class="stat">
+                    <div class="stat__label">本月金额</div>
+                    <div class="stat__value mono" style="font-size: 18px;">¥28,431</div>
+                    <div class="stat__delta">+¥3,118</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">销售方 · 去重 <span class="kpi-delta">42 家</span></div>
-                    <div class="kpi-value">42</div>
-                    <div class="kpi-foot">top: 国家电网 · 携程 · 阿里云</div>
+                <div class="stat">
+                    <div class="stat__label">销售方去重</div>
+                    <div class="stat__value">42</div>
+                    <div class="stat__delta is-flat">家企业</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">字段完整 <span class="kpi-delta">+2.1%</span></div>
-                    <div class="kpi-value">88<span class="unit">%</span></div>
-                    <div class="kpi-foot">12 张需手工补字段</div>
+                <div class="stat">
+                    <div class="stat__label">字段完整率</div>
+                    <div class="stat__value">88%</div>
+                    <div class="stat__delta">+2.1%</div>
                 </div>
             </div>
 
-            <!-- filter bar -->
+            <!-- 过滤栏 -->
             <div class="filterbar">
-                <div class="search">
-                    <span class="search-key">⌘ K</span>
-                    <input placeholder="按销售方、票号、金额范围 …">
-                </div>
+                <input class="input" placeholder="按销售方、票号、金额范围搜索…" style="width: 280px;">
 
-                <div class="seg" data-seg>
-                    <button class="is-active">全部</button>
-                    <button>本月</button>
-                    <button>上月</button>
-                    <button>Q2</button>
-                    <button>2026 年</button>
+                <div class="tabs">
+                    <button class="tab is-active">全部</button>
+                    <button class="tab">本月</button>
+                    <button class="tab">上月</button>
+                    <button class="tab">Q2</button>
+                    <button class="tab">2026 年</button>
                 </div>
 
                 <select class="select" style="width: 160px;">
@@ -77,163 +63,156 @@
                     <option>阿里云</option>
                 </select>
 
-                <label class="check"><input type="checkbox"><span class="check-box"></span><span style="font-size:12.5px">仅字段缺失</span></label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
+                    <div class="check"></div>
+                    仅字段缺失
+                </label>
 
-                <div style="flex:1"></div>
-                <button class="btn btn-ghost btn-mono">导出 csv</button>
-                <button class="btn btn-mono">批量重命名</button>
+                <div class="spacer"></div>
+                <button class="btn btn--sm">导出 CSV</button>
+                <button class="btn btn--sm">批量重命名</button>
             </div>
 
-            <table class="ledger">
-                <thead>
-                    <tr>
-                        <th style="width:32px"></th>
-                        <th style="width:110px">开票日 · date</th>
-                        <th>销售方 · seller</th>
-                        <th style="width:200px">票号 · invoiceNo</th>
-                        <th class="cell-num" style="width:140px">金额 · amount</th>
-                        <th style="width:90px">来源</th>
-                        <th style="width:140px">文件名</th>
-                        <th style="width:110px">状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-20</td>
-                        <td class="cell-cn">国家电网有限公司 上海市电力公司</td>
-                        <td>25312000000482183920</td>
-                        <td class="cell-num">¥ 318.42</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>国家电网-318.42.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-20</td>
-                        <td class="cell-cn">携程计算机技术（上海）有限公司</td>
-                        <td>25310000000391847201</td>
-                        <td class="cell-num">¥ 1,280.00</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>携程-1280.00.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-20</td>
-                        <td class="cell-cn">阿里云计算有限公司</td>
-                        <td>25330000000128494102</td>
-                        <td class="cell-num">¥ 3,418.20</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>阿里云-3418.20.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-20</td>
-                        <td class="cell-cn">北京三快在线科技有限公司</td>
-                        <td>25110000000392040133</td>
-                        <td class="cell-num">¥ 482.50</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>美团-482.50.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--pend"></span></td>
-                        <td>2026-05-19</td>
-                        <td class="cell-cn">滴滴出行科技有限公司</td>
-                        <td>—</td>
-                        <td class="cell-num">¥ 1,128.40</td>
-                        <td><span class="chip chip--mute">直链</span></td>
-                        <td>2026-05-19-d7a1.pdf</td>
-                        <td><span class="chip chip--pend">缺票号</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-19</td>
-                        <td class="cell-cn">深圳市腾讯计算机系统有限公司</td>
-                        <td>25440000000418293002</td>
-                        <td class="cell-num">¥ 12,800.00</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>腾讯云-12800.00.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-19</td>
-                        <td class="cell-cn">北京京东世纪贸易有限公司</td>
-                        <td>25110000000419201733</td>
-                        <td class="cell-num">¥ 2,194.00</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>京东-2194.00.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-19</td>
-                        <td class="cell-cn">高德软件有限公司</td>
-                        <td>25110000000418448710</td>
-                        <td class="cell-num">¥ 87.30</td>
-                        <td><span class="chip chip--mute">直链</span></td>
-                        <td>高德-87.30.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--pend"></span></td>
-                        <td>2026-05-18</td>
-                        <td class="cell-cn">飞猪信息技术有限公司</td>
-                        <td>25330000000128299481</td>
-                        <td class="cell-num">¥ —</td>
-                        <td><span class="chip chip--mute">站点</span></td>
-                        <td>飞猪-2026-05-18.pdf</td>
-                        <td><span class="chip chip--pend">缺金额</span></td>
-                    </tr>
-                    <tr class="row-link">
-                        <td><span class="row-mark row-mark--ok"></span></td>
-                        <td>2026-05-18</td>
-                        <td class="cell-cn">中国移动通信集团 上海有限公司</td>
-                        <td>25310000000391020188</td>
-                        <td class="cell-num">¥ 218.00</td>
-                        <td><span class="chip chip--mute">附件</span></td>
-                        <td>中国移动-218.00.pdf</td>
-                        <td><span class="chip chip--ok">完整</span></td>
-                    </tr>
-                </tbody>
-                <tfoot>
-                    <tr>
-                        <td colspan="4" style="padding:14px; border-top:1.5px solid var(--ink); font-family:var(--f-mono); font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:var(--ink-mute)">
-                            本页合计 · subtotal
-                        </td>
-                        <td class="cell-num" style="padding:14px; border-top:1.5px solid var(--ink); font-family:var(--f-display); font-size:18px; font-weight:600;">
-                            ¥ 21,927.82
-                        </td>
-                        <td colspan="3" style="border-top:1.5px solid var(--ink);"></td>
-                    </tr>
-                </tfoot>
-            </table>
-
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:24px; font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.06em;">
-                <span>显示 1–10 · 共 1,142 张</span>
-                <span>归档体积 <b style="color:var(--ink); font-weight:500">418.2 MB</b> · 含 invoices.csv</span>
+            <!-- 发票表格 -->
+            <div class="table-wrap">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th style="width: 110px;">开票日期</th>
+                            <th>销售方</th>
+                            <th style="width: 200px;">发票号码</th>
+                            <th class="col-num" style="width: 130px;">金额</th>
+                            <th style="width: 100px;">来源</th>
+                            <th style="width: 180px;">文件名</th>
+                            <th style="width: 90px;">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="mono">2026-05-20</td>
+                            <td>国家电网有限公司 上海市电力公司</td>
+                            <td class="mono">25312000000482183920</td>
+                            <td class="mono col-num">¥ 318.42</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">国家电网-318.42.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-20</td>
+                            <td>携程计算机技术（上海）有限公司</td>
+                            <td class="mono">25310000000391847201</td>
+                            <td class="mono col-num">¥ 1,280.00</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">携程-1280.00.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-20</td>
+                            <td>阿里云计算有限公司</td>
+                            <td class="mono">25330000000128494102</td>
+                            <td class="mono col-num">¥ 3,418.20</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">阿里云-3418.20.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-20</td>
+                            <td>北京三快在线科技有限公司</td>
+                            <td class="mono">25110000000392040133</td>
+                            <td class="mono col-num">¥ 482.50</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">美团-482.50.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-19</td>
+                            <td>滴滴出行科技有限公司</td>
+                            <td class="mono muted">—</td>
+                            <td class="mono col-num">¥ 1,128.40</td>
+                            <td><span class="pill">直链</span></td>
+                            <td class="mono small">2026-05-19-d7a1.pdf</td>
+                            <td><span class="pill pill--warn">缺票号</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-19</td>
+                            <td>深圳市腾讯计算机系统有限公司</td>
+                            <td class="mono">25440000000418293002</td>
+                            <td class="mono col-num">¥ 12,800.00</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">腾讯云-12800.00.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-19</td>
+                            <td>北京京东世纪贸易有限公司</td>
+                            <td class="mono">25110000000419201733</td>
+                            <td class="mono col-num">¥ 2,194.00</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">京东-2194.00.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-19</td>
+                            <td>高德软件有限公司</td>
+                            <td class="mono">25110000000418448710</td>
+                            <td class="mono col-num">¥ 87.30</td>
+                            <td><span class="pill">直链</span></td>
+                            <td class="mono small">高德-87.30.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-18</td>
+                            <td>飞猪信息技术有限公司</td>
+                            <td class="mono">25330000000128299481</td>
+                            <td class="mono col-num muted">¥ —</td>
+                            <td><span class="pill">站点</span></td>
+                            <td class="mono small">飞猪-2026-05-18.pdf</td>
+                            <td><span class="pill pill--warn">缺金额</span></td>
+                        </tr>
+                        <tr>
+                            <td class="mono">2026-05-18</td>
+                            <td>中国移动通信集团 上海有限公司</td>
+                            <td class="mono">25310000000391020188</td>
+                            <td class="mono col-num">¥ 218.00</td>
+                            <td><span class="pill">附件</span></td>
+                            <td class="mono small">中国移动-218.00.pdf</td>
+                            <td><span class="pill pill--ok">完整</span></td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
 
-        </section>
+            <!-- 汇总 -->
+            <div class="card mt-16">
+                <div class="row row--between">
+                    <div>
+                        <div class="small muted">本页合计</div>
+                        <div class="mono strong" style="font-size: 20px; margin-top: 4px;">¥ 21,927.82</div>
+                    </div>
+                    <div class="right">
+                        <div class="small muted">显示 1–10 · 共 1,142 张</div>
+                        <div class="small muted" style="margin-top: 4px;">归档体积 <span class="strong">418.2 MB</span></div>
+                    </div>
+                </div>
+            </div>
 
-        <footer class="colophon">
-            <span>03 · Invoice Library</span>
-            <span>invoices/ + invoices.csv</span>
-        </footer>
+            <!-- 分页 -->
+            <div class="row row--between mt-16">
+                <div class="small mono muted">Top 销售方：国家电网 · 携程 · 阿里云</div>
+                <div class="row gap-4">
+                    <button class="btn btn--sm btn--ghost">← 上一页</button>
+                    <button class="btn btn--sm btn--primary">1</button>
+                    <button class="btn btn--sm">2</button>
+                    <button class="btn btn--sm">3</button>
+                    <button class="btn btn--sm btn--ghost">…</button>
+                    <button class="btn btn--sm">115</button>
+                    <button class="btn btn--sm btn--ghost">下一页 →</button>
+                </div>
+            </div>
+        </div>
     </main>
 </div>
 
 <script src="../scripts/shell.js"></script>
-<script>
-    document.querySelectorAll('[data-seg] button').forEach(b => {
-        b.addEventListener('click', () => {
-            b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('is-active'));
-            b.classList.add('is-active');
-        });
-    });
-</script>
 </body>
 </html>

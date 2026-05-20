@@ -3,312 +3,311 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>运行台 · 发票助手</title>
+    <title>运行控制台 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="dashboard">
 <div class="app">
+    <div id="titlebar-mount"></div>
     <div id="app-shell"></div>
 
     <main class="main">
-        <header class="masthead">
-            <div>
-                <div class="masthead-eyebrow">No. 01 · Run Console</div>
-                <h1 class="masthead-title">运行台 <em>/ daily fetch</em></h1>
-                <p class="masthead-sub">从 IMAP 邮箱拉取包含「发票」关键词的邮件原文（.eml），并写入本地清册。所有抓取动作可重入、可中断；状态以 messageId 哈希为键持久化。</p>
-            </div>
-            <div class="masthead-meta">
-                <div>第 <b>17</b> 期 · 二〇二六年五月</div>
-                <div>本地时区 <b>Asia/Shanghai</b></div>
-                <div>邮箱 <b>me@example.com</b></div>
-            </div>
-        </header>
-
-        <div class="dateline">
-            <span>分册 · <b>Issue 17</b> · 周二 · 14:02 UTC</span>
-            <span>状态 · <b>就绪</b> · IMAP TLS · INBOX</span>
+        <div class="toolbar">
+            <span class="toolbar__crumb">工作流</span>
+            <span class="toolbar__title">运行控制台</span>
+            <div class="toolbar__spacer"></div>
+            <span class="toolbar__meta">IMAP 已连接 · 14:02</span>
         </div>
 
-        <section class="content">
-
-            <!-- KPI strip -->
-            <div class="kpis">
-                <div class="kpi">
-                    <div class="kpi-label">本月命中 · matched <span class="kpi-delta">+12 周环比</span></div>
-                    <div class="kpi-value">128 <span class="unit">封</span></div>
-                    <div class="kpi-foot">含关键词「发票 / 票据 / invoice」</div>
+        <div class="page stagger">
+            <!-- Stats -->
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat__label">本月命中</div>
+                    <div class="stat__value">128</div>
+                    <div class="stat__delta">+12 vs 上月</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">已归档 · filed <span class="kpi-delta">96%</span></div>
-                    <div class="kpi-value">122 <span class="unit">张</span></div>
-                    <div class="kpi-foot">PDF 已落盘并写入 invoices.csv</div>
+                <div class="stat">
+                    <div class="stat__label">已归档</div>
+                    <div class="stat__value">122</div>
+                    <div class="stat__delta">96% 完成率</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">待人工 · pending <span class="kpi-delta kpi-delta--down">−3</span></div>
-                    <div class="kpi-value">6 <span class="unit">封</span></div>
-                    <div class="kpi-foot">第三方站点失败 · 未识别</div>
+                <div class="stat">
+                    <div class="stat__label">待处理</div>
+                    <div class="stat__value">6</div>
+                    <div class="stat__delta is-down">需人工介入</div>
                 </div>
-                <div class="kpi">
-                    <div class="kpi-label">字段完整 · ocr ok <span class="kpi-delta">百度智能云</span></div>
-                    <div class="kpi-value">88<span class="unit">%</span></div>
-                    <div class="kpi-foot">销售方 / 金额 / 票号</div>
+                <div class="stat">
+                    <div class="stat__label">OCR 完整率</div>
+                    <div class="stat__value">88%</div>
+                    <div class="stat__delta">百度智能云</div>
                 </div>
             </div>
 
-            <!-- main grid: action + console + history -->
             <div class="grid-2">
-                <!-- left: trigger + console -->
-                <div class="stack-md">
-                    <div class="panel">
-                        <span class="panel-tag">动作 · <b>RUN</b></span>
-                        <div style="display:flex; align-items:center; gap:24px; margin-top:6px; margin-bottom:14px;">
-                            <div class="chop">FETCH<br>抓取</div>
-                            <div style="flex:1">
-                                <div class="h-section" style="margin-bottom:2px">开始一次抓取 <em>start fetch run</em></div>
-                                <p style="font-size:13px; color:var(--ink-mute); max-width:48ch">
-                                    将连接 IMAP，按当前过滤条件搜索邮件，把命中条目以 .eml 落到
-                                    <code style="font-family:var(--f-mono);font-size:12px;background:rgba(0,0,0,0.05);padding:1px 5px">samples/raw/&lt;YYYY-MM&gt;/</code>。
-                                </p>
+                <!-- Left: Run controls + console -->
+                <div style="display: flex; flex-direction: column; gap: 16px;">
+                    <div class="card">
+                        <h3 class="card__title">开始抓取</h3>
+                        <p class="card__sub">连接 IMAP，按当前过滤条件搜索邮件，将命中条目保存为 .eml 文件</p>
+
+                        <div class="field">
+                            <label class="field__label">回溯天数</label>
+                            <div class="tabs">
+                                <button class="tab">7 天</button>
+                                <button class="tab is-active">30 天</button>
+                                <button class="tab">90 天</button>
+                                <button class="tab">全部</button>
                             </div>
                         </div>
 
-                        <div class="filterbar" style="border:none; padding:0; margin-bottom:14px;">
-                            <span class="label" style="margin-right:0">最近 <span style="color:var(--ink)">N</span> 天</span>
-                            <div class="seg" data-seg>
-                                <button>7</button>
-                                <button class="is-active">30</button>
-                                <button>90</button>
-                                <button>365</button>
-                                <button>全部</button>
-                            </div>
-                            <label class="check"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:12.5px">主题</span></label>
-                            <label class="check"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:12.5px">正文</span></label>
-                            <label class="check"><input type="checkbox"><span class="check-box"></span><span style="font-size:12.5px">仅 dry-run</span></label>
+                        <div class="row gap-8 mb-12">
+                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
+                                <div class="check is-on"></div>
+                                匹配主题
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
+                                <div class="check is-on"></div>
+                                匹配正文
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
+                                <div class="check"></div>
+                                仅 dry-run
+                            </label>
                         </div>
 
-                        <div style="display:flex; gap:10px; align-items:center; margin-bottom:18px;">
-                            <button class="btn btn-primary" id="run-btn">
-                                <span class="pulse" style="background:var(--paper)"></span>
-                                开始抓取 · mfh fetch
+                        <div class="row gap-8 mb-12">
+                            <button class="btn btn--primary" id="run-btn">
+                                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+                                开始抓取
                             </button>
-                            <button class="btn btn-ghost btn-mono">查看 cli 等价命令</button>
-                            <div style="flex:1"></div>
-                            <span style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.14em">
-                                预计 ~ 9.2s · 估算 ≈ 24 封
+                            <button class="btn">查看 CLI 命令</button>
+                            <div style="flex: 1;"></div>
+                            <span class="mono small muted">预计 ~9s</span>
+                        </div>
+
+                        <div class="progress">
+                            <div class="progress__bar" id="prog-bar" style="--p: 0%"></div>
+                        </div>
+
+                        <div class="row gap-12 mt-12 mono small muted">
+                            <span>命中 <strong class="strong" id="m-matched">0</strong></span>
+                            <span>已存 <strong style="color: var(--ok);" id="m-saved">0</strong></span>
+                            <span>跳过 <strong class="muted" id="m-skip">0</strong></span>
+                            <div style="flex: 1;"></div>
+                            <span id="run-status">
+                                <span class="pill"><span class="pill__dot"></span>就绪</span>
                             </span>
                         </div>
-
-                        <div class="progress-bar"><span id="progress"></span></div>
-
-                        <div style="margin-top:14px; display:flex; gap:18px; font-family:var(--f-mono); font-size:11.5px; color:var(--ink-mute); letter-spacing:0.04em;">
-                            <span>命中 <b id="m-matched" style="color:var(--ink); font-weight:500">0</b></span>
-                            <span>已存 <b id="m-saved" style="color:var(--celadon-d); font-weight:500">0</b></span>
-                            <span>跳过 <b id="m-skip" style="color:var(--ink-mute); font-weight:500">0</b></span>
-                            <span style="flex:1"></span>
-                            <span>正在读取 · <b id="m-cur" style="color:var(--ink); font-weight:500; font-family:var(--f-sans)">—</b></span>
-                        </div>
                     </div>
 
-                    <div class="console" id="console">
-                        <div><span class="log-time">14:02:11</span><span class="log-tag">INFO </span>connecting imap.exmail.qq.com:993 (TLS)</div>
-                        <div><span class="log-time">14:02:11</span><span class="log-tag">INFO </span>SEARCH SUBJECT/BODY <span class="log-cn">"发票"</span> SINCE 30d → 24 candidates</div>
-                        <div><span class="log-time">14:02:12</span><span class="log-tag">SAVE </span>2026-05/a91f0e2c9b13.eml <span class="log-cn">"国家电网电子发票通知"</span></div>
-                        <div><span class="log-time">14:02:12</span><span class="log-tag">SAVE </span>2026-05/77d3aa9b4e80.eml <span class="log-cn">"【高德打车】您的发票已开具"</span></div>
-                        <div><span class="log-time">14:02:13</span><span class="log-tag">SAVE </span>2026-05/c1ee082f43aa.eml <span class="log-cn">"携程电子发票 - 行程 7DK33B"</span></div>
-                        <div><span class="log-time">14:02:13</span><span class="log-tag">SKIP </span>seen hash 5f0a... <span class="log-cn">"美团企业版 5 月对账单"</span></div>
-                        <div><span class="log-time">14:02:14</span><span class="log-tag log-tag--warn">WARN </span>noopener link in body, parsing relaxed</div>
-                        <div><span class="log-time">14:02:14</span><span class="log-tag">SAVE </span>2026-05/b8e90c12fae1.eml <span class="log-cn">"飞猪机票发票 PNR 4G7K2L"</span></div>
-                        <div><span class="log-time">14:02:15</span><span class="log-tag">INFO </span>writing INDEX.csv +6 rows</div>
-                        <div><span class="log-time">14:02:15</span><span class="log-tag">INFO </span>state.json committed · fetchedHashes += 6</div>
-                        <div><span class="log-time">14:02:16</span><span class="log-tag log-tag--err">ERR  </span>imap.fetch FLAGS 8821 timeout · retry 1/3</div>
-                        <div><span class="log-time">14:02:17</span><span class="log-tag">DONE </span>seen=24 saved=6 skippedKnown=18 in 5.8s</div>
+                    <!-- Console -->
+                    <div class="card" style="padding: 0; overflow: hidden;">
+                        <div style="padding: 14px 18px; border-bottom: 1px solid var(--border);">
+                            <h3 class="card__title" style="margin: 0;">实时日志</h3>
+                        </div>
+                        <div class="console" id="console-out" style="height: 280px; border-radius: 0; border: 0;">
+                            <div class="console__line"><span class="console__time">14:02:11</span><span class="console__tag">init</span><span class="console__msg">加载配置 config.json</span></div>
+                            <div class="console__line"><span class="console__time">14:02:11</span><span class="console__tag">imap</span><span class="console__msg">连接 imap.exmail.qq.com:993 (TLS)</span></div>
+                            <div class="console__line"><span class="console__time">14:02:12</span><span class="console__tag ok">imap</span><span class="console__msg">认证成功 me@example.com</span></div>
+                            <div class="console__line"><span class="console__time">14:02:12</span><span class="console__tag">filter</span><span class="console__msg">since=30d keywords=["发票","invoice"]</span></div>
+                            <div class="console__line"><span class="console__time">14:02:13</span><span class="console__tag ok">fetch</span><span class="console__msg">找到 24 封匹配邮件</span></div>
+                            <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/a91f0e2c.eml "国家电网电子发票通知"</span></div>
+                            <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/77d3aa9b.eml "高德打车发票已开具"</span></div>
+                            <div class="console__line"><span class="console__time">14:02:15</span><span class="console__tag">skip</span><span class="console__msg">已存在 hash 5f0a...</span></div>
+                        </div>
                     </div>
                 </div>
 
-                <!-- right: history timeline -->
-                <div class="panel">
-                    <span class="panel-tag">日志 · <b>RECENT RUNS</b></span>
-                    <div class="h-section" style="margin-bottom:18px; margin-top:6px;">最近运行 <em>history</em></div>
+                <!-- Right: History -->
+                <div class="card">
+                    <h3 class="card__title">最近运行</h3>
+                    <p class="card__sub">历史记录按时间倒序排列</p>
 
-                    <div class="timeline">
-                        <div class="timeline-item ok">
-                            <div class="timeline-time">今日 14:02 · 5.8s</div>
-                            <div class="timeline-title">mfh fetch · sinceDays=30</div>
-                            <div class="timeline-meta">seen 24 · saved 6 · skipped 18</div>
+                    <div style="display: flex; flex-direction: column; gap: 10px;">
+                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--ok);">
+                            <div class="row row--between mb-12">
+                                <span class="mono small strong">今日 14:02</span>
+                                <span class="pill pill--ok"><span class="pill__dot"></span>成功</span>
+                            </div>
+                            <div class="small muted">mfh fetch · sinceDays=30</div>
+                            <div class="mono small muted mt-12">seen 24 · saved 6 · skipped 18 · 5.8s</div>
                         </div>
-                        <div class="timeline-item ok">
-                            <div class="timeline-time">今日 09:30 · 4.1s</div>
-                            <div class="timeline-title">mfh fetch · cron</div>
-                            <div class="timeline-meta">seen 22 · saved 0 · skipped 22</div>
+
+                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--ok);">
+                            <div class="row row--between mb-12">
+                                <span class="mono small strong">今日 09:30</span>
+                                <span class="pill pill--ok"><span class="pill__dot"></span>成功</span>
+                            </div>
+                            <div class="small muted">mfh fetch · cron</div>
+                            <div class="mono small muted mt-12">seen 22 · saved 0 · skipped 22 · 4.1s</div>
                         </div>
-                        <div class="timeline-item pend">
-                            <div class="timeline-time">昨日 18:45 · 11.2s</div>
-                            <div class="timeline-title">mfh run · phase 3 试运行</div>
-                            <div class="timeline-meta">filed 12 · pending 3 · 第三方站点 vendor-A 超时</div>
+
+                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--warn);">
+                            <div class="row row--between mb-12">
+                                <span class="mono small strong">昨日 18:45</span>
+                                <span class="pill pill--warn"><span class="pill__dot"></span>部分成功</span>
+                            </div>
+                            <div class="small muted">mfh run · phase 3 试运行</div>
+                            <div class="mono small muted mt-12">filed 12 · pending 3 · vendor-A 超时 · 11.2s</div>
                         </div>
-                        <div class="timeline-item ok">
-                            <div class="timeline-time">昨日 09:30 · 6.4s</div>
-                            <div class="timeline-title">mfh fetch · cron</div>
-                            <div class="timeline-meta">seen 18 · saved 4 · skipped 14</div>
-                        </div>
-                        <div class="timeline-item err">
-                            <div class="timeline-time">05-18 09:30 · 0.3s</div>
-                            <div class="timeline-title">mfh fetch · 失败</div>
-                            <div class="timeline-meta">IMAP 认证失败 · 检查授权码</div>
-                        </div>
-                        <div class="timeline-item ok">
-                            <div class="timeline-time">05-17 09:30 · 3.9s</div>
-                            <div class="timeline-title">mfh fetch · cron</div>
-                            <div class="timeline-meta">seen 19 · saved 3 · skipped 16</div>
+
+                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--err);">
+                            <div class="row row--between mb-12">
+                                <span class="mono small strong">05-18 09:30</span>
+                                <span class="pill pill--err"><span class="pill__dot"></span>失败</span>
+                            </div>
+                            <div class="small muted">mfh fetch</div>
+                            <div class="mono small muted mt-12">IMAP 认证失败 · 检查授权码 · 0.3s</div>
                         </div>
                     </div>
 
-                    <hr class="hr-faint">
-                    <div style="display:flex; justify-content:space-between; align-items:center; font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.06em;">
-                        <span>累计抓取 <b style="color:var(--ink); font-weight:500">1,284</b> 封</span>
-                        <a href="#" style="color:var(--vermilion); text-decoration:underline; text-underline-offset:3px;">导出运行日志 →</a>
+                    <hr class="hairline">
+                    <div class="row row--between small mono muted">
+                        <span>累计抓取 <strong class="strong">1,284</strong> 封</span>
+                        <a href="#" style="color: var(--accent); text-decoration: underline;">导出日志</a>
                     </div>
                 </div>
             </div>
 
-            <hr class="hr-rule">
-
-            <!-- last batch table -->
-            <div>
-                <div style="display:flex; justify-content:space-between; align-items:end; margin-bottom:14px;">
-                    <div>
-                        <div class="h-section" style="margin-bottom:2px">本次抓取 · 邮件清单 <em>this batch</em></div>
-                        <div class="h-sub" style="margin:0">由 14:02 一次运行落下的 .eml 文件。点击行可在邮件清册中打开。</div>
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button class="btn btn-ghost btn-mono">导出 csv</button>
-                        <button class="btn btn-mono">交付下游 mfh run →</button>
+            <!-- Recent batch table -->
+            <div class="card" style="padding: 0; overflow: hidden;">
+                <div style="padding: 18px; border-bottom: 1px solid var(--border);">
+                    <div class="row row--between">
+                        <div>
+                            <h3 class="card__title" style="margin: 0 0 4px;">本次抓取邮件清单</h3>
+                            <p class="card__sub" style="margin: 0;">由 14:02 运行保存的 .eml 文件</p>
+                        </div>
+                        <div class="row gap-8">
+                            <button class="btn btn--sm">导出 CSV</button>
+                            <button class="btn btn--sm">交付下游 →</button>
+                        </div>
                     </div>
                 </div>
 
-                <table class="ledger">
-                    <thead>
-                        <tr>
-                            <th style="width:38px">#</th>
-                            <th style="width:140px">时间 · time</th>
-                            <th>主题 · subject</th>
-                            <th style="width:200px">发件人 · from</th>
-                            <th style="width:90px">附件</th>
-                            <th style="width:80px">正文链接</th>
-                            <th style="width:110px">状态</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr class="row-link">
-                            <td class="cell-faint">01</td>
-                            <td>2026-05-20 13:58</td>
-                            <td class="cell-cn">国家电网电子发票通知 · 户号 0210***318</td>
-                            <td class="cell-cn">国家电网 &lt;noreply@95598.cn&gt;</td>
-                            <td class="cell-num">1 PDF</td>
-                            <td class="cell-num">3</td>
-                            <td><span class="chip chip--ok">已落 eml</span></td>
-                        </tr>
-                        <tr class="row-link">
-                            <td class="cell-faint">02</td>
-                            <td>2026-05-20 12:12</td>
-                            <td class="cell-cn">【高德打车】您的发票已开具，请查收</td>
-                            <td class="cell-cn">高德地图 &lt;invoice@amap.com&gt;</td>
-                            <td class="cell-num">—</td>
-                            <td class="cell-num">2</td>
-                            <td><span class="chip chip--ok">已落 eml</span></td>
-                        </tr>
-                        <tr class="row-link">
-                            <td class="cell-faint">03</td>
-                            <td>2026-05-20 11:04</td>
-                            <td class="cell-cn">携程电子发票 - 行程 7DK33B</td>
-                            <td class="cell-cn">携程旅行 &lt;ticket@ctrip.com&gt;</td>
-                            <td class="cell-num">1 PDF</td>
-                            <td class="cell-num">1</td>
-                            <td><span class="chip chip--ok">已落 eml</span></td>
-                        </tr>
-                        <tr class="row-link">
-                            <td class="cell-faint">04</td>
-                            <td>2026-05-20 10:48</td>
-                            <td class="cell-cn">飞猪机票发票 PNR 4G7K2L</td>
-                            <td class="cell-cn">飞猪旅行 &lt;invoice@fliggy.com&gt;</td>
-                            <td class="cell-num">—</td>
-                            <td class="cell-num">4</td>
-                            <td><span class="chip chip--pend">待识别</span></td>
-                        </tr>
-                        <tr class="row-link">
-                            <td class="cell-faint">05</td>
-                            <td>2026-05-20 09:31</td>
-                            <td class="cell-cn">京东企业购 · 5 月汇总发票</td>
-                            <td class="cell-cn">京东 &lt;invoice@jd.com&gt;</td>
-                            <td class="cell-num">2 PDF</td>
-                            <td class="cell-num">1</td>
-                            <td><span class="chip chip--ok">已落 eml</span></td>
-                        </tr>
-                        <tr class="row-link">
-                            <td class="cell-faint">06</td>
-                            <td>2026-05-20 08:17</td>
-                            <td class="cell-cn">阿里云电子发票（合并 04 月）</td>
-                            <td class="cell-cn">阿里云 &lt;invoice@aliyun.com&gt;</td>
-                            <td class="cell-num">1 PDF</td>
-                            <td class="cell-num">2</td>
-                            <td><span class="chip chip--ok">已落 eml</span></td>
-                        </tr>
-                    </tbody>
-                </table>
+                <div class="table-wrap" style="border: 0; border-radius: 0;">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px;">#</th>
+                                <th style="width: 140px;">时间</th>
+                                <th>主题</th>
+                                <th style="width: 200px;">发件人</th>
+                                <th style="width: 80px;">附件</th>
+                                <th style="width: 70px;">链接</th>
+                                <th style="width: 100px;">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="faint">01</td>
+                                <td class="mono">05-20 13:58</td>
+                                <td>国家电网电子发票通知</td>
+                                <td class="small">国家电网</td>
+                                <td class="mono col-num">1 PDF</td>
+                                <td class="mono col-num">3</td>
+                                <td><span class="pill pill--ok">已保存</span></td>
+                            </tr>
+                            <tr>
+                                <td class="faint">02</td>
+                                <td class="mono">05-20 12:12</td>
+                                <td>高德打车发票已开具</td>
+                                <td class="small">高德地图</td>
+                                <td class="mono col-num">—</td>
+                                <td class="mono col-num">2</td>
+                                <td><span class="pill pill--ok">已保存</span></td>
+                            </tr>
+                            <tr>
+                                <td class="faint">03</td>
+                                <td class="mono">05-20 11:04</td>
+                                <td>携程电子发票 - 行程 7DK33B</td>
+                                <td class="small">携程旅行</td>
+                                <td class="mono col-num">1 PDF</td>
+                                <td class="mono col-num">1</td>
+                                <td><span class="pill pill--ok">已保存</span></td>
+                            </tr>
+                            <tr>
+                                <td class="faint">04</td>
+                                <td class="mono">05-20 10:48</td>
+                                <td>飞猪机票发票 PNR 4G7K2L</td>
+                                <td class="small">飞猪旅行</td>
+                                <td class="mono col-num">—</td>
+                                <td class="mono col-num">4</td>
+                                <td><span class="pill pill--warn">待识别</span></td>
+                            </tr>
+                            <tr>
+                                <td class="faint">05</td>
+                                <td class="mono">05-20 09:31</td>
+                                <td>京东企业购 5 月汇总发票</td>
+                                <td class="small">京东</td>
+                                <td class="mono col-num">2 PDF</td>
+                                <td class="mono col-num">1</td>
+                                <td><span class="pill pill--ok">已保存</span></td>
+                            </tr>
+                            <tr>
+                                <td class="faint">06</td>
+                                <td class="mono">05-20 08:17</td>
+                                <td>阿里云电子发票（合并 04 月）</td>
+                                <td class="small">阿里云</td>
+                                <td class="mono col-num">1 PDF</td>
+                                <td class="mono col-num">2</td>
+                                <td><span class="pill pill--ok">已保存</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
-
-        </section>
-
-        <footer class="colophon">
-            <span>Mail Fapiao Helper · 设计稿 v0.1</span>
-            <span>Set in Noto Serif SC · IBM Plex Mono</span>
-        </footer>
+        </div>
     </main>
 </div>
 
 <script src="../scripts/shell.js"></script>
 <script>
-    // segmented control
-    document.querySelectorAll('[data-seg] button').forEach(b => {
-        b.addEventListener('click', () => {
-            b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('is-active'));
-            b.classList.add('is-active');
-        });
-    });
+// Run simulation
+const runBtn = document.getElementById('run-btn');
+const progBar = document.getElementById('prog-bar');
+const matched = document.getElementById('m-matched');
+const saved = document.getElementById('m-saved');
+const skip = document.getElementById('m-skip');
+const status = document.getElementById('run-status');
+const consoleOut = document.getElementById('console-out');
 
-    // animate console + progress on click
-    const runBtn = document.getElementById('run-btn');
-    const progress = document.getElementById('progress');
-    const matched = document.getElementById('m-matched');
-    const saved = document.getElementById('m-saved');
-    const skip = document.getElementById('m-skip');
-    const cur = document.getElementById('m-cur');
-    const subjects = ['国家电网电子发票通知','【高德打车】您的发票已开具','携程电子发票','飞猪机票发票','京东企业购汇总','阿里云电子发票'];
+let running = false;
+runBtn?.addEventListener('click', () => {
+    if (running) return;
+    running = true;
+    runBtn.disabled = true;
 
-    let running = false;
-    runBtn.addEventListener('click', () => {
-        if (running) return;
-        running = true;
-        let pct = 0, m = 0, s = 0, k = 0;
-        const tick = setInterval(() => {
-            pct += 4 + Math.random() * 6;
-            m = Math.min(24, Math.floor(pct * 0.26));
-            s = Math.min(6, Math.floor(pct * 0.07));
-            k = Math.min(18, Math.floor(pct * 0.2));
-            progress.style.width = Math.min(100, pct) + '%';
-            matched.textContent = m;
-            saved.textContent = s;
-            skip.textContent = k;
-            cur.textContent = subjects[Math.min(subjects.length-1, Math.floor(pct / 18))];
-            if (pct >= 100) { clearInterval(tick); running = false; cur.textContent = '完成'; }
-        }, 220);
-    });
-    // initial show
-    setTimeout(() => { progress.style.width = '100%'; matched.textContent='24'; saved.textContent='6'; skip.textContent='18'; cur.textContent='完成'; }, 400);
+    let pct = 0;
+    const interval = setInterval(() => {
+        pct += 5 + Math.random() * 10;
+        if (pct > 100) pct = 100;
 
-    // keep console scrolled to bottom on load
-    const cons = document.getElementById('console');
-    cons.scrollTop = cons.scrollHeight;
+        progBar.style.setProperty('--p', pct + '%');
+        matched.textContent = Math.min(24, Math.floor(pct * 0.24));
+        saved.textContent = Math.min(6, Math.floor(pct * 0.06));
+        skip.textContent = Math.min(18, Math.floor(pct * 0.18));
+
+        if (pct >= 100) {
+            clearInterval(interval);
+            status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+            progBar.parentElement.classList.add('is-done');
+            running = false;
+            runBtn.disabled = false;
+
+            const line = document.createElement('div');
+            line.className = 'console__line';
+            line.innerHTML = '<span class="console__time">14:02:16</span><span class="console__tag ok">done</span><span class="console__msg">处理完成 · 24 封邮件 · 6 个新文件 · 5.8s</span>';
+            consoleOut.appendChild(line);
+            consoleOut.scrollTop = consoleOut.scrollHeight;
+        }
+    }, 200);
+});
+
+// Auto-scroll console
+if (consoleOut) {
+    consoleOut.scrollTop = consoleOut.scrollHeight;
+}
 </script>
 </body>
 </html>
