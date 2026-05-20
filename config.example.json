@@ -11,7 +11,9 @@
     "keywords": ["发票"],
     "matchSubject": true,
     "matchBody": true,
-    "sinceDays": 30
+    "sinceDays": 30,
+    "since": null,
+    "until": null
   },
   "output": {
     "dir": "./invoices",
