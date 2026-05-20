@@ -92,11 +92,162 @@
   - Priority 2: 第三方平台检测 (37% 覆盖率)
   - Priority 3: 直链提取器 (2% 覆盖率)
 
-## 下一步入口 (Phase 3)
+## Phase 3 — 附件提取器  [完成 2026-05-20]
 
-附件提取器实现:
-- 读取 `docs/SAMPLE_ANALYSIS.md` 了解附件型邮件特征
-- 实现 `src/extract/attachment.ts`: 从 .eml 提取 PDF 附件
-- 实现 `src/cmd/run.ts`: `mfh run` 子命令,遍历 `samples/raw/` 调用提取器
-- 产出 `invoices/<YYYY-MM>/<seller>-<amount>.pdf`
-- 更新 `invoices.csv` 记录提取结果
+- [x] `src/extract/types.ts`: 定义 `Extractor` 接口、`ExtractResult` 联合类型、`PdfArtifact` 结构、`Ctx` 上下文
+- [x] `src/extract/attachment.ts`: 附件提取器实现
+  - [x] 过滤 `contentType === 'application/pdf'` 或 `.pdf` 扩展名
+  - [x] ZIP 文件支持: 使用 `adm-zip` 解压并提取内部 PDF
+  - [x] 成功提取 62 封邮件 → 127 个 PDF (包含通行费发票 ZIP 场景)
+- [x] `src/extract/registry.ts`: 提取器注册表,顺序匹配 `canHandle()`
+- [x] `src/pipeline.ts`: 主处理流程
+  - [x] `processMail()`: 单封邮件处理 (提取 → 下载 → CSV → 状态提交)
+  - [x] 幂等性: `state.processedHashes` 去重
+  - [x] 失败降级: 无匹配或异常时写入 `pending/` 队列
+  - [x] `pending.csv` 记录 reason 字段 (no_extractor / extractor_name:error)
+- [x] `src/download/downloader.ts`: PDF 下载与冲突解决
+  - [x] Staging 目录: `.staging/<msgIdHash>/`
+  - [x] 冲突解决: 文件名重复时追加 `-1`, `-2` 后缀
+  - [x] 原子重命名: staging → 最终目录
+- [x] `src/index.ts`: 新增 `mfh run` 子命令
+  - [x] 递归遍历 `samples/raw/` 所有 `.eml` 文件
+  - [x] 调用 `processMail()` 处理每封邮件
+  - [x] `--config` / `--state` 参数支持
+- [x] `invoices/invoices.csv`: 成功提取记录 (messageId, date, from, subject, filename, source)
+- [x] `pending/pending.csv`: 待处理队列 (messageId, date, from, subject, reason)
+- [x] 端到端验证: 62/105 邮件成功提取 (59% 覆盖率)
+
+## Phase 4 — 直链提取器  [完成 2026-05-20]
+
+- [x] `src/extract/directLink.ts`: 直链提取器实现
+  - [x] `extractLinksFromHtml()`: 从 HTML 提取 `href` 属性
+  - [x] `extractLinksFromText()`: 从纯文本提取 URL (正则 `https?://...`)
+  - [x] `isPdfUrl()`: 检查 URL 路径是否以 `.pdf` 结尾
+  - [x] `probePdfContentType()`: HEAD 请求检查 `Content-Type: application/pdf`
+  - [x] `downloadPdf()`: 下载 PDF 二进制数据
+  - [x] `suggestFilename()`: 从 URL 路径提取文件名
+  - [x] 成功提取 16 封邮件 → 16 个 PDF
+- [x] 更新 `src/extract/registry.ts`: 添加 `directLinkExtractor`
+- [x] 端到端验证: 16/105 邮件成功提取 (15% 覆盖率)
+
+## Phase 3 & 4 总结  [2026-05-20]
+
+**总体覆盖率**: 78/105 邮件 (74%), 143 个 PDF 成功提取
+
+**提取结果分布**:
+- Attachment Extractor: 62 邮件 → 127 PDFs
+- Direct Link Extractor: 16 邮件 → 16 PDFs
+- Pending Queue: 27 邮件待处理
+
+**Pending 队列分析** (27 封邮件):
+1. 诺诺网 (Nuonuo): 12 封 - `directLink:no_pdf_links`
+2. 兴业银行信用卡: 2 封 - `directLink:no_pdf_links`
+3. 建设银行信用卡: 2 封 - `directLink:no_pdf_links`
+4. 百望云 (Baiwang): 2 封 - `directLink:no_pdf_links`
+5. 平安产险: 2 封 - `directLink:no_pdf_links`
+6. 12306: 2 封 - `directLink:no_pdf_links`
+7. JD.com: 2 封 - `directLink:download_failed` (链接过期)
+8. 其他: 3 封 (阿里发票平台, no_extractor)
+
+**重要发现**:
+- 通行费发票 (service@invoice.txffp.com) 已全部成功提取,通过 attachment extractor 的 ZIP 处理逻辑
+- 所有通行费发票在 `invoices.csv` 中,不在 pending 队列
+
+**Git 提交**: 
+- Commit: `06ecb3b`
+- Message: "feat(extract): Phase 3 & 4 - attachment + directLink extractors"
+
+## Phase 5 — 第三方站点处理器: 诺诺网  [完成 2026-05-20]
+
+- [x] `src/sites/types.ts`: `SiteHandler` 签名对齐架构 (`Page`, `url`, `ctx`)
+- [x] `src/sites/nuonuo.ts`: 诺诺网 handler
+  - [x] 匹配 `nnfp.jss.com.cn` / `nnfp.nuonuo.com`
+  - [x] 短链解析到 `scan-invoice/printQrcode`
+  - [x] 调用 `/scan2/getIvcDetailShow.do` 获取 PDF URL
+  - [x] 下载 PDF,按发票号码建议文件名
+- [x] `src/sites/registry.ts`: 站点注册表,数组 `push`
+- [x] `src/extract/thirdParty.ts`: 第三方链接调度 SiteHandler
+- [x] `src/extract/directLink.ts`: 已知 SiteHandler 链接让位给 thirdParty
+- [x] `src/index.ts` / `src/pipeline.ts`: `ctx.browser()` 懒启动,CLI 退出统一关闭
+- [x] `mfh run --only-mail <msgIdHash>`: 支持对已处理样本定向回归
+- [x] 代表样本验证:
+  - `samples/by-type/nuonuo/nuonuo-01.eml` → `26312000001898721121.pdf`
+  - `samples/by-type/nuonuo/nuonuo-02.eml` → `26312000001833364216.pdf`
+
+## Phase 5 验证记录  [2026-05-20]
+
+- `npm run typecheck` → 0 errors
+- `npm run build` → 0 errors
+- `node dist/index.js --help` → exit 0
+- `node dist/index.js run --help` → exit 0,列出 `--only-mail`
+- `node dist/index.js run --config /tmp/mfh-nuonuo-config.json --state /tmp/mfh-nuonuo-state.json --only-mail 53a93fd33bea`
+  - Matched extractor: `thirdParty`
+  - 输出 `/tmp/mfh-nuonuo-invoices/26312000001898721121.pdf`
+  - `invoices.csv` 写入 1 行
+
+## Phase 5 — 第三方站点处理器: 淘宝 / 京东 / 客如云  [完成 2026-05-20]
+
+- [x] `src/sites/common.ts`: 站点 handler 共享的链接清理、HTTP 下载、ZIP 取 PDF、文件名清理
+- [x] `src/sites/taobao.ts`: 阿里发票平台邮件下载 ZIP 并提取 PDF
+- [x] `src/sites/jd.ts`: 京东邮件中的 jdcloud-oss PDF 下载
+- [x] `src/sites/keruyun.ts`: 客如云短链跳转 PDF 下载
+- [x] `src/sites/registry.ts`: 追加 3 个 handler,继续数组 `push`
+- [x] `src/extract/directLink.ts` / `src/extract/thirdParty.ts`: 链接归一化 (`&amp;`, `&nbsp;`) 并支持 HTML 正文里的裸 URL
+
+## Phase 5 三站点验证记录  [2026-05-20]
+
+- `npm run typecheck` → 0 errors
+- `npm run build` → 0 errors
+- `node dist/index.js run --config /tmp/mfh-three-sites-config.json --state /tmp/mfh-three-sites-state.json --only-mail c596dd61ac4e`
+  - Matched extractor: `thirdParty`
+  - 输出 `_26322000001682871661_洛洛小仙2018.pdf`
+- `node dist/index.js run --config /tmp/mfh-three-sites-config.json --state /tmp/mfh-three-sites-state.json --only-mail c5775ba27e3b`
+  - Matched extractor: `thirdParty`
+  - 输出 `digital_26317000001678029323.pdf`
+- `node dist/index.js run --config /tmp/mfh-three-sites-config.json --state /tmp/mfh-three-sites-state.json --only-mail c62f80fa6cd5`
+  - Matched extractor: `thirdParty`
+  - 输出 `keruyun-invoice.pdf`
+- `file /tmp/mfh-three-sites-invoices/*.pdf` → 3 个文件均为 `PDF document, version 1.7, 1 pages`
+
+## Phase 5 — 剩余第三方站点处理器  [完成 2026-05-20]
+
+- [x] `src/sites/baiwang.ts`: 百望云 `previewInvoiceAllEle` 链接转 PDF 下载接口
+- [x] `src/sites/pingan.ts`: 平安产险邮件入口解析 `invoiceUrl` / `q` token 后下载 PDF
+- [x] `src/sites/taxPreview.ts`: `fp.zjaphp.com` 税控预览页转下载 PDF
+- [x] `src/sites/nuonuo.ts`: 修正二维码图片辅助链接误命中,所有诺诺样本恢复自动下载
+- [x] `src/extract/directLink.ts` / `src/extract/thirdParty.ts`: 单封邮件内按 PDF 内容去重;正文裸链接不把单引号当作 URL 一部分
+- [x] `src/sites/registry.ts`: 继续显式 import + `handlers.push(...)`,无自动发现
+
+## Phase 5 剩余站点验证记录  [2026-05-20]
+
+- `npm run typecheck` → 0 errors
+- `npm run build` → 0 errors
+- `node dist/index.js --help` → exit 0
+- `node dist/index.js run --help` → exit 0,列出 `--only-mail`
+- 代表样本验证:
+  - 百望云 `175ea52ebc88` → `dzfp_26317000000960428781_浙江捷发科技股份有限公司_20260411213227.pdf`
+  - 百望云 `78797027a322` → `dzfp_26332000003640263706_浙江捷发科技股份有限公司_20260501192129.pdf`
+  - 平安产险 `35ab84975a48` → `26337000000454161517.pdf` (去重后 1 PDF)
+  - 平安产险 `891b3e1bc8e8` → `26337000000454161518.pdf` (去重后 1 PDF)
+  - 税控预览 `f3c5191f7657` → `26932000000654893236.pdf`
+  - 诺诺网 `53a93fd33bea` → `26312000001898721121.pdf`
+- 全量样本回归: `node dist/index.js run --config /tmp/mfh-final-pass-config.json --state /tmp/mfh-final-pass-state.json`
+  - `Run complete: processed=105, skipped=0`
+  - 输出 PDF: 166 个
+  - Pending: 6 封,均为兴业/建行信用卡账单或 12306 支付/改签通知,无可样本驱动开发的发票第三方站点
+
+## Phase 5.1 — 非发票邮件排除  [完成 2026-05-20]
+
+- [x] `src/mail/exclude.ts`: 识别并排除非发票邮件
+  - [x] 信用卡电子账单: 标题同时包含 `信用卡` 和 `电子账单`
+  - [x] 12306 支付通知: `网上购票系统-用户支付通知`
+  - [x] 12306 改签通知: `网上购票系统-用户改签通知`
+- [x] `src/mail/fetcher.ts`: fetch 阶段不再保存上述非发票邮件到 `samples/raw`
+- [x] `src/index.ts`: run 阶段对既有样本同样排除,标记 processed,不写 pending
+- [x] 12306 `网上购票系统-电子发票通知` 明确不在排除规则内;当前样本库没有该类型真实 `.eml`,等待样本后按架构新增支持
+
+## Phase 5 当前结论
+
+- 第三方站点样本已全部完成自动处理。
+- 信用卡账单与 12306 支付/改签通知已从 fetch/run 排除,不再进入 manual。
+- 全量样本回归: `Run complete: processed=105, skipped=0`,输出 PDF 166 个,`pending/` 为空。

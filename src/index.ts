@@ -2,8 +2,10 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { simpleParser } from 'mailparser';
+import { chromium, type Browser } from 'playwright';
 import { loadConfig, type Config } from './config.js';
 import { fetchMails, type RawMail } from './mail/fetcher.js';
+import { nonInvoiceReason } from './mail/exclude.js';
 import { log } from './log.js';
 import { loadState, saveState, type State } from './state.js';
 import { msgIdHash } from './util/hash.js';
@@ -259,24 +261,28 @@ Usage:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --state <path>       Path to state.json         (default: ./state.json)
+  --only-mail <hash>   Process one msgIdHash, even if already processed
   -h, --help           Show this help
 `;
 
 interface RunOpts {
   configPath: string;
   statePath: string;
+  onlyMail: string | undefined;
 }
 
 function parseRunArgs(argv: string[]): RunOpts | 'help' {
   const opts: RunOpts = {
     configPath: './config.json',
     statePath: './state.json',
+    onlyMail: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--state') { opts.statePath = requireValue(argv, ++i, a); continue; }
+    if (a === '--only-mail') { opts.onlyMail = requireValue(argv, ++i, a); continue; }
     throw new Error(`unknown option: ${a}`);
   }
   return opts;
@@ -320,6 +326,16 @@ async function cmdRun(argv: string[]): Promise<number> {
   const state: State = loadState(statePath);
 
   const saveStateFn = () => saveState(statePath, state);
+  let browserInstance: Browser | undefined;
+  const getBrowser = async (): Promise<Browser> => {
+    if (!browserInstance) {
+      browserInstance = await chromium.launch({
+        headless: cfg.playwright.headless,
+        timeout: cfg.playwright.timeoutMs,
+      });
+    }
+    return browserInstance;
+  };
 
   log.info('Starting run...');
 
@@ -339,17 +355,37 @@ async function cmdRun(argv: string[]): Promise<number> {
         mail.subject ?? '',
       );
 
-      if (state.processedHashes.includes(hash)) {
+      if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
+        continue;
+      }
+
+      const excludeReason = nonInvoiceReason({
+        from: mail.from?.text ?? '',
+        subject: mail.subject ?? '',
+      });
+      if (excludeReason) {
+        log.info(`Excluded ${hash}: ${excludeReason}`);
+        processed++;
+        if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
+        saveState(statePath, state);
+        continue;
+      }
+
+      if (opts.onlyMail === undefined && state.processedHashes.includes(hash)) {
         skipped++;
         continue;
       }
 
-      await processMail(mail, cfg, log, state, saveStateFn);
+      await processMail(mail, cfg, log, state, saveStateFn, getBrowser, { force: opts.onlyMail !== undefined });
       processed++;
     }
   } catch (e) {
     log.error(`run aborted: ${(e as Error).message}`);
     return 1;
+  } finally {
+    if (browserInstance) {
+      await browserInstance.close();
+    }
   }
 
   log.info(`Run complete: processed=${processed}, skipped=${skipped}`);

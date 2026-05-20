@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ParsedMail } from 'mailparser';
+import type { Browser } from 'playwright';
 import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import type { State } from './state.js';
@@ -77,7 +78,9 @@ export async function processMail(
   cfg: Config,
   log: Logger,
   state: State,
-  saveState: () => void
+  saveState: () => void,
+  browser: () => Promise<Browser>,
+  opts: { force?: boolean } = {},
 ): Promise<void> {
   const hash = msgIdHashFn(
     mail.messageId ?? undefined,
@@ -87,7 +90,7 @@ export async function processMail(
   );
   const messageId = mail.messageId || hash;
 
-  if (state.processedHashes.includes(hash)) {
+  if (!opts.force && state.processedHashes.includes(hash)) {
     log.debug(`Skip already processed ${hash}`);
     return;
   }
@@ -95,9 +98,7 @@ export async function processMail(
   const ctx: Ctx = {
     cfg,
     log,
-    browser: async () => {
-      throw new Error('Playwright not implemented in Phase 3');
-    },
+    browser,
     http: fetch,
   };
 
@@ -113,7 +114,7 @@ export async function processMail(
     log.info(`No extractor matched ${hash}, -> manual`);
     writePendingEml(mail, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, 'no_extractor');
-    state.processedHashes.push(hash);
+    if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
     return;
   }
@@ -128,14 +129,14 @@ export async function processMail(
     log.warn(`Extractor failed for ${hash}: ${reason}`);
     writePendingEml(mail, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, reason);
-    state.processedHashes.push(hash);
+    if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
     return;
   }
 
   if (result.kind === 'skip') {
     log.info(`Skipped ${hash}`);
-    state.processedHashes.push(hash);
+    if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
     return;
   }
@@ -144,7 +145,7 @@ export async function processMail(
     log.info(`Manual ${hash}: ${result.reason}`);
     writePendingEml(mail, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, result.reason);
-    state.processedHashes.push(hash);
+    if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
     return;
   }
@@ -168,6 +169,6 @@ export async function processMail(
   }
 
   log.info(`Processed ${hash}: ${downloads.length} PDFs`);
-  state.processedHashes.push(hash);
+  if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
   saveState();
 }
