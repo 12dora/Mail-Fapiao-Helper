@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>配置 · 发票助手</title>
+    <link rel="stylesheet" href="../styles/main.css">
+</head>
+<body data-page="config">
+<div class="app">
+    <div id="app-shell"></div>
+
+    <main class="main">
+        <header class="masthead">
+            <div>
+                <div class="masthead-eyebrow">No. 05 · Configuration</div>
+                <h1 class="masthead-title">配置 <em>/ config.json</em></h1>
+                <p class="masthead-sub">所有字段直接对应 <code style="font-family:var(--f-mono)">config.json</code>。保存即写入磁盘，下次 mfh 调用自动读取。建议为该文件设置 <code style="font-family:var(--f-mono)">chmod 600</code>。</p>
+            </div>
+            <div class="masthead-meta">
+                <div>文件 <b>./config.json</b></div>
+                <div>权限 <b>0600</b></div>
+                <div>修改时间 <b>14:01 今日</b></div>
+            </div>
+        </header>
+
+        <div class="dateline">
+            <span>章节 · <b>IMAP · 过滤 · 输出 · 重命名 · OCR · LLM · Playwright</b></span>
+            <span><span style="color:var(--celadon-d)">●</span> 已保存 · 校验通过</span>
+        </div>
+
+        <section class="content">
+
+            <div style="display:grid; grid-template-columns: 220px 1fr; gap:48px;">
+
+                <!-- left index -->
+                <aside style="position:sticky; top:24px; align-self:start;">
+                    <div style="font-family:var(--f-mono); font-size:10px; letter-spacing:0.24em; text-transform:uppercase; color:var(--ink-mute); margin-bottom:14px;">章节索引</div>
+                    <ul style="list-style:none; padding:0; font-family:var(--f-display); font-size:14.5px; line-height:1.9;">
+                        <li><a href="#imap"     style="color:var(--vermilion); border-left:2px solid var(--vermilion); padding-left:10px; display:block;">§1 IMAP 连接</a></li>
+                        <li><a href="#filter"   style="color:var(--ink-soft); padding-left:12px; display:block;">§2 过滤条件</a></li>
+                        <li><a href="#output"   style="color:var(--ink-soft); padding-left:12px; display:block;">§3 输出目录</a></li>
+                        <li><a href="#rename"   style="color:var(--ink-soft); padding-left:12px; display:block;">§4 命名规则</a></li>
+                        <li><a href="#ocr"      style="color:var(--ink-soft); padding-left:12px; display:block;">§5 OCR 提供商</a></li>
+                        <li><a href="#llm"      style="color:var(--ink-soft); padding-left:12px; display:block;">§6 LLM 兜底</a></li>
+                        <li><a href="#playwright" style="color:var(--ink-soft); padding-left:12px; display:block;">§7 Playwright</a></li>
+                    </ul>
+
+                    <hr class="hr-faint">
+
+                    <button class="btn btn-primary" style="width:100%; justify-content:center;">保存配置</button>
+                    <button class="btn btn-ghost btn-mono" style="width:100%; justify-content:center; margin-top:8px;">测试 IMAP 连接</button>
+                    <button class="btn btn-ghost btn-mono" style="width:100%; justify-content:center; margin-top:8px;">导出 config.json</button>
+                </aside>
+
+                <!-- right form -->
+                <div class="stack-lg">
+
+                    <!-- §1 IMAP -->
+                    <section id="imap">
+                        <div class="h-section">§1 · IMAP 连接 <em>imap</em></div>
+                        <div class="h-sub">仅支持 TLS。建议使用应用专用密码或授权码，而非邮箱主密码。</div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">主机 · host <span class="label-hint">e.g. imap.exmail.qq.com</span></label>
+                                <input class="input" value="imap.exmail.qq.com">
+                            </div>
+                            <div class="field">
+                                <label class="label">端口 · port</label>
+                                <input class="input" value="993">
+                            </div>
+                        </div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">账号 · user</label>
+                                <input class="input" value="me@example.com">
+                            </div>
+                            <div class="field">
+                                <label class="label">密码 · pass <span class="label-hint">本地存储 · 不上传</span></label>
+                                <input class="input" type="password" value="••••••••••••••••">
+                            </div>
+                        </div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">收件箱 · mailbox</label>
+                                <input class="input" value="INBOX">
+                            </div>
+                            <div class="field">
+                                <label class="label">TLS</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:13px">启用（强制）</span></label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §2 filter -->
+                    <section id="filter">
+                        <div class="h-section">§2 · 过滤条件 <em>filter</em></div>
+                        <div class="h-sub">用于 IMAP SEARCH。多个关键词以 OR 组合；主题与正文可独立开启。</div>
+
+                        <div class="field">
+                            <label class="label">关键词 · keywords <span class="label-hint">用逗号分隔，OR 关系</span></label>
+                            <input class="input input--cn" value="发票, 票据, invoice, 电子发票">
+                        </div>
+
+                        <div class="field-row-3">
+                            <div class="field">
+                                <label class="label">回溯天数 · sinceDays</label>
+                                <input class="input" value="30">
+                                <div class="help">SINCE N days · 0 表示全部</div>
+                            </div>
+                            <div class="field">
+                                <label class="label">匹配主题</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:13px">SUBJECT</span></label>
+                            </div>
+                            <div class="field">
+                                <label class="label">匹配正文</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:13px">BODY</span></label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §3 output -->
+                    <section id="output">
+                        <div class="h-section">§3 · 输出目录 <em>output</em></div>
+                        <div class="h-sub">已归档的 PDF、未识别的 .eml、清册 CSV 各自的落地路径。支持相对或绝对路径。</div>
+
+                        <div class="field">
+                            <label class="label">归档目录 · dir</label>
+                            <input class="input" value="./invoices">
+                        </div>
+                        <div class="field">
+                            <label class="label">待人工目录 · pendingDir</label>
+                            <input class="input" value="./pending">
+                        </div>
+                        <div class="field">
+                            <label class="label">清册 · csv <span class="label-hint">UTF-8 BOM · Excel 友好</span></label>
+                            <input class="input" value="./invoices.csv">
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §4 rename -->
+                    <section id="rename">
+                        <div class="h-section">§4 · 命名规则 <em>rename</em></div>
+                        <div class="h-sub">支持占位符 <code style="font-family:var(--f-mono); font-size:12px;">{seller} {amount} {date} {invoiceNo} {messageId}</code>。字段缺失会自动回退到 fallback 模板。</div>
+
+                        <div class="field">
+                            <label class="label">主规则 · rule</label>
+                            <input class="input" value="{seller}-{amount}.pdf">
+                            <div class="help">示例 · 阿里云-3418.20.pdf</div>
+                        </div>
+                        <div class="field">
+                            <label class="label">回退 · fallback</label>
+                            <input class="input" value="{date}-{messageId}.pdf">
+                            <div class="help">示例 · 2026-05-20-a91f0e2c.pdf</div>
+                        </div>
+
+                        <div style="background:rgba(110,135,103,0.08); border:1px solid var(--celadon-d); padding:14px 16px; margin-top:8px;">
+                            <div style="font-family:var(--f-mono); font-size:10.5px; letter-spacing:0.18em; text-transform:uppercase; color:var(--celadon-d); margin-bottom:4px;">实时预览</div>
+                            <div style="font-family:var(--f-mono); font-size:14px; color:var(--ink);">国家电网-318.42.pdf</div>
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §5 ocr -->
+                    <section id="ocr">
+                        <div class="h-section">§5 · OCR 提供商 <em>ocr</em></div>
+                        <div class="h-sub">用于从 PDF 解析销售方、金额、票号、日期。未启用时所有发票走 fallback 命名。</div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">启用 OCR</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:13px">enabled</span></label>
+                            </div>
+                            <div class="field">
+                                <label class="label">提供商 · provider</label>
+                                <select class="select">
+                                    <option>百度智能云 · 票据 OCR</option>
+                                    <option>阿里云 · 印刷文字识别</option>
+                                    <option>腾讯云 · 通用印刷体识别</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">API Key</label>
+                                <input class="input" type="password" value="••••••••••••••••">
+                            </div>
+                            <div class="field">
+                                <label class="label">Secret Key</label>
+                                <input class="input" type="password" value="••••••••••••••••••••">
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §6 llm -->
+                    <section id="llm">
+                        <div class="h-section">§6 · LLM 兜底 <em>llm</em></div>
+                        <div class="h-sub">仅当四个标准提取器都未命中时启用。把正文 + 链接列表交给 LLM 判断 "直链 / 跳转 / 都不是"。</div>
+
+                        <div class="field-row-3">
+                            <div class="field">
+                                <label class="label">启用</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox"><span class="check-box"></span><span style="font-size:13px">enabled</span></label>
+                            </div>
+                            <div class="field">
+                                <label class="label">提供商</label>
+                                <select class="select">
+                                    <option>Anthropic</option>
+                                    <option>OpenAI</option>
+                                </select>
+                            </div>
+                            <div class="field">
+                                <label class="label">模型</label>
+                                <input class="input" value="claude-haiku-4-5">
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <label class="label">API Key</label>
+                            <input class="input" type="password" value="">
+                        </div>
+                    </section>
+
+                    <hr class="hr-faint">
+
+                    <!-- §7 playwright -->
+                    <section id="playwright">
+                        <div class="h-section">§7 · Playwright <em>playwright</em></div>
+                        <div class="h-sub">用于第三方开票站点。首次使用前请运行 <code style="font-family:var(--f-mono)">npx playwright install chromium</code>。</div>
+
+                        <div class="field-row">
+                            <div class="field">
+                                <label class="label">无头模式 · headless</label>
+                                <label class="check" style="padding-top:8px;"><input type="checkbox" checked><span class="check-box"></span><span style="font-size:13px">enabled</span></label>
+                            </div>
+                            <div class="field">
+                                <label class="label">超时 · timeoutMs</label>
+                                <input class="input" value="30000">
+                            </div>
+                        </div>
+                    </section>
+
+                    <hr class="hr-rule">
+
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding: 0 0 24px;">
+                        <div style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.06em;">
+                            修改尚未保存的字段 · <b style="color:var(--vermilion); font-weight:500">3 项</b>
+                        </div>
+                        <div style="display:flex; gap:10px;">
+                            <button class="btn btn-ghost">放弃修改</button>
+                            <button class="btn btn-primary">保存并应用</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+        <footer class="colophon">
+            <span>05 · Configuration</span>
+            <span>chmod 600 ./config.json</span>
+        </footer>
+    </main>
+</div>
+
+<script src="../scripts/shell.js"></script>
+</body>
+</html>

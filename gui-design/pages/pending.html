@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>待人工处理 · 发票助手</title>
+    <link rel="stylesheet" href="../styles/main.css">
+</head>
+<body data-page="pending">
+<div class="app">
+    <div id="app-shell"></div>
+
+    <main class="main">
+        <header class="masthead">
+            <div>
+                <div class="masthead-eyebrow">No. 04 · Manual Queue</div>
+                <h1 class="masthead-title">待人工处理 <em>/ pending</em></h1>
+                <p class="masthead-sub">由四个提取器（attachment / directLink / thirdParty / llm）均未命中，或第三方站点 handler 抛错的邮件。原始 .eml 已保留在 <code style="font-family:var(--f-mono)">pending/</code>，原因写在 <code style="font-family:var(--f-mono)">pending.csv</code>。</p>
+            </div>
+            <div class="masthead-meta">
+                <div>队列 <b>6</b> 封</div>
+                <div>本周新增 <b>+2</b></div>
+                <div>最久 <b>9 天前</b></div>
+            </div>
+        </header>
+
+        <div class="dateline">
+            <span>路径 · <b>./pending/</b> · pending.csv</span>
+            <span>规则 · 失败永远降级为 manual · 主循环不阻塞</span>
+        </div>
+
+        <section class="content">
+
+            <!-- attention banner -->
+            <div class="banner" style="margin-bottom:28px;">
+                <div class="chop chop--sm" style="transform:rotate(-6deg)">待</div>
+                <div>
+                    <b>有 2 封邮件需要尽快处理</b>
+                    <div style="font-size:12.5px; color:var(--ink-soft); margin-top:2px;">来自「vendor-x」的两张发票均要求登录开票平台下载；当前未为该 vendor 注册 SiteHandler。</div>
+                    <small>建议：手动下载后置入 invoices/，或在 src/sites/ 下新增 handler 实现自动化。</small>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn btn-ghost btn-mono">忽略</button>
+                    <button class="btn btn-primary btn-mono">手动归档</button>
+                </div>
+            </div>
+
+            <!-- reason buckets -->
+            <div class="grid-3" style="margin-bottom:28px;">
+                <div class="panel">
+                    <span class="panel-tag">原因 · <b>需登录</b></span>
+                    <div style="margin-top:6px;">
+                        <div style="font-family:var(--f-display); font-size:36px; font-weight:600; line-height:1; color:var(--vermilion); letter-spacing:-0.02em;">2</div>
+                        <div style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.14em; text-transform:uppercase; margin-top:6px;">requires login</div>
+                        <p style="margin-top:10px; font-size:13px; color:var(--ink-soft); line-height:1.5;">第三方开票平台要求登录后才能下载 PDF，凭证管理不在 v1 范围。</p>
+                    </div>
+                </div>
+                <div class="panel">
+                    <span class="panel-tag">原因 · <b>vendor 未注册</b></span>
+                    <div style="margin-top:6px;">
+                        <div style="font-family:var(--f-display); font-size:36px; font-weight:600; line-height:1; color:var(--amber); letter-spacing:-0.02em;">3</div>
+                        <div style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.14em; text-transform:uppercase; margin-top:6px;">no handler</div>
+                        <p style="margin-top:10px; font-size:13px; color:var(--ink-soft); line-height:1.5;">正文链接指向陌生开票站点。覆盖率不足 5% 时直接走 manual。</p>
+                    </div>
+                </div>
+                <div class="panel">
+                    <span class="panel-tag">原因 · <b>解析失败</b></span>
+                    <div style="margin-top:6px;">
+                        <div style="font-family:var(--f-display); font-size:36px; font-weight:600; line-height:1; color:var(--ink-mute); letter-spacing:-0.02em;">1</div>
+                        <div style="font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.14em; text-transform:uppercase; margin-top:6px;">parse error</div>
+                        <p style="margin-top:10px; font-size:13px; color:var(--ink-soft); line-height:1.5;">mailparser 无法解析；可能是损坏的 MIME 结构或非标准编码。</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- filter bar -->
+            <div class="filterbar">
+                <div class="seg" data-seg>
+                    <button class="is-active">全部 · 6</button>
+                    <button>需登录 · 2</button>
+                    <button>vendor 未注册 · 3</button>
+                    <button>解析失败 · 1</button>
+                </div>
+                <div style="flex:1"></div>
+                <button class="btn btn-ghost btn-mono">导出 .eml zip</button>
+                <button class="btn btn-mono">全部标记为已处理</button>
+            </div>
+
+            <!-- pending entries: card-style for human attention -->
+            <div class="stack-md">
+
+                <!-- entry -->
+                <div class="panel" style="display:grid; grid-template-columns: 80px 1fr auto; gap:22px; align-items:start;">
+                    <div class="chop">需<br>登录</div>
+                    <div>
+                        <div style="display:flex; gap:8px; align-items:baseline; margin-bottom:2px;">
+                            <span class="chip chip--err">requires_login</span>
+                            <span class="chip chip--mute">thirdParty: vendor-x</span>
+                            <span style="font-family:var(--f-mono); font-size:11px; color:var(--ink-faint); letter-spacing:0.06em;">msgIdHash <b style="color:var(--ink); font-weight:500">5f0a91c4d2b3</b></span>
+                        </div>
+                        <div style="font-family:var(--f-display); font-size:18px; font-weight:600; line-height:1.3;">您的发票已开具，点击链接下载（需要登录）</div>
+                        <div style="font-family:var(--f-mono); font-size:12px; color:var(--ink-mute); margin-top:4px;">
+                            from · <span style="font-family:var(--f-sans); color:var(--ink-soft)">noreply@vendor-x.cn</span> ·
+                            2026-05-19 22:04 ·
+                            <a href="#" style="color:var(--vermilion); text-decoration:underline; text-underline-offset:2px;">打开 .eml</a>
+                        </div>
+                        <div style="margin-top:10px; padding:10px 12px; background:rgba(0,0,0,0.04); border-left:2px solid var(--vermilion); font-family:var(--f-mono); font-size:11.5px; color:var(--ink-soft);">
+                            正文链接 ×5 · 其中 1 个需登录态 cookie 才能返回 PDF · SiteHandler.handle 抛 NavigationTimeoutError
+                        </div>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button class="btn btn-primary btn-mono">手动归档</button>
+                        <button class="btn btn-ghost btn-mono">复制链接</button>
+                        <button class="btn btn-ghost btn-mono">忽略</button>
+                    </div>
+                </div>
+
+                <div class="panel" style="display:grid; grid-template-columns: 80px 1fr auto; gap:22px; align-items:start;">
+                    <div class="chop" style="background:var(--amber); box-shadow:1px 1px 0 #8a5a1d;">未<br>注册</div>
+                    <div>
+                        <div style="display:flex; gap:8px; align-items:baseline; margin-bottom:2px;">
+                            <span class="chip chip--pend">no_handler</span>
+                            <span class="chip chip--mute">thirdParty: baiwang</span>
+                            <span style="font-family:var(--f-mono); font-size:11px; color:var(--ink-faint); letter-spacing:0.06em;">msgIdHash <b style="color:var(--ink); font-weight:500">b8e90c12fae1</b></span>
+                        </div>
+                        <div style="font-family:var(--f-display); font-size:18px; font-weight:600; line-height:1.3;">您的电子发票已开具 · 请点击查看 PDF</div>
+                        <div style="font-family:var(--f-mono); font-size:12px; color:var(--ink-mute); margin-top:4px;">
+                            from · <span style="font-family:var(--f-sans); color:var(--ink-soft)">no-reply@baiwang.com</span> ·
+                            2026-05-19 11:58 ·
+                            <a href="#" style="color:var(--vermilion); text-decoration:underline; text-underline-offset:2px;">打开 .eml</a>
+                        </div>
+                        <div style="margin-top:10px; padding:10px 12px; background:rgba(0,0,0,0.04); border-left:2px solid var(--amber); font-family:var(--f-mono); font-size:11.5px; color:var(--ink-soft);">
+                            目标 host = <b>fapiao.baiwang.com</b> · 无匹配 SiteHandler · 累计 3 封邮件可能值得为该 vendor 写一个 handler
+                        </div>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button class="btn btn-primary btn-mono">手动归档</button>
+                        <button class="btn btn-ghost btn-mono">新建 handler</button>
+                        <button class="btn btn-ghost btn-mono">忽略</button>
+                    </div>
+                </div>
+
+                <div class="panel" style="display:grid; grid-template-columns: 80px 1fr auto; gap:22px; align-items:start;">
+                    <div class="chop" style="background:var(--ink); box-shadow:1px 1px 0 #000;">解析<br>失败</div>
+                    <div>
+                        <div style="display:flex; gap:8px; align-items:baseline; margin-bottom:2px;">
+                            <span class="chip chip--err">parse_error</span>
+                            <span class="chip chip--mute">extractor: ∅</span>
+                            <span style="font-family:var(--f-mono); font-size:11px; color:var(--ink-faint); letter-spacing:0.06em;">msgIdHash <b style="color:var(--ink); font-weight:500">a91f0e2c9b13</b></span>
+                        </div>
+                        <div style="font-family:var(--f-display); font-size:18px; font-weight:600; line-height:1.3;">=?gb2312?B?u9i4tDog18LJ59PFu9i48bb...?=</div>
+                        <div style="font-family:var(--f-mono); font-size:12px; color:var(--ink-mute); margin-top:4px;">
+                            from · <span style="font-family:var(--f-sans); color:var(--ink-soft)">??? · header malformed</span> ·
+                            2026-05-12 03:11 ·
+                            <a href="#" style="color:var(--vermilion); text-decoration:underline; text-underline-offset:2px;">打开 .eml</a>
+                        </div>
+                        <div style="margin-top:10px; padding:10px 12px; background:rgba(0,0,0,0.04); border-left:2px solid var(--ink); font-family:var(--f-mono); font-size:11.5px; color:var(--ink-soft);">
+                            mailparser: Invalid Content-Type structure · 跳过自动解析 · 用户可手动打开原文确认
+                        </div>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:8px;">
+                        <button class="btn btn-primary btn-mono">手动归档</button>
+                        <button class="btn btn-ghost btn-mono">原始 hex</button>
+                        <button class="btn btn-ghost btn-mono">删除</button>
+                    </div>
+                </div>
+
+            </div>
+
+        </section>
+
+        <footer class="colophon">
+            <span>04 · Manual Queue</span>
+            <span>pending/*.eml + pending.csv</span>
+        </footer>
+    </main>
+</div>
+
+<script src="../scripts/shell.js"></script>
+<script>
+    document.querySelectorAll('[data-seg] button').forEach(b => {
+        b.addEventListener('click', () => {
+            b.parentElement.querySelectorAll('button').forEach(x => x.classList.remove('is-active'));
+            b.classList.add('is-active');
+        });
+    });
+</script>
+</body>
+</html>
