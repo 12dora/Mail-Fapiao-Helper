@@ -35,8 +35,20 @@
 - [x] `config.filter.since` / `config.filter.until` (可选,字符串或 `null`)
 - [x] config 校验: 解析失败报错、`since > until` 报错
 - [x] `resolveDateWindow(cfg)` 统一计算 `{ since, before }`;`before = until + 1day` 让 `--until` 包含当日
-- [x] `fetcher.ts` SEARCH 同时传 `since` / `before`,并对 envelope/header 日期做一次防御性二次过滤(应对 INTERNALDATE 与 Date 头不一致的邮箱)
 - [x] CLI: `--since` / `--until` 优先级高于 `--since-days` 与 config 字段
+- [x] **服务端只下 `since`,`before` 一律客户端过滤**:实测 QQ IMAP 在 `or:` 与 `before:` 同时出现时静默返回 0;仅 `since` 工作正常。客户端 header 日期二次过滤已覆盖上界
+- [x] 修复 imapflow `client.fetch()` 调用参数:`{uid:true}` 必须传第 3 个 `options` 而非合并进 `query`,否则 UID 数组被当作 seq 号,静默命中 0
+
+## Phase 1 端到端验证  [2026-05-20 用真实 QQ 邮箱]
+
+- `imap.qq.com:993` 登录成功 (`config.json` 不入 git, 已在 `.gitignore`)
+- `mfh fetch --since 2026-03-20 --until 2026-05-20` (2 个月窗口)
+  - 服务端 SEARCH 命中 ~106,客户端 header 二次过滤剔除 1
+  - seen=105, saved=105, 全部落 `samples/raw/<YYYY-MM>/<hash>.eml`
+  - 按月分桶:2026-03 = 22, 2026-04 = 61, 2026-05 = 22
+  - `samples/raw/INDEX.csv` = 1 header + 105 行
+  - `state.json fetchedHashes` 同步增长到 105
+- 复跑增量幂等:同窗口第二次执行 seen=105, saved=0, skippedKnown=105
 
 ## Phase 1 验证记录  [2026-05-20]
 
