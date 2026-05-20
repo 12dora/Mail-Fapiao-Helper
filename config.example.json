@@ -1,0 +1,40 @@
+{
+  "imap": {
+    "host": "imap.example.com",
+    "port": 993,
+    "user": "me@example.com",
+    "pass": "",
+    "tls": true,
+    "mailbox": "INBOX"
+  },
+  "filter": {
+    "keywords": ["发票"],
+    "matchSubject": true,
+    "matchBody": true,
+    "sinceDays": 30
+  },
+  "output": {
+    "dir": "./invoices",
+    "pendingDir": "./pending",
+    "csv": "./invoices.csv"
+  },
+  "rename": {
+    "rule": "{seller}-{amount}.pdf",
+    "fallback": "{date}-{messageId}.pdf"
+  },
+  "ocr": {
+    "enabled": false,
+    "provider": "baidu",
+    "credentials": { "apiKey": "", "secretKey": "" }
+  },
+  "llm": {
+    "enabled": false,
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "apiKey": ""
+  },
+  "playwright": {
+    "headless": true,
+    "timeoutMs": 30000
+  }
+}
