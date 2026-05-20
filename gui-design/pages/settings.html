@@ -8,214 +8,231 @@
 </head>
 <body data-page="settings">
 <div class="app">
+    <div id="titlebar-mount"></div>
     <div id="app-shell"></div>
 
     <main class="main">
-        <header class="masthead">
-            <div>
-                <div class="masthead-eyebrow">No. 06 · About & Build</div>
-                <h1 class="masthead-title">关于 <em>/ colophon</em></h1>
-                <p class="masthead-sub">构建信息、当前阶段进度、扩展点与设计原则。本程序遵循"样本驱动、不预留接口、失败即降级"三条铁律。</p>
-            </div>
-            <div class="masthead-meta">
-                <div>版本 <b>v0.1.0-phase1</b></div>
-                <div>构建 <b>2026-05-20</b></div>
-                <div>运行时 <b>Node 20.11</b></div>
-            </div>
-        </header>
-
-        <div class="dateline">
-            <span>许可 · <b>MIT</b> · 个人 / 内部使用</span>
-            <span>仓库 · <b>Mail-Fapiao-Helper</b> · main</span>
+        <div class="toolbar">
+            <span class="toolbar__crumb">系统</span>
+            <span class="toolbar__title">关于</span>
+            <div class="toolbar__spacer"></div>
+            <span class="toolbar__meta">v0.1.0-phase1 · 2026-05-20</span>
         </div>
 
-        <section class="content">
-
-            <div class="grid-2">
-                <div class="stack-md">
-                    <!-- progress -->
-                    <div class="panel">
-                        <span class="panel-tag">阶段 · <b>ROADMAP</b></span>
-                        <div class="h-section" style="margin-top:6px;">实施进度 <em>phased</em></div>
-                        <div class="h-sub" style="margin-bottom:14px;">按 docs/NEXT_STEPS.md 的 8 个阶段推进。已完成 2 / 9。</div>
-
-                        <table class="ledger">
-                            <thead>
-                                <tr>
-                                    <th style="width:50px">#</th>
-                                    <th>阶段</th>
-                                    <th style="width:140px">产物</th>
-                                    <th style="width:90px">状态</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td class="cell-faint">P0</td>
-                                    <td class="cell-cn">脚手架 · CLI 与配置</td>
-                                    <td>src/* skeleton</td>
-                                    <td><span class="chip chip--ok">完成</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P1</td>
-                                    <td class="cell-cn">邮件抓取 · mfh fetch</td>
-                                    <td>samples/raw/*.eml</td>
-                                    <td><span class="chip chip--ok">完成</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P2</td>
-                                    <td class="cell-cn">样本聚类（不写代码）</td>
-                                    <td>samples/INDEX.md</td>
-                                    <td><span class="chip chip--pend">进行中</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P3</td>
-                                    <td class="cell-cn">附件提取器</td>
-                                    <td>extract/attachment.ts</td>
-                                    <td><span class="chip chip--mute">未开始</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P4</td>
-                                    <td class="cell-cn">直链提取器</td>
-                                    <td>extract/directLink.ts</td>
-                                    <td><span class="chip chip--mute">未开始</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P5</td>
-                                    <td class="cell-cn">第三方站点 handler（迭代）</td>
-                                    <td>sites/&lt;vendor&gt;.ts</td>
-                                    <td><span class="chip chip--mute">未开始</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P6</td>
-                                    <td class="cell-cn">LLM 兜底（可选）</td>
-                                    <td>extract/llm.ts</td>
-                                    <td><span class="chip chip--mute">可选</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P7</td>
-                                    <td class="cell-cn">OCR + 智能命名</td>
-                                    <td>ocr/baidu.ts</td>
-                                    <td><span class="chip chip--mute">未开始</span></td>
-                                </tr>
-                                <tr>
-                                    <td class="cell-faint">P8</td>
-                                    <td class="cell-cn">打包发布</td>
-                                    <td>mfh-macos / mfh-win.exe</td>
-                                    <td><span class="chip chip--mute">未开始</span></td>
-                                </tr>
-                            </tbody>
-                        </table>
+        <div class="page stagger">
+            <!-- 版本信息 -->
+            <div class="card">
+                <div class="row row--between mb-16">
+                    <div>
+                        <div class="h2">Mail Fapiao Helper</div>
+                        <div class="small muted mt-4">邮件发票自动归档助手</div>
                     </div>
+                    <div class="right">
+                        <div class="mono strong" style="font-size: 18px;">v0.1.0-phase1</div>
+                        <div class="small muted mt-4">构建 2026-05-20</div>
+                    </div>
+                </div>
+                <div class="row gap-12 mt-16" style="padding: 12px 16px; background: var(--bg-hover); border-radius: var(--radius-sm);">
+                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                    <div class="small">本程序不上传任何邮件至云端 · 所有处理均在本地完成 · MIT 许可证</div>
+                </div>
+            </div>
 
-                    <!-- principles -->
-                    <div class="panel">
-                        <span class="panel-tag">原则 · <b>DESIGN LAW</b></span>
-                        <div class="h-section" style="margin-top:6px;">三条铁律 <em>three iron rules</em></div>
+            <!-- 实施进度 -->
+            <div class="card">
+                <div class="h3 mb-16">实施进度</div>
+                <div class="small muted mb-12">按 docs/NEXT_STEPS.md 的 9 个阶段推进 · 已完成 2 / 9</div>
 
-                        <div style="margin-top:18px; display:grid; gap:18px;">
-                            <div style="display:grid; grid-template-columns: 40px 1fr; gap:14px;">
-                                <div class="chop chop--sm">一</div>
-                                <div>
-                                    <div style="font-family:var(--f-display); font-size:15px; font-weight:600;">顺序 + 数组就是架构</div>
-                                    <div style="font-size:12.5px; color:var(--ink-mute); margin-top:2px;">单封邮件串行通过固定顺序的 Extractor 数组。无并发、无 DI、无插件。复杂度锁死在"一晚上读完"的量级。</div>
-                                </div>
-                            </div>
-                            <div style="display:grid; grid-template-columns: 40px 1fr; gap:14px;">
-                                <div class="chop chop--sm" style="background:var(--celadon-d); box-shadow:1px 1px 0 #2f4029;">二</div>
-                                <div>
-                                    <div style="font-family:var(--f-display); font-size:15px; font-weight:600;">CSV 是真相，state.json 是缓存</div>
-                                    <div style="font-size:12.5px; color:var(--ink-mute); margin-top:2px;">所有幂等围绕 messageId 展开。COMMIT 顺序 = staging → final → CSV → state。启动时用 CSV 自愈未提交窗口。</div>
-                                </div>
-                            </div>
-                            <div style="display:grid; grid-template-columns: 40px 1fr; gap:14px;">
-                                <div class="chop chop--sm" style="background:var(--ink); box-shadow:1px 1px 0 #000;">三</div>
-                                <div>
-                                    <div style="font-family:var(--f-display); font-size:15px; font-weight:600;">失败永远降级为 manual</div>
-                                    <div style="font-size:12.5px; color:var(--ink-mute); margin-top:2px;">除 IMAP 连接与 state 写盘两条底线外，任何错误都让当前邮件进入 pending 队列，继续处理下一封。</div>
-                                </div>
-                            </div>
-                        </div>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th style="width: 60px;">#</th>
+                                <th>阶段</th>
+                                <th style="width: 180px;">产物</th>
+                                <th style="width: 100px;">状态</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="mono">P0</td>
+                                <td>脚手架 · CLI 与配置</td>
+                                <td class="mono small">src/* skeleton</td>
+                                <td><span class="pill pill--ok">完成</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P1</td>
+                                <td>邮件抓取 · mfh fetch</td>
+                                <td class="mono small">samples/raw/*.eml</td>
+                                <td><span class="pill pill--ok">完成</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P2</td>
+                                <td>样本聚类（不写代码）</td>
+                                <td class="mono small">samples/INDEX.md</td>
+                                <td><span class="pill pill--warn">进行中</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P3</td>
+                                <td>附件提取器</td>
+                                <td class="mono small">extract/attachment.ts</td>
+                                <td><span class="pill">未开始</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P4</td>
+                                <td>直链提取器</td>
+                                <td class="mono small">extract/directLink.ts</td>
+                                <td><span class="pill">未开始</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P5</td>
+                                <td>第三方站点 handler（迭代）</td>
+                                <td class="mono small">sites/&lt;vendor&gt;.ts</td>
+                                <td><span class="pill">未开始</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P6</td>
+                                <td>LLM 兜底（可选）</td>
+                                <td class="mono small">extract/llm.ts</td>
+                                <td><span class="pill">可选</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P7</td>
+                                <td>OCR + 智能命名</td>
+                                <td class="mono small">ocr/baidu.ts</td>
+                                <td><span class="pill">未开始</span></td>
+                            </tr>
+                            <tr>
+                                <td class="mono">P8</td>
+                                <td>打包发布</td>
+                                <td class="mono small">mfh-macos / mfh-win.exe</td>
+                                <td><span class="pill">未开始</span></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 设计原则 -->
+            <div class="card">
+                <div class="h3 mb-16">设计原则 · 三条铁律</div>
+
+                <div class="row gap-12 mb-16" style="padding: 14px 16px; background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: var(--radius-sm);">
+                    <div class="mono strong" style="font-size: 24px; color: var(--accent); line-height: 1;">一</div>
+                    <div style="flex: 1;">
+                        <div class="strong mb-4">顺序 + 数组就是架构</div>
+                        <div class="small muted">单封邮件串行通过固定顺序的 Extractor 数组。无并发、无 DI、无插件。复杂度锁死在"一晚上读完"的量级。</div>
                     </div>
                 </div>
 
-                <div class="stack-md">
-                    <!-- build -->
-                    <div class="panel">
-                        <span class="panel-tag">构建 · <b>BUILD</b></span>
-                        <div class="h-section" style="margin-top:6px;">构建信息 <em>build info</em></div>
-                        <table class="ledger" style="margin-top:14px;">
-                            <tbody>
-                                <tr><td class="cell-tiny">version</td><td>v0.1.0-phase1</td></tr>
-                                <tr><td class="cell-tiny">commit</td><td>e46bffd (HEAD → main)</td></tr>
-                                <tr><td class="cell-tiny">node</td><td>20.11.0</td></tr>
-                                <tr><td class="cell-tiny">typescript</td><td>5.4.5 · strict + noUncheckedIndexedAccess</td></tr>
-                                <tr><td class="cell-tiny">imapflow</td><td>1.0.137</td></tr>
-                                <tr><td class="cell-tiny">mailparser</td><td>3.7.0</td></tr>
-                                <tr><td class="cell-tiny">playwright</td><td>not yet · (phase 5)</td></tr>
-                                <tr><td class="cell-tiny">platform</td><td>darwin / arm64</td></tr>
-                            </tbody>
-                        </table>
+                <div class="row gap-12 mb-16" style="padding: 14px 16px; background: var(--ok-soft); border-left: 3px solid var(--ok); border-radius: var(--radius-sm);">
+                    <div class="mono strong" style="font-size: 24px; color: var(--ok); line-height: 1;">二</div>
+                    <div style="flex: 1;">
+                        <div class="strong mb-4">CSV 是真相，state.json 是缓存</div>
+                        <div class="small muted">所有幂等围绕 messageId 展开。COMMIT 顺序 = staging → final → CSV → state。启动时用 CSV 自愈未提交窗口。</div>
                     </div>
+                </div>
 
-                    <!-- extension points -->
-                    <div class="panel">
-                        <span class="panel-tag">扩展点 · <b>EXTENSION</b></span>
-                        <div class="h-section" style="margin-top:6px;">仅有两个扩展点 <em>strictly two</em></div>
-
-                        <div style="margin-top:14px; padding:14px 16px; background:rgba(0,0,0,0.04); border-left:2px solid var(--vermilion);">
-                            <div style="font-family:var(--f-mono); font-size:10.5px; letter-spacing:0.16em; color:var(--vermilion); text-transform:uppercase; margin-bottom:4px;">A · SiteHandler</div>
-                            <div style="font-family:var(--f-display); font-size:15px; font-weight:600;">第三方开票站点处理器</div>
-                            <ol style="margin:8px 0 0 18px; font-size:12.5px; color:var(--ink-soft); line-height:1.7;">
-                                <li>samples/by-type/&lt;vendor&gt;/ 至少 1 封 .eml</li>
-                                <li>新建 src/sites/&lt;vendor&gt;.ts</li>
-                                <li>registry.ts 追加 handlers.push(x)</li>
-                                <li>mfh run --only-mail &lt;hash&gt; 回归</li>
-                            </ol>
-                        </div>
-
-                        <div style="margin-top:12px; padding:14px 16px; background:rgba(0,0,0,0.04); border-left:2px solid var(--celadon-d);">
-                            <div style="font-family:var(--f-mono); font-size:10.5px; letter-spacing:0.16em; color:var(--celadon-d); text-transform:uppercase; margin-bottom:4px;">B · OcrProvider</div>
-                            <div style="font-family:var(--f-display); font-size:15px; font-weight:600;">OCR 厂商提供商</div>
-                            <ol style="margin:8px 0 0 18px; font-size:12.5px; color:var(--ink-soft); line-height:1.7;">
-                                <li>新建 src/ocr/&lt;vendor&gt;.ts</li>
-                                <li>registry.ts 追加 providers.push(x)</li>
-                                <li>config.ocr.provider = "&lt;vendor&gt;"</li>
-                            </ol>
-                        </div>
-
-                        <div style="margin-top:14px; font-family:var(--f-mono); font-size:11px; color:var(--ink-mute); letter-spacing:0.04em; line-height:1.6;">
-                            禁止 · 自动发现 / 插件加载 / 装饰器注册。
-                        </div>
-                    </div>
-
-                    <!-- credits -->
-                    <div class="panel">
-                        <span class="panel-tag">致谢 · <b>COLOPHON</b></span>
-                        <div class="h-section" style="margin-top:6px;">字体与色谱</div>
-                        <div style="font-size:13px; color:var(--ink-soft); line-height:1.7; margin-top:8px;">
-                            标题字 · <b style="font-family:var(--f-display)">Noto Serif SC</b><br>
-                            等宽字 · <b style="font-family:var(--f-mono)">IBM Plex Mono</b><br>
-                            正文 · <b style="font-family:var(--f-sans)">Noto Sans SC / PingFang SC</b><br>
-                            英文意大利体 · <em style="font-family:var(--f-serif-en)">Fraunces</em>
-                        </div>
-                        <hr class="hr-faint">
-                        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                            <span style="display:flex; align-items:center; gap:6px; font-family:var(--f-mono); font-size:11px;"><span style="width:14px; height:14px; background:var(--paper); border:1px solid var(--ink);"></span> #F5EFE2</span>
-                            <span style="display:flex; align-items:center; gap:6px; font-family:var(--f-mono); font-size:11px;"><span style="width:14px; height:14px; background:var(--ink);"></span> #1A1614</span>
-                            <span style="display:flex; align-items:center; gap:6px; font-family:var(--f-mono); font-size:11px;"><span style="width:14px; height:14px; background:var(--vermilion);"></span> #C0392B</span>
-                            <span style="display:flex; align-items:center; gap:6px; font-family:var(--f-mono); font-size:11px;"><span style="width:14px; height:14px; background:var(--celadon);"></span> #6E8767</span>
-                            <span style="display:flex; align-items:center; gap:6px; font-family:var(--f-mono); font-size:11px;"><span style="width:14px; height:14px; background:var(--amber);"></span> #C98A3A</span>
-                        </div>
+                <div class="row gap-12" style="padding: 14px 16px; background: var(--bg-hover); border-left: 3px solid var(--fg-strong); border-radius: var(--radius-sm);">
+                    <div class="mono strong" style="font-size: 24px; color: var(--fg-strong); line-height: 1;">三</div>
+                    <div style="flex: 1;">
+                        <div class="strong mb-4">失败永远降级为 manual</div>
+                        <div class="small muted">除 IMAP 连接与 state 写盘两条底线外，任何错误都让当前邮件进入 pending 队列，继续处理下一封。</div>
                     </div>
                 </div>
             </div>
 
-        </section>
+            <!-- 构建信息 -->
+            <div class="row gap-16">
+                <div class="card" style="flex: 1;">
+                    <div class="h3 mb-16">构建信息</div>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <tbody>
+                                <tr><td class="small muted">version</td><td class="mono">v0.1.0-phase1</td></tr>
+                                <tr><td class="small muted">commit</td><td class="mono">e46bffd (HEAD → main)</td></tr>
+                                <tr><td class="small muted">node</td><td class="mono">20.11.0</td></tr>
+                                <tr><td class="small muted">typescript</td><td class="mono">5.4.5 · strict + noUncheckedIndexedAccess</td></tr>
+                                <tr><td class="small muted">imapflow</td><td class="mono">1.0.137</td></tr>
+                                <tr><td class="small muted">mailparser</td><td class="mono">3.7.0</td></tr>
+                                <tr><td class="small muted">playwright</td><td class="mono muted">not yet · (phase 5)</td></tr>
+                                <tr><td class="small muted">platform</td><td class="mono">darwin / arm64</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
 
-        <footer class="colophon">
-            <span>06 · About & Build</span>
-            <span>© 2026 · MIT · 本程序不上传任何邮件至云端</span>
-        </footer>
+                <div class="card" style="flex: 1;">
+                    <div class="h3 mb-16">扩展点</div>
+                    <div class="small muted mb-12">仅有两个扩展点 · 禁止自动发现 / 插件加载 / 装饰器注册</div>
+
+                    <div style="padding: 12px 14px; background: var(--err-soft); border-left: 2px solid var(--err); border-radius: var(--radius-sm); margin-bottom: 12px;">
+                        <div class="mono small strong mb-6" style="color: var(--err); letter-spacing: 0.08em;">A · SiteHandler</div>
+                        <div class="small strong mb-4">第三方开票站点处理器</div>
+                        <ol class="small muted" style="margin-left: 18px; line-height: 1.6;">
+                            <li>samples/by-type/&lt;vendor&gt;/ 至少 1 封 .eml</li>
+                            <li>新建 src/sites/&lt;vendor&gt;.ts</li>
+                            <li>registry.ts 追加 handlers.push(x)</li>
+                            <li>mfh run --only-mail &lt;hash&gt; 回归</li>
+                        </ol>
+                    </div>
+
+                    <div style="padding: 12px 14px; background: var(--ok-soft); border-left: 2px solid var(--ok); border-radius: var(--radius-sm);">
+                        <div class="mono small strong mb-6" style="color: var(--ok); letter-spacing: 0.08em;">B · OcrProvider</div>
+                        <div class="small strong mb-4">OCR 厂商提供商</div>
+                        <ol class="small muted" style="margin-left: 18px; line-height: 1.6;">
+                            <li>新建 src/ocr/&lt;vendor&gt;.ts</li>
+                            <li>registry.ts 追加 providers.push(x)</li>
+                            <li>config.ocr.provider = "&lt;vendor&gt;"</li>
+                        </ol>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 字体与色谱 -->
+            <div class="card">
+                <div class="h3 mb-16">字体与色谱</div>
+                <div class="row gap-24 mb-16">
+                    <div style="flex: 1;">
+                        <div class="small muted mb-8">字体</div>
+                        <div class="small" style="line-height: 1.8;">
+                            标题字 · <span class="strong" style="font-family: var(--f-display);">Noto Serif SC</span><br>
+                            等宽字 · <span class="mono strong">IBM Plex Mono</span><br>
+                            正文 · <span class="strong">Noto Sans SC / PingFang SC</span>
+                        </div>
+                    </div>
+                    <div style="flex: 1;">
+                        <div class="small muted mb-8">色谱</div>
+                        <div class="row gap-8" style="flex-wrap: wrap;">
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--bg-app); border: 1px solid var(--border);"></div>
+                                <span class="mono small">bg-app</span>
+                            </div>
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--fg-strong);"></div>
+                                <span class="mono small">fg-strong</span>
+                            </div>
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--accent);"></div>
+                                <span class="mono small">accent</span>
+                            </div>
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--ok);"></div>
+                                <span class="mono small">ok</span>
+                            </div>
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--warn);"></div>
+                                <span class="mono small">warn</span>
+                            </div>
+                            <div class="row gap-6" style="align-items: center;">
+                                <div style="width: 16px; height: 16px; background: var(--err);"></div>
+                                <span class="mono small">err</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </main>
 </div>
 
