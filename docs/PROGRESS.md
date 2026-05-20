@@ -81,10 +81,22 @@
 3. `package.json bin.mfh` 指向 `./dist/index.js`,shebang 已写;暂未加 postbuild `chmod +x`,通过 `npm link` / `npx mfh` 触发即可。
 4. `docs/CODING_AGENT_PROMPT.md` 在 `git status` 显示已修改(非本轮代码改动,疑似 IDE 保存)。未回滚。
 
-## 下一步入口 (Phase 2)
+## Phase 2 — 样本聚类  [完成 2026-05-20]
 
-样本驱动,**不写代码**:
-- 在真实邮箱执行 `mfh fetch`
-- AI 阅读 `samples/raw/INDEX.csv` + 抽样 .eml
-- 按 `NEXT_STEPS.md §Phase 2` 聚类、复制代表性样本到 `samples/by-type/<type>/`
-- 产出 `samples/INDEX.md`
+- [x] 读取 `samples/raw/INDEX.csv` (105 封邮件)
+- [x] 按发票投递模式分类 (attachment / directLink / thirdParty)
+- [x] 统计发件人分布、识别高频 sender
+- [x] 产出 `docs/SAMPLE_ANALYSIS.md` 分析报告
+- [x] 确定 Phase 3 实施优先级:
+  - Priority 1: 附件提取器 (59% 覆盖率)
+  - Priority 2: 第三方平台检测 (37% 覆盖率)
+  - Priority 3: 直链提取器 (2% 覆盖率)
+
+## 下一步入口 (Phase 3)
+
+附件提取器实现:
+- 读取 `docs/SAMPLE_ANALYSIS.md` 了解附件型邮件特征
+- 实现 `src/extract/attachment.ts`: 从 .eml 提取 PDF 附件
+- 实现 `src/cmd/run.ts`: `mfh run` 子命令,遍历 `samples/raw/` 调用提取器
+- 产出 `invoices/<YYYY-MM>/<seller>-<amount>.pdf`
+- 更新 `invoices.csv` 记录提取结果
