@@ -1,5 +1,14 @@
 import type { ParsedMail } from 'mailparser';
+import { createHash } from 'node:crypto';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import { handlers } from '../sites/registry.js';
+
+function cleanLink(url: string): string {
+  return url
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, '')
+    .trim();
+}
 
 function extractLinksFromHtml(html: string): string[] {
   const links: string[] = [];
@@ -15,7 +24,7 @@ function extractLinksFromHtml(html: string): string[] {
 
 function extractLinksFromText(text: string): string[] {
   const links: string[] = [];
-  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
+  const urlRegex = /https?:\/\/[^\s<>"'{}|\\^`\[\]]+/gi;
   let match;
   while ((match = urlRegex.exec(text)) !== null) {
     if (match[0]) {
@@ -74,27 +83,31 @@ function suggestFilename(url: string): string {
   return '';
 }
 
+function pdfContentKey(pdf: Buffer): string {
+  return createHash('sha1').update(pdf).digest('hex');
+}
+
+function extractLinks(mail: ParsedMail): string[] {
+  const links: string[] = [];
+  if (typeof mail.html === 'string') {
+    links.push(...extractLinksFromHtml(mail.html));
+    links.push(...extractLinksFromText(mail.html));
+  }
+  if (typeof mail.text === 'string') links.push(...extractLinksFromText(mail.text));
+  return Array.from(new Set(links.map(cleanLink)));
+}
+
 const directLinkExtractor: Extractor = {
   name: 'directLink',
 
   canHandle(mail: ParsedMail): boolean {
-    if (typeof mail.html === 'string' && mail.html.includes('href=')) {
-      return true;
-    }
-    if (typeof mail.text === 'string' && /https?:\/\//i.test(mail.text)) {
-      return true;
-    }
-    return false;
+    const links = extractLinks(mail);
+    if (links.length === 0) return false;
+    return links.every((link) => !handlers.some((handler) => handler.match(link)));
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
-    let links: string[] = [];
-
-    if (typeof mail.html === 'string') {
-      links = extractLinksFromHtml(mail.html);
-    } else if (typeof mail.text === 'string') {
-      links = extractLinksFromText(mail.text);
-    }
+    const links = extractLinks(mail);
 
     if (links.length === 0) {
       return { kind: 'manual', reason: 'directLink:no_links' };
@@ -124,6 +137,7 @@ const directLinkExtractor: Extractor = {
     ctx.log.debug(`Found ${pdfCandidates.length} PDF links`);
 
     const pdfs: PdfArtifact[] = [];
+    const seenPdfs = new Set<string>();
 
     for (const url of pdfCandidates) {
       const data = await downloadPdf(url, ctx);
@@ -131,6 +145,10 @@ const directLinkExtractor: Extractor = {
         ctx.log.warn(`Failed to download ${url}`);
         continue;
       }
+
+      const key = pdfContentKey(data);
+      if (seenPdfs.has(key)) continue;
+      seenPdfs.add(key);
 
       pdfs.push({
         data,

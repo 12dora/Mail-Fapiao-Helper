@@ -1,7 +1,8 @@
 import type { Ctx, PdfArtifact } from '../extract/types.js';
+import type { Page } from 'playwright';
 
 export interface SiteHandler {
   name: string;
   match(url: string): boolean;
-  handle(page: unknown, url: string, ctx: Ctx): Promise<PdfArtifact[]>;
+  handle(page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]>;
 }

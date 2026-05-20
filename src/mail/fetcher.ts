@@ -2,6 +2,7 @@ import { ImapFlow, type SearchObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import type { Config } from '../config.js';
 import type { Logger } from '../log.js';
+import { nonInvoiceReason } from './exclude.js';
 
 export interface RawMail {
   uid: number;
@@ -122,6 +123,11 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
       const messageId = parsed.messageId ?? env?.messageId ?? undefined;
       const hasAttachment = (parsed.attachments?.length ?? 0) > 0;
       const bodyLinkCount = countLinks(parsed.html, parsed.text);
+      const excludeReason = nonInvoiceReason({ from, subject });
+      if (excludeReason) {
+        log.info(`exclude uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
+        continue;
+      }
 
       // Defensive header-date filter: some servers return messages outside the
       // IMAP SEARCH window (mismatch between INTERNALDATE and the Date header).
