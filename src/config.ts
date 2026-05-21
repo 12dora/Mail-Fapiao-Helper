@@ -45,6 +45,7 @@ export interface Config {
     servicePort: number;
     serviceWorkers: number;
     serviceStartupMs: number;
+    batchSize: number;
     timeoutMs: number;
     resultsCsv: string;
     credentials: Record<string, string>;
@@ -229,6 +230,9 @@ export function loadConfig(path: string): Config {
       serviceStartupMs: typeof (raw as { ocr?: { serviceStartupMs?: unknown } }).ocr?.serviceStartupMs === 'number'
         ? ((raw as { ocr: { serviceStartupMs: number } }).ocr.serviceStartupMs)
         : 30000,
+      batchSize: typeof (raw as { ocr?: { batchSize?: unknown } }).ocr?.batchSize === 'number'
+        ? ((raw as { ocr: { batchSize: number } }).ocr.batchSize)
+        : 16,
       timeoutMs: typeof (raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs === 'number'
         ? ((raw as { ocr: { timeoutMs: number } }).ocr.timeoutMs)
         : 120000,
@@ -293,6 +297,9 @@ export function loadConfig(path: string): Config {
   }
   if (cfg.ocr.serviceStartupMs <= 0) {
     throw new Error('config.ocr.serviceStartupMs must be > 0');
+  }
+  if (!Number.isInteger(cfg.ocr.batchSize) || cfg.ocr.batchSize <= 0) {
+    throw new Error('config.ocr.batchSize must be a positive integer');
   }
   if (cfg.ocr.timeoutMs <= 0) {
     throw new Error('config.ocr.timeoutMs must be > 0');

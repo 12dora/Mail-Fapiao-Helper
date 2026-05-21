@@ -20,6 +20,12 @@ interface PendingRow {
   reason: string;
 }
 
+interface ParseJob {
+  row: PendingRow;
+  key: string;
+  data: Buffer;
+}
+
 export interface OcrRunSummary {
   scanned: number;
   parsed: number;
@@ -236,6 +242,32 @@ function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void
   }
 }
 
+function applyOcrResult(
+  resultCsv: string,
+  row: PendingRow,
+  key: string,
+  result: OcrResult,
+  seenResults: Map<string, ResultStatus>,
+  summary: OcrRunSummary,
+  log: Logger,
+): void {
+  appendResult(resultCsv, row, result);
+  seenResults.set(key, { status: result.status, error: result.error });
+  if (result.status === 'success') {
+    row.status = 'recognized';
+    row.reason = '';
+    summary.parsed++;
+    summary.updated++;
+    log.info(`OCR parsed ${row.filename}`);
+  } else {
+    row.status = 'failed';
+    row.reason = result.error;
+    summary.failed++;
+    summary.updated++;
+    log.warn(`OCR failed ${row.filename}: ${result.error}`);
+  }
+}
+
 export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: boolean } = {}): Promise<OcrRunSummary> {
   if (!cfg.ocr.enabled) {
     throw new Error('config.ocr.enabled=false; set it to true to run OCR');
@@ -248,12 +280,63 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
   const seenResults = opts.force ? new Map<string, ResultStatus>() : readResultIndex(resultCsv);
   const provider = getOcrProvider(cfg);
   const summary: OcrRunSummary = { scanned: rows.length, parsed: 0, skipped: 0, failed: 0, updated: 0 };
+  const batch: ParseJob[] = [];
+
+  async function flushBatch(): Promise<void> {
+    if (batch.length === 0) return;
+    const jobs = batch.splice(0, batch.length);
+    try {
+      const results = provider.parseBatch
+        ? await provider.parseBatch(jobs.map((job) => ({
+            data: job.data,
+            meta: {
+              format: job.row.format,
+              documentType: job.row.documentType,
+              filename: job.row.filename,
+            },
+          })))
+        : await Promise.all(jobs.map((job) => provider.parse(job.data, {
+            format: job.row.format,
+            documentType: job.row.documentType,
+            filename: job.row.filename,
+          })));
+      for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        const result = results[i];
+        if (!job) continue;
+        if (!result) {
+          const error = `ocr_missing_batch_result:${job.row.filename}`;
+          appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
+          seenResults.set(job.key, { status: 'error', error });
+          job.row.status = 'failed';
+          job.row.reason = error;
+          summary.failed++;
+          summary.updated++;
+          log.warn(`OCR failed ${job.row.filename}: ${error}`);
+          continue;
+        }
+        applyOcrResult(resultCsv, job.row, job.key, result, seenResults, summary, log);
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      for (const job of jobs) {
+        appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
+        seenResults.set(job.key, { status: 'error', error });
+        job.row.status = 'failed';
+        job.row.reason = error;
+        summary.failed++;
+        summary.updated++;
+        log.warn(`OCR failed ${job.row.filename}: ${error}`);
+      }
+    }
+  }
 
   for (let i = 0; i < nextRows.length; i++) {
     const row = nextRows[i];
     if (!row) continue;
     const key = `${row.hash}\0${row.source}`;
     if (seenResults.has(key)) {
+      await flushBatch();
       const existing = seenResults.get(key);
       if (existing?.status === 'success') {
         row.status = 'recognized';
@@ -268,6 +351,7 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
 
     const filePath = path.join(cfg.paths.invoices, row.filename);
     if (!fs.existsSync(filePath)) {
+      await flushBatch();
       const error = `missing_file:${filePath}`;
       appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
       row.status = 'failed';
@@ -280,27 +364,10 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
 
     try {
       const data = fs.readFileSync(filePath);
-      const result = await provider.parse(data, {
-        format: row.format,
-        documentType: row.documentType,
-        filename: row.filename,
-      });
-      appendResult(resultCsv, row, result);
-      seenResults.set(key, { status: result.status, error: result.error });
-      if (result.status === 'success') {
-        row.status = 'recognized';
-        row.reason = '';
-        summary.parsed++;
-        summary.updated++;
-        log.info(`OCR parsed ${row.filename}`);
-      } else {
-        row.status = 'failed';
-        row.reason = result.error;
-        summary.failed++;
-        summary.updated++;
-        log.warn(`OCR failed ${row.filename}: ${result.error}`);
-      }
+      batch.push({ row, key, data });
+      if (batch.length >= cfg.ocr.batchSize) await flushBatch();
     } catch (err) {
+      await flushBatch();
       const error = err instanceof Error ? err.message : String(err);
       appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
       seenResults.set(key, { status: 'error', error });
@@ -311,6 +378,7 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
       log.warn(`OCR failed ${row.filename}: ${error}`);
     }
   }
+  await flushBatch();
 
   if (nextRows.length > 0) {
     writePendingCsv(pendingCsv, nextRows);

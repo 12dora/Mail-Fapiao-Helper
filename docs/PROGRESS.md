@@ -370,3 +370,13 @@
 - [x] 使用 `mfh fetch` 抓取 2025-05-21 至 2026-05-21 全 mailbox 候选发票邮件
 - [x] 缓存到 `.mfh-cache/year-2025-05-21_2026-05-21/raw/`,保存 577 封 `.eml`,目录约 252MB,`INDEX.csv` 578 行(含表头)
 - [x] `.gitignore` 增加 `.mfh-cache/`;文档明确真实邮件缓存只用于本地开发,禁止提交或上传
+
+## Phase 6.6 — E-Fapiao-OCR 批量服务接口  [完成 2026-05-21]
+
+- [x] 重新阅读上游 API 文档: 服务新增 `/v1/invoices/parse-batch`,重复 `files` 表单字段上传多文件,单个失败不影响整批 HTTP 200 响应
+- [x] 重新下载 `12dora/E-Fapiao-OCR v0.1.2 darwin-arm64` release,按 SHA256SUMS 校验并覆盖 `vendor/efapiao/0.1.2/darwin-arm64/efapiao`
+- [x] 验证新版二进制: `efapiao --version`, `capabilities`, `serve` + `/v1/health` 均正常;此前 `uvicorn.middleware.wsgi` 缺依赖问题已由上游修复
+- [x] `src/ocr/types.ts`: OCR Provider 增加可选 `parseBatch`,保留单张 `parse` 兼容其它 provider
+- [x] `src/ocr/efapiao.ts`: 服务模式优先调用 `/v1/invoices/parse-batch`,混合 PDF/OFD 队列统一传 `hint_type=auto`;`auto` 模式失败时仍逐张 CLI 回退
+- [x] `src/ocr/runner.ts`: 按 `ocr.batchSize` 聚合队列后批量识别,批结果逐条写回 `ocr-results.csv` 与 `ocr-pending.csv`
+- [x] 本地烟测: 通过 `serve` 模式对两张真实归档 PDF 批量识别,结果 parsed=2, `transport=http`, `extractedBy=text_layer`

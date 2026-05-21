@@ -7,6 +7,8 @@ import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { OcrProvider, OcrResult } from './types.js';
 
 interface EfapiaoPayload {
+  index?: number;
+  filename?: string;
   status?: string;
   code?: string;
   message?: string;
@@ -14,6 +16,15 @@ interface EfapiaoPayload {
   engine?: Record<string, unknown>;
   document_type?: string | null;
   invoice_type?: string | null;
+}
+
+interface EfapiaoBatchPayload {
+  status?: string;
+  total?: number;
+  succeeded?: number;
+  failed?: number;
+  items?: EfapiaoPayload[];
+  detail?: unknown;
 }
 
 interface ServiceState {
@@ -109,6 +120,11 @@ function timeoutSignal(ms: number): AbortSignal {
   return controller.signal;
 }
 
+function toEfapiaoPayload(value: unknown): EfapiaoPayload {
+  if (value && typeof value === 'object') return value as EfapiaoPayload;
+  return {};
+}
+
 async function healthOk(cfg: Config): Promise<boolean> {
   try {
     const res = await fetch(`${serviceBaseUrl(cfg)}/v1/health`, {
@@ -124,17 +140,23 @@ async function healthOk(cfg: Config): Promise<boolean> {
 async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceState): Promise<void> {
   const deadline = Date.now() + cfg.ocr.serviceStartupMs;
   const stderr: Buffer[] = [];
-  child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
-  child.on('exit', (code) => {
+  const onStderr = (chunk: Buffer) => stderr.push(chunk);
+  const onExit = (code: number | null) => {
     if (!state.ready) {
       state.failed = true;
       state.failureReason = `efapiao_serve_exit_${code}:${compactError(Buffer.concat(stderr).toString('utf8'))}`;
     }
-  });
+  };
+  child.stderr?.on('data', onStderr);
+  child.on('exit', onExit);
 
   while (Date.now() < deadline) {
     if (await healthOk(cfg)) {
       state.ready = true;
+      child.stderr?.off('data', onStderr);
+      child.off('exit', onExit);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       return;
     }
     if (state.failed) break;
@@ -171,6 +193,7 @@ async function ensureService(cfg: Config): Promise<void> {
     env: { ...process.env, EFAPIAO_OCR_VENDOR: process.env.EFAPIAO_OCR_VENDOR ?? 'none' },
   });
   state.child = child;
+  child.unref();
   await waitForHealth(cfg, child, state);
 }
 
@@ -203,6 +226,50 @@ async function runService(
     ...(payload as Record<string, unknown>),
     ...nestedRecord(payload, 'detail'),
   };
+}
+
+async function runServiceBatch(
+  cfg: Config,
+  items: Array<{ data: Buffer; meta: { filename: string } }>,
+): Promise<EfapiaoPayload[]> {
+  await ensureService(cfg);
+  const form = new FormData();
+  for (const item of items) {
+    form.append('files', new Blob([item.data]), item.meta.filename);
+  }
+  form.set('hint_type', 'auto');
+  form.set('ocr_mode', 'auto');
+
+  const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse-batch`, {
+    method: 'POST',
+    body: form,
+    signal: timeoutSignal(cfg.ocr.timeoutMs),
+  });
+  const text = await res.text();
+  let payload: EfapiaoBatchPayload;
+  try {
+    payload = parseEfapiaoJson(text) as EfapiaoBatchPayload;
+  } catch {
+    throw new Error(`efapiao_http_invalid_json:http_${res.status}:${compactError(text)}`);
+  }
+
+  if (!res.ok) {
+    const detail = toEfapiaoPayload(payload.detail);
+    throw new Error(`efapiao_http_batch_error:http_${res.status}:${compactError(detail.message || text)}`);
+  }
+  if (!Array.isArray(payload.items)) {
+    throw new Error(`efapiao_http_batch_invalid_response:${compactError(text)}`);
+  }
+
+  const byIndex = new Map<number, EfapiaoPayload>();
+  for (const item of payload.items) {
+    if (typeof item.index === 'number') byIndex.set(item.index, item);
+  }
+  return items.map((_, index) => byIndex.get(index) ?? {
+    status: 'error',
+    code: 'missing_batch_item',
+    message: `efapiao batch response missing item index ${index}`,
+  });
 }
 
 function runBinary(
@@ -323,6 +390,20 @@ async function parseViaService(cfg: Config, data: Buffer, meta: { format: Docume
   return errorResult(payload, 'efapiao_http_error', 'http');
 }
 
+async function parseBatchViaService(
+  cfg: Config,
+  items: Array<{ data: Buffer; meta: { format: DocumentFormat; documentType: DocumentType; filename: string } }>,
+): Promise<OcrResult[]> {
+  const payloads = await runServiceBatch(cfg, items);
+  return payloads.map((payload, index) => {
+    const meta = items[index]?.meta;
+    if (payload.status === 'ok') {
+      return okResult(payload, meta?.documentType ?? 'invoice', 'http');
+    }
+    return errorResult(payload, 'efapiao_http_error', 'http');
+  });
+}
+
 export function createEfapiaoProvider(cfg: Config): OcrProvider {
   return {
     name: 'efapiao',
@@ -341,6 +422,30 @@ export function createEfapiaoProvider(cfg: Config): OcrProvider {
         if (!cliResult.error) return cliResult;
         cliResult.error = `serve_fallback:${reason};${cliResult.error}`;
         return cliResult;
+      }
+    },
+
+    async parseBatch(items): Promise<OcrResult[]> {
+      if (cfg.ocr.executionMode === 'cli') {
+        const results: OcrResult[] = [];
+        for (const item of items) {
+          results.push(await parseViaCli(cfg, item.data, item.meta));
+        }
+        return results;
+      }
+
+      try {
+        return await parseBatchViaService(cfg, items);
+      } catch (err) {
+        if (cfg.ocr.executionMode === 'serve') throw err;
+        const reason = err instanceof Error ? err.message : String(err);
+        const results: OcrResult[] = [];
+        for (const item of items) {
+          const cliResult = await parseViaCli(cfg, item.data, item.meta);
+          if (cliResult.error) cliResult.error = `serve_fallback:${reason};${cliResult.error}`;
+          results.push(cliResult);
+        }
+        return results;
       }
     },
   };

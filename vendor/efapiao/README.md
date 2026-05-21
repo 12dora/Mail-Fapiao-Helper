@@ -21,4 +21,8 @@ Currently bundled:
 
 - `0.1.2/darwin-arm64/efapiao`
 
+The bundled `darwin-arm64` binary was refreshed from the upstream `v0.1.2`
+release after the `efapiao serve` packaging fix. It has been verified with
+`--version`, `capabilities`, `/v1/health`, and `/v1/invoices/parse-batch`.
+
 For missing platforms, place the matching upstream release asset in the same layout. If no bundled binary exists for the current platform, the app falls back to `efapiao` from `PATH`.

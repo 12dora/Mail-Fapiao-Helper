@@ -74,15 +74,15 @@
 ## Phase 7：OCR + 智能重命名
 
 - PDF/OFD 已先接入前置链路：附件或 ZIP 内文档会先归档，并写入 `invoices/ocr/ocr-pending.csv`
-- 已接入 `12dora/E-Fapiao-OCR` 的 Release 二进制：`mfh ocr run` 从 `ocr-pending.csv` 读取文档，默认优先启动/复用 `efapiao serve` 本地 HTTP 服务，失败时回退 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`
+- 已接入 `12dora/E-Fapiao-OCR` 的 Release 二进制：`mfh ocr run` 从 `ocr-pending.csv` 读取文档，默认优先启动/复用 `efapiao serve` 本地 HTTP 服务，并按 `ocr.batchSize` 调用 `/v1/invoices/parse-batch`；失败时回退 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`
 - `ocr/efapiao.ts` 返回 `{ seller, amount, date, invoiceNo, documentType, invoiceType }` 及成功/失败状态，并记录 `transport/extractedBy/parserVersion/ocrVendor`
 - OCR 结果写入 `config.ocr.resultsCsv`
 - `mfh organize` / `rename/rename.ts` 已提供纯离线后处理：按 `config.rename.rule` 模板做可选二次重命名；字段缺失走 fallback；如果 `rename.organizeByType=true`，再按 `rename.typeDirRule` 复制聚类到不同文件夹
 - 原始归档文件与 `invoices.csv` 永不因 OCR/二次重命名失败而回滚
 
-**上游 efapiao 待修复**：
-- `v0.1.2 darwin-arm64` release 的 `efapiao serve` 会因 `ModuleNotFoundError: No module named 'uvicorn.middleware.wsgi'` 启动失败。原因是上游 `scripts/build_binary.py` 将 `uvicorn.middleware.wsgi` 加入了 PyInstaller exclude，但 `uvicorn.config` 会导入该模块；应从 exclude 移除或改为显式 hidden import。
-- Release smoke test 目前只测 `--version` 和 `capabilities`，建议加入 `efapiao serve --host 127.0.0.1 --port <free>` 后请求 `/v1/health`，再 POST 一个最小 PDF 样本到 `/v1/invoices/parse`。
+**上游 efapiao 当前状态**：
+- 已重新下载 `v0.1.2 darwin-arm64` release，验证 `efapiao serve` 可以启动，`/v1/health` 与 `/v1/capabilities` 正常。
+- 已用两张真实归档 PDF 通过 `/v1/invoices/parse-batch` 跑通本项目 OCR 队列，结果 `transport=http`、`extractedBy=text_layer`，批量接口可作为默认服务模式。
 
 ## Phase 8：打包
 
