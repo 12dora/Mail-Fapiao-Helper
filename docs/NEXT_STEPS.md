@@ -39,7 +39,7 @@
 
 - `extract/attachment.ts`：从已落地的 .eml 或实时邮件中识别 PDF 附件
 - `download/downloader.ts`：冲突重命名
-- `mfh run` 串起来：fetch → 遍历未处理邮件 → attachment Extractor → 落盘 + CSV
+- `mfh run` 串起来：fetch/cache → worker pool 遍历未处理邮件 → attachment Extractor → 落盘 + CSV
 
 **验收**：「附件型」样本 100% 入盘。
 

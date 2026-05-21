@@ -1,18 +1,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PdfArtifact } from '../extract/types.js';
+import type { DocumentFormat, PdfArtifact } from '../extract/types.js';
 import type { Logger } from '../log.js';
 
 export interface DownloadResult {
   finalPath: string;
   filename: string;
+  format: DocumentFormat;
 }
 
 function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
+  if (artifact.data.subarray(0, 4).toString('ascii') === '%PDF') return 'pdf';
+  if (artifact.data.subarray(0, 2).toString('ascii') === 'PK') return 'ofd';
   if (artifact.format === 'ofd') return 'ofd';
   if (artifact.suggestedName?.toLowerCase().endsWith('.ofd')) return 'ofd';
   if (artifact.source.toLowerCase().endsWith('.ofd')) return 'ofd';
   return 'pdf';
+}
+
+function normalizeArtifact(artifact: PdfArtifact, ext: 'pdf' | 'ofd'): PdfArtifact {
+  if (artifact.format === ext) return artifact;
+  return { ...artifact, format: ext, requiresOcr: ext === 'ofd' ? true : artifact.requiresOcr };
 }
 
 function safeFilename(name: string, fallback: string, ext: 'pdf' | 'ofd'): string {
@@ -57,10 +65,11 @@ export async function downloadPdfs(
   const results: DownloadResult[] = [];
 
   for (let i = 0; i < pdfs.length; i++) {
-    const pdf = pdfs[i];
-    if (!pdf) continue;
+    const raw = pdfs[i];
+    if (!raw) continue;
 
-    const ext = artifactExt(pdf);
+    const ext = artifactExt(raw);
+    const pdf = normalizeArtifact(raw, ext);
     const stagingPath = path.join(stagingDir, `${i}.${ext}`);
 
     fs.writeFileSync(stagingPath, pdf.data);
@@ -80,6 +89,7 @@ export async function downloadPdfs(
     results.push({
       finalPath,
       filename: path.basename(finalPath),
+      format: pdf.format ?? ext,
     });
   }
 

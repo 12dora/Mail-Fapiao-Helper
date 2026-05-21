@@ -360,10 +360,10 @@ export async function processMail(
       subject: mail.subject || '',
       filename: dl.filename,
       source: pdf.source,
-      format: pdf.format ?? 'pdf',
+      format: dl.format,
       documentType: pdf.documentType ?? 'invoice',
       status: 'pending',
-      reason: pdf.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr',
+      reason: dl.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr',
     });
   }
 

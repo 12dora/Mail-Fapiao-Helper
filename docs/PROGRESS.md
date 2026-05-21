@@ -380,3 +380,13 @@
 - [x] `src/ocr/efapiao.ts`: 服务模式优先调用 `/v1/invoices/parse-batch`,混合 PDF/OFD 队列统一传 `hint_type=auto`;`auto` 模式失败时仍逐张 CLI 回退
 - [x] `src/ocr/runner.ts`: 按 `ocr.batchSize` 聚合队列后批量识别,批结果逐条写回 `ocr-results.csv` 与 `ocr-pending.csv`
 - [x] 本地烟测: 通过 `serve` 模式对两张真实归档 PDF 批量识别,结果 parsed=2, `transport=http`, `extractedBy=text_layer`
+
+## Phase 6.7 — 本地邮件处理并发能力  [完成 2026-05-21]
+
+- [x] `mfh run --concurrency <n>`: 使用 worker pool 并发处理本地 `.eml` 缓存,默认并发 4
+- [x] 同一轮内用 `processedHashes` + `inFlight` 防止同一 hash 重复处理;单封失败记录 warn 并继续整轮
+- [x] Playwright Browser 懒加载单例增加启动 Promise 防重,避免多个 worker 同时启动多个 browser
+- [x] 文档同步: 架构并发模型从“单封串行”更新为“多封受控并发,单封内部固定 extractor 顺序”
+- [x] 真实缓存验证: 577 封一年本地缓存用 `--concurrency 6` 跑完,processed=577,failed=0
+- [x] PDF OCR 验证: 修复前的 1085 个 PDF 通过 `efapiao serve` `/v1/invoices/parse-batch` 跑完,transport 全部为 http;成功 784,失败 301(rule_unhandled 282,parse_failed 17,not_implemented 2)
+- [x] 真实样本修复: 下载器按 magic bytes 修正 PDF/OFD 格式;直链提取也过滤普通发票 PDF/OFD 成对重复,避免 OFD 内容伪装成 `.pdf` 污染 PDF OCR 队列

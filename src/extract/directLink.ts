@@ -143,6 +143,29 @@ function pdfContentKey(pdf: Buffer): string {
   return createHash('sha1').update(pdf).digest('hex');
 }
 
+function documentFormat(data: Buffer, source: string): 'pdf' | 'ofd' {
+  if (data.subarray(0, 4).toString('ascii') === '%PDF') return 'pdf';
+  if (data.subarray(0, 2).toString('ascii') === 'PK') return 'ofd';
+  return source.toLowerCase().includes('/ofd/') || source.toLowerCase().endsWith('.ofd') ? 'ofd' : 'pdf';
+}
+
+function looksLikeItinerary(value: string | undefined): boolean {
+  return /行程单|行程报销|航空运输电子客票|客票|机票|航班|itinerary|e-ticket|eticket/i.test(value || '');
+}
+
+function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], subject: string | undefined, log: Ctx['log']): PdfArtifact[] {
+  const hasPdf = artifacts.some((item) => (item.format ?? 'pdf') === 'pdf');
+  if (!hasPdf) return artifacts;
+
+  return artifacts.filter((item) => {
+    if (item.format !== 'ofd') return true;
+    const text = `${item.suggestedName || ''} ${item.source}`;
+    if (looksLikeItinerary(text) || looksLikeItinerary(subject)) return true;
+    log.debug(`Filtered likely duplicate OFD invoice ${item.source}; keeping PDF from same mail`);
+    return false;
+  });
+}
+
 function extractLinks(mail: ParsedMail): string[] {
   const links: string[] = [];
   if (typeof mail.html === 'string') {
@@ -244,6 +267,7 @@ const directLinkExtractor: Extractor = {
         data,
         source: url,
         suggestedName: suggestFilename(url),
+        format: documentFormat(data, url),
       });
     }
 
@@ -254,7 +278,7 @@ const directLinkExtractor: Extractor = {
       return { kind: 'manual', reason: 'directLink:download_failed' };
     }
 
-    return { kind: 'pdf', pdfs };
+    return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, mail.subject, ctx.log) };
   },
 };
 
