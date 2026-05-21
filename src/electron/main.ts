@@ -168,6 +168,95 @@ function sendProgress(data: Record<string, unknown>): void {
   mainWindow?.webContents.send('mfh:fetch-progress', data);
 }
 
+function csvCell(value: string): string {
+  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+
+function readFakeConfigPaths(): { samples: string; invoices: string; pending: string; resultsCsv: string; organizedDir: string } {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  const ocr = asObject(cfg.ocr);
+  const rename = asObject(cfg.rename);
+  return {
+    samples: path.resolve(rootDir, typeof paths.samples === 'string' ? paths.samples : './samples/raw'),
+    invoices: path.resolve(rootDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices'),
+    pending: path.resolve(rootDir, typeof paths.pending === 'string' ? paths.pending : './pending'),
+    resultsCsv: path.resolve(rootDir, typeof ocr.resultsCsv === 'string' ? ocr.resultsCsv : './invoices/ocr/ocr-results.csv'),
+    organizedDir: path.resolve(rootDir, typeof rename.organizedDir === 'string' ? rename.organizedDir : './invoices/organized'),
+  };
+}
+
+function writeFakeE2eFile(file: string, body: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, body, 'utf8');
+}
+
+function fakeFetch(): { code: number; stdout: string; stderr: string } {
+  const paths = readFakeConfigPaths();
+  const indexCsv = path.join(paths.samples, 'INDEX.csv');
+  const rows = [
+    ['messageId', 'date', 'from', 'subject', 'mailbox', 'hasAttachment', 'bodyLinkCount'],
+    ['<mfh-e2e-invoice@example.com>', '2026-05-21T09:30:00.000Z', '国家电网 <noreply@example.com>', '国家电网电子发票通知', 'INBOX', '1', '2'],
+    ['<mfh-e2e-link@example.com>', '2026-05-20T12:00:00.000Z', '服务商 <vendor@example.com>', '发票下载链接已过期', 'INBOX', '0', '1'],
+  ];
+  writeFakeE2eFile(indexCsv, `${rows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`);
+  writeFakeE2eFile(path.join(paths.samples, '2026-05', 'mfh-e2e-invoice.eml'), 'Subject: 国家电网电子发票通知\n\nfake invoice mail\n');
+  return { code: 0, stdout: 'saved mfh-e2e-invoice.eml\ndone: seen=2 saved=2 skippedKnown=0\n', stderr: '' };
+}
+
+function fakePipeline(): { code: number; stdout: string; stderr: string } {
+  const paths = readFakeConfigPaths();
+  const pendingCsv = path.join(paths.invoices, 'ocr', 'ocr-pending.csv');
+  const rows = [
+    ['hash', 'date', 'from', 'subject', 'filename', 'format', 'documentType', 'status', 'reason'],
+    ['mfh-e2e-invoice', '2026-05-21', '国家电网 <noreply@example.com>', '国家电网电子发票通知', '国家电网-318.42.pdf', 'pdf', 'invoice', 'pending', ''],
+    ['mfh-e2e-trip', '2026-05-20', '差旅平台 <travel@example.com>', '行程单通知', '行程单.pdf', 'pdf', 'itinerary', 'pending', ''],
+    ['mfh-e2e-supporting', '2026-05-20', '高速通行 <etc@example.com>', '通行费汇总单', '通行费电子票据汇总单.pdf', 'pdf', 'supporting', 'ignored', 'supporting_document'],
+  ];
+  writeFakeE2eFile(pendingCsv, `${rows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`);
+  writeFakeE2eFile(path.join(paths.invoices, '国家电网-318.42.pdf'), '%PDF-1.4\n% fake\n');
+  writeFakeE2eFile(path.join(paths.invoices, '行程单.pdf'), '%PDF-1.4\n% fake\n');
+  return { code: 0, stdout: 'processed 2 cached mails\n', stderr: '' };
+}
+
+function fakeOcr(): { code: number; stdout: string; stderr: string } {
+  const paths = readFakeConfigPaths();
+  const pendingRows = [
+    ['hash', 'date', 'from', 'subject', 'filename', 'format', 'documentType', 'status', 'reason'],
+    ['mfh-e2e-invoice', '2026-05-21', '国家电网 <noreply@example.com>', '国家电网电子发票通知', '国家电网-318.42.pdf', 'pdf', 'invoice', 'recognized', ''],
+    ['mfh-e2e-trip', '2026-05-20', '差旅平台 <travel@example.com>', '行程单通知', '行程单.pdf', 'pdf', 'itinerary', 'recognized', ''],
+    ['mfh-e2e-supporting', '2026-05-20', '高速通行 <etc@example.com>', '通行费汇总单', '通行费电子票据汇总单.pdf', 'pdf', 'supporting', 'ignored', 'supporting_document'],
+  ];
+  writeFakeE2eFile(path.join(paths.invoices, 'ocr', 'ocr-pending.csv'), `${pendingRows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`);
+  const rows = [
+    ['filename', 'dateValue', 'date', 'seller', 'invoiceNo', 'amount', 'transport', 'status', 'documentType', 'invoiceType', 'error'],
+    ['国家电网-318.42.pdf', '2026-05-21', '2026-05-21', '国家电网有限公司', '1234567890', '318.42', 'http', 'ok', 'invoice', '电子发票', ''],
+    ['行程单.pdf', '2026-05-20', '2026-05-20', '差旅平台', 'TRIP-20260520', '88.00', 'http', 'ok', 'itinerary', '行程单', ''],
+  ];
+  writeFakeE2eFile(paths.resultsCsv, `${rows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`);
+  const manualRows = [
+    ['messageId', 'date', 'from', 'subject', 'reason'],
+    ['<mfh-e2e-link@example.com>', '2026-05-20T12:00:00.000Z', '服务商 <vendor@example.com>', '发票下载链接已过期', 'http_403'],
+  ];
+  writeFakeE2eFile(path.join(paths.pending, 'pending.csv'), `${manualRows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`);
+  fs.mkdirSync(paths.organizedDir, { recursive: true });
+  return { code: 0, stdout: 'OCR complete: scanned=3, parsed=2, skipped=1, failed=0, updated=2\n', stderr: '' };
+}
+
+function runFakeCli(command: string): { code: number; stdout: string; stderr: string } | undefined {
+  if (process.env.MFH_E2E_FAKE_CLI !== '1') return undefined;
+  if (command === 'fetch') return fakeFetch();
+  if (command === 'run') return fakePipeline();
+  if (command === 'ocr') return fakeOcr();
+  if (command === 'organize') {
+    const paths = readFakeConfigPaths();
+    fs.mkdirSync(paths.organizedDir, { recursive: true });
+    return { code: 0, stdout: `organized into ${paths.organizedDir}\n`, stderr: '' };
+  }
+  return { code: 1, stdout: '', stderr: `unsupported fake command: ${command}` };
+}
+
 function parseFetchLine(line: string, current: { seen: number; saved: number; skipped: number }): void {
   const done = /done: seen=(\d+) saved=(\d+) skippedKnown=(\d+)/.exec(line);
   if (done) {
@@ -202,6 +291,18 @@ function parseFetchLine(line: string, current: { seen: number; saved: number; sk
 
 function runCli(command: string, args: string[], opts: { progress?: boolean } = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const fake = runFakeCli(command);
+    if (fake) {
+      const current = { seen: 0, saved: 0, skipped: 0 };
+      if (opts.progress) {
+        sendProgress({ percent: 8, matched: 0, saved: 0, skipped: 0, step: '邮箱', message: '正在连接邮箱并搜索邮件。' });
+        for (const line of fake.stdout.split(/\r?\n/)) {
+          if (line.trim()) parseFetchLine(line, current);
+        }
+      }
+      resolve(fake);
+      return;
+    }
     const env = {
       ...process.env,
       ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
