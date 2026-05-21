@@ -37,6 +37,12 @@
     "enabled": true,
     "provider": "efapiao",
     "binaryPath": "auto",
+    "executionMode": "auto",
+    "serviceUrl": "http://127.0.0.1:8000",
+    "serviceHost": "127.0.0.1",
+    "servicePort": 8000,
+    "serviceWorkers": 1,
+    "serviceStartupMs": 30000,
     "timeoutMs": 120000,
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }

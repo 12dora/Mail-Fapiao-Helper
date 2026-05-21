@@ -15,6 +15,13 @@ export interface OcrResult {
   status: OcrStatus;
   fields: Partial<InvoiceFields>;
   error: string;
+  source?: {
+    format: DocumentFormat;
+    parserVersion: string;
+    extractedBy: string;
+    ocrVendor: string | null;
+  };
+  transport?: 'cli' | 'http';
   raw: unknown;
 }
 

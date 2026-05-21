@@ -350,3 +350,11 @@
 - [x] 放置到 `vendor/efapiao/0.1.2/darwin-arm64/efapiao`,并验证 `efapiao --version`
 - [x] `ocr.binaryPath="auto"`: 当前平台优先使用 `vendor/efapiao/0.1.2/<platform-arch>/efapiao`,缺失时回退 PATH 中的 `efapiao`
 - [x] 多架构目录约定: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`, `windows-x86_64`
+
+## Phase 6.3 — OCR HTTP 服务模式与真实样本诊断  [完成 2026-05-21]
+
+- [x] `src/ocr/efapiao.ts`: `ocr.executionMode=auto` 时优先探活/启动 `efapiao serve`,通过 `/v1/invoices/parse` 批量 POST 文件;服务不可用时回退 CLI
+- [x] `src/ocr/runner.ts`: `ocr-results.csv` 增加 `transport/extractedBy/parserVersion/ocrVendor`,旧结果 CSV 自动补空列后继续追加
+- [x] 真实样本链路: 清空本地运行缓存后抓取 2026-02-21 至 2026-05-21 邮件,保存 138 封候选邮件;归档 372 个文档(PDF 246,OFD 126),归档阶段 skipped=0
+- [x] 真实 OCR 观察: `efapiao v0.1.2` PDF 文本层可识别;OFD 发票返回 `not_implemented`;通行费汇总/行程 PDF 返回 `parse_failed`
+- [x] 上游问题定位: `v0.1.2 darwin-arm64` 的 `efapiao serve` 因 PyInstaller exclude `uvicorn.middleware.wsgi` 启动失败;本项目 `auto` 模式会回退 CLI,待上游 release 修复后自动走 HTTP

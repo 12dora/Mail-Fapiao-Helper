@@ -167,18 +167,71 @@ function resultLine(row: PendingRow, result: OcrResult): string {
     fields.amount ?? '',
     fields.date ?? '',
     fields.invoiceNo ?? '',
+    result.transport ?? '',
+    result.source?.extractedBy ?? '',
+    result.source?.parserVersion ?? '',
+    result.source?.ocrVendor ?? '',
     result.status,
     result.error,
   ].map(csvCell).join(',') + '\n';
 }
 
+const RESULT_HEADER = [
+  'hash',
+  'messageId',
+  'date',
+  'from',
+  'subject',
+  'filename',
+  'source',
+  'format',
+  'documentType',
+  'invoiceType',
+  'seller',
+  'amount',
+  'dateValue',
+  'invoiceNo',
+  'transport',
+  'extractedBy',
+  'parserVersion',
+  'ocrVendor',
+  'status',
+  'error',
+];
+
+function migrateResultCsvIfNeeded(csvPath: string): void {
+  if (!fs.existsSync(csvPath)) return;
+  const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/);
+  const oldHeader = parseCsvLine(lines[0] ?? '');
+  if (oldHeader.join('\0') === RESULT_HEADER.join('\0')) return;
+  if (!oldHeader.includes('hash') || !oldHeader.includes('status')) return;
+
+  const tmpPath = `${csvPath}.tmp`;
+  const out: string[] = ['﻿' + RESULT_HEADER.join(',') + '\n'];
+  for (const line of lines.slice(1)) {
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+    const raw: Record<string, string> = {};
+    for (let i = 0; i < oldHeader.length; i++) {
+      const key = oldHeader[i];
+      if (!key) continue;
+      raw[key] = cols[i] ?? '';
+    }
+    out.push(RESULT_HEADER.map((key) => csvCell(raw[key] ?? '')).join(',') + '\n');
+  }
+  fs.writeFileSync(tmpPath, out.join(''), 'utf8');
+  fs.renameSync(tmpPath, csvPath);
+}
+
 function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void {
   const exists = fs.existsSync(csvPath);
   ensureDir(path.dirname(csvPath));
-  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,status,error\n';
+  const header = RESULT_HEADER.join(',') + '\n';
   if (!exists) {
     fs.writeFileSync(csvPath, '﻿' + header + resultLine(row, result), 'utf8');
   } else {
+    migrateResultCsvIfNeeded(csvPath);
     fs.appendFileSync(csvPath, resultLine(row, result), 'utf8');
   }
 }
