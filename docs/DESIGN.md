@@ -137,6 +137,12 @@ disconnect
     "enabled": true,
     "provider": "efapiao",
     "binaryPath": "auto",
+    "executionMode": "auto",
+    "serviceUrl": "http://127.0.0.1:8000",
+    "serviceHost": "127.0.0.1",
+    "servicePort": 8000,
+    "serviceWorkers": 1,
+    "serviceStartupMs": 30000,
     "timeoutMs": 120000,
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
@@ -165,7 +171,8 @@ disconnect
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
 - 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
-- `mfh ocr run` 调用 `efapiao` 二进制，执行 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`，识别结果写入 `ocr.resultsCsv`；`ocr.binaryPath="auto"` 时优先使用 `vendor/efapiao/0.1.2/<platform-arch>/` 下的内置二进制，缺失时回退 PATH
+- `mfh ocr run` 默认使用 `ocr.executionMode="auto"`：先探活/启动 `efapiao serve` 本地 HTTP 服务，向 `/v1/invoices/parse` 批量 POST；服务不可用时回退逐张 CLI。`ocr.binaryPath="auto"` 时优先使用 `vendor/efapiao/0.1.2/<platform-arch>/` 下的内置二进制，缺失时回退 PATH
+- `ocr.resultsCsv` 记录 `transport/extractedBy/parserVersion/ocrVendor`；`extractedBy=text_layer` 表示文本层规则命中，`qrcode` 表示二维码/渲染兜底命中，`ocr` 表示 OCR vendor 介入
 - `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`，行本身保留，便于 GUI 和重复执行查看历史
 - `mfh organize` 只消费 `ocr.resultsCsv`，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）

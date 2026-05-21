@@ -39,6 +39,12 @@ export interface Config {
     enabled: boolean;
     provider: string;
     binaryPath: string;
+    executionMode: 'auto' | 'serve' | 'cli';
+    serviceUrl: string;
+    serviceHost: string;
+    servicePort: number;
+    serviceWorkers: number;
+    serviceStartupMs: number;
     timeoutMs: number;
     resultsCsv: string;
     credentials: Record<string, string>;
@@ -202,6 +208,27 @@ export function loadConfig(path: string): Config {
       binaryPath: typeof (raw as { ocr?: { binaryPath?: unknown } }).ocr?.binaryPath === 'string'
         ? ((raw as { ocr: { binaryPath: string } }).ocr.binaryPath)
         : 'auto',
+      executionMode: (() => {
+        const v = (raw as { ocr?: { executionMode?: unknown } }).ocr?.executionMode;
+        if (v === undefined || v === null || v === '') return 'auto';
+        if (v === 'auto' || v === 'serve' || v === 'cli') return v;
+        throw new Error('config.ocr.executionMode must be one of auto, serve, cli');
+      })(),
+      serviceUrl: typeof (raw as { ocr?: { serviceUrl?: unknown } }).ocr?.serviceUrl === 'string'
+        ? ((raw as { ocr: { serviceUrl: string } }).ocr.serviceUrl).replace(/\/+$/, '')
+        : 'http://127.0.0.1:8000',
+      serviceHost: typeof (raw as { ocr?: { serviceHost?: unknown } }).ocr?.serviceHost === 'string'
+        ? ((raw as { ocr: { serviceHost: string } }).ocr.serviceHost)
+        : '127.0.0.1',
+      servicePort: typeof (raw as { ocr?: { servicePort?: unknown } }).ocr?.servicePort === 'number'
+        ? ((raw as { ocr: { servicePort: number } }).ocr.servicePort)
+        : 8000,
+      serviceWorkers: typeof (raw as { ocr?: { serviceWorkers?: unknown } }).ocr?.serviceWorkers === 'number'
+        ? ((raw as { ocr: { serviceWorkers: number } }).ocr.serviceWorkers)
+        : 1,
+      serviceStartupMs: typeof (raw as { ocr?: { serviceStartupMs?: unknown } }).ocr?.serviceStartupMs === 'number'
+        ? ((raw as { ocr: { serviceStartupMs: number } }).ocr.serviceStartupMs)
+        : 30000,
       timeoutMs: typeof (raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs === 'number'
         ? ((raw as { ocr: { timeoutMs: number } }).ocr.timeoutMs)
         : 120000,
@@ -257,6 +284,18 @@ export function loadConfig(path: string): Config {
   }
   if (cfg.llm.enabled) {
     throw new Error('config.llm.enabled=true is not supported in this build');
+  }
+  if (cfg.ocr.servicePort <= 0 || cfg.ocr.servicePort > 65535) {
+    throw new Error('config.ocr.servicePort must be in 1..65535');
+  }
+  if (!Number.isInteger(cfg.ocr.serviceWorkers) || cfg.ocr.serviceWorkers <= 0) {
+    throw new Error('config.ocr.serviceWorkers must be a positive integer');
+  }
+  if (cfg.ocr.serviceStartupMs <= 0) {
+    throw new Error('config.ocr.serviceStartupMs must be > 0');
+  }
+  if (cfg.ocr.timeoutMs <= 0) {
+    throw new Error('config.ocr.timeoutMs must be > 0');
   }
 
   return cfg;

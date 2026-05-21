@@ -8,6 +8,7 @@ dist/
 # 用户态运行产物（含真实邮件内容、凭证、密码）
 config.json
 state.json
+state*.json
 samples/
 invoices/
 invoices.csv
