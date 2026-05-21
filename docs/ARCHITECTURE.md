@@ -28,6 +28,7 @@ flowchart LR
 
 **边界**：
 - `mail/` 只负责 IMAP I/O 与产出 `ParsedMail`，不感知发票语义。
+- `mail/` 按用户选择的 mailbox 顺序抓取；`config.imap.mailbox=[]` 表示 IMAP `LIST` 返回的全部 mailbox，旧字符串格式仅兼容读取。
 - `extract/` 决策 + 产出 `DocumentArtifact` 或 `manual`，不写盘。
 - `download/` 唯一落盘者（含 .staging→final、冲突重命名）。
 - `rename/` + CSV 写入唯一发生点。
@@ -129,7 +130,7 @@ DISCOVERED                  // 来自 fetcher
 | 单封 mail 解析 | 该封 → manual(reason="parse_error")；继续下一封 |
 | `Extractor.extract` 抛错 | 该封 → manual(reason=`<extractor>:<err.message>`) |
 | `SiteHandler.handle` 抛错或超时 | 视同 thirdParty Extractor 失败 → manual |
-| 下载 HTTP / Playwright 超时 | manual |
+| 下载 HTTP / SiteHandler 网络抖动 / Playwright 超时 | 按 `config.network.retries` 自动重试；仍失败 → manual(reason 含 `network_retry_failed`) |
 | OFD 行程单 | 照常归档 `.ofd`，并写 `invoices/ocr/ocr-pending.csv`；后续 OCR 引擎负责识别，不阻塞同封邮件中的 PDF 发票 |
 | OCR 失败或字段缺失 | **不阻塞**：走 rename.fallback 模板，照常归档；CSV 字段留空 |
 | rename 模板渲染失败 | 用 fallback 模板；再失败用 `<msgIdHash>.pdf` |
@@ -229,3 +230,5 @@ DISCOVERED                  // 来自 fetcher
 1. **顺序 + 数组就是架构**：单封邮件串行通过一个固定顺序的 Extractor 数组，无并发、无 DI、无插件、无热插拔；这是为了把 v1 的复杂度锁死在"读得懂一晚上"的量级。
 2. **CSV 是归档真相，state.json 是缓存**：所有幂等都围绕 messageId（缺失则用 hash 兜底），COMMIT 顺序固定为 staging→final→CSV→state，启动时用 CSV 自愈未提交窗口。
 3. **失败永远降级为 manual**：除 IMAP 连接和 state 写盘两个底线外，任何层抛错都把当前邮件丢进 pending 队列继续下一封，保证一次 `mfh run` 永远能跑完。
+
+`mfh run` 会在结束时汇总本轮因 `network_retry_failed` 进入 pending 的邮件（hash/date/from/subject/reason），方便用户区分网络抖动与真实不支持的 vendor。

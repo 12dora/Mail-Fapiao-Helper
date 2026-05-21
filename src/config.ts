@@ -7,7 +7,7 @@ export interface Config {
     user: string;
     pass: string;
     tls: boolean;
-    mailbox: string;
+    mailbox: string[];
   };
   filter: {
     keywords: string[];
@@ -45,6 +45,10 @@ export interface Config {
   playwright: {
     headless: boolean;
     timeoutMs: number;
+  };
+  network: {
+    retries: number;
+    retryDelayMs: number;
   };
   log: {
     level: 'debug' | 'info' | 'warn' | 'error';
@@ -84,6 +88,11 @@ function asBool(v: unknown, path: string): boolean {
   return v;
 }
 
+function optNumber(v: unknown, path: string, fallback: number): number {
+  if (v === undefined || v === null) return fallback;
+  return asNumber(v, path);
+}
+
 function optDateString(v: unknown, path: string): string | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   if (typeof v !== 'string') {
@@ -108,6 +117,21 @@ function asStringArray(v: unknown, path: string): string[] {
   return v as string[];
 }
 
+function asMailboxList(v: unknown, path: string): string[] {
+  if (typeof v === 'string') return v.length > 0 ? [v] : [];
+  if (!Array.isArray(v)) {
+    throw new Error(`config.${path} must be a string or an array of strings`);
+  }
+  const out: string[] = [];
+  for (let i = 0; i < v.length; i++) {
+    if (typeof v[i] !== 'string' || v[i].length === 0) {
+      throw new Error(`config.${path}[${i}] must be a non-empty string`);
+    }
+    out.push(v[i]);
+  }
+  return out;
+}
+
 export function loadConfig(path: string): Config {
   let text: string;
   try {
@@ -129,7 +153,7 @@ export function loadConfig(path: string): Config {
       user: asString(requireField(raw, 'imap.user'), 'imap.user'),
       pass: asString(requireField(raw, 'imap.pass'), 'imap.pass'),
       tls: asBool(requireField(raw, 'imap.tls'), 'imap.tls'),
-      mailbox: asString(requireField(raw, 'imap.mailbox'), 'imap.mailbox'),
+      mailbox: asMailboxList(requireField(raw, 'imap.mailbox'), 'imap.mailbox'),
     },
     filter: {
       keywords: asStringArray(requireField(raw, 'filter.keywords'), 'filter.keywords'),
@@ -170,6 +194,10 @@ export function loadConfig(path: string): Config {
       headless: asBool(requireField(raw, 'playwright.headless'), 'playwright.headless'),
       timeoutMs: asNumber(requireField(raw, 'playwright.timeoutMs'), 'playwright.timeoutMs'),
     },
+    network: {
+      retries: optNumber((raw as { network?: { retries?: unknown } }).network?.retries, 'network.retries', 3),
+      retryDelayMs: optNumber((raw as { network?: { retryDelayMs?: unknown } }).network?.retryDelayMs, 'network.retryDelayMs', 1000),
+    },
     log: {
       level: (() => {
         const v = (raw as { log?: { level?: unknown } }).log?.level;
@@ -192,6 +220,12 @@ export function loadConfig(path: string): Config {
   }
   if (cfg.imap.port <= 0 || cfg.imap.port > 65535) {
     throw new Error('config.imap.port must be in 1..65535');
+  }
+  if (!Number.isInteger(cfg.network.retries) || cfg.network.retries < 0) {
+    throw new Error('config.network.retries must be a non-negative integer');
+  }
+  if (cfg.network.retryDelayMs < 0) {
+    throw new Error('config.network.retryDelayMs must be >= 0');
   }
   if (cfg.ocr.enabled) {
     throw new Error('config.ocr.enabled=true is not supported in this build');

@@ -34,7 +34,7 @@
                 </div>
                 <div class="stat">
                     <div class="stat__label">待处理</div>
-                    <div class="stat__value">6</div>
+                    <div class="stat__value">8</div>
                     <div class="stat__delta is-down">需人工介入</div>
                 </div>
                 <div class="stat">
@@ -115,6 +115,8 @@
                             <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/a91f0e2c.eml "国家电网电子发票通知"</span></div>
                             <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/77d3aa9b.eml "高德打车发票已开具"</span></div>
                             <div class="console__line"><span class="console__time">14:02:15</span><span class="console__tag">skip</span><span class="console__msg">已存在 hash 5f0a...</span></div>
+                            <div class="console__line"><span class="console__time">14:02:16</span><span class="console__tag warn">retry</span><span class="console__msg">network retry 1/3 GET https://nnfp.jss.com.cn/...: http_500</span></div>
+                            <div class="console__line"><span class="console__time">14:02:19</span><span class="console__tag warn">manual</span><span class="console__msg">pending 53a93fd33bea reason=thirdParty:network_retry_failed:GET:https://nnfp.jss.com.cn/...:http_500</span></div>
                         </div>
                     </div>
                 </div>
@@ -149,7 +151,7 @@
                                 <span class="pill pill--warn"><span class="pill__dot"></span>部分成功</span>
                             </div>
                             <div class="small muted">mfh run · phase 3 试运行</div>
-                            <div class="mono small muted mt-12">filed 12 · pending 3 · vendor-A 超时 · 11.2s</div>
+                            <div class="mono small muted mt-12">filed 12 · pending 3 · network failures 2 · 11.2s</div>
                         </div>
 
                         <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--err);">
@@ -297,7 +299,7 @@ runBtn?.addEventListener('click', () => {
 
             const line = document.createElement('div');
             line.className = 'console__line';
-            line.innerHTML = '<span class="console__time">14:02:16</span><span class="console__tag ok">done</span><span class="console__msg">处理完成 · 24 封邮件 · 6 个新文件 · 5.8s</span>';
+            line.innerHTML = '<span class="console__time">14:02:20</span><span class="console__tag ok">done</span><span class="console__msg">处理完成 · 24 封邮件 · 6 个新文件 · 网络失败 1 封已进 pending · 5.8s</span>';
             consoleOut.appendChild(line);
             consoleOut.scrollTop = consoleOut.scrollHeight;
         }

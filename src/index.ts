@@ -10,6 +10,7 @@ import { log } from './log.js';
 import { loadState, saveState, type State } from './state.js';
 import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
+import type { ProcessMailResult } from './pipeline.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -19,11 +20,25 @@ Usage:
 Commands:
   fetch    Fetch matching mails as .eml into samples/raw/
   run      Process emails and extract invoices
+  pending  Inspect manual processing queue
 
 Options:
   -h, --help    Show this help
 
 Run 'mfh <command> --help' for command-specific options.
+`;
+
+const PENDING_USAGE = `mfh pending — inspect manual processing queue
+
+Usage:
+  mfh pending <command> [options]
+
+Commands:
+  list    List emails currently in pending.csv
+
+Options:
+  --config <path>      Path to config.json        (default: ./config.json)
+  -h, --help           Show this help
 `;
 
 const FETCH_USAGE = `mfh fetch — fetch matching mails as .eml
@@ -112,7 +127,7 @@ function csvCell(v: string): string {
   return v;
 }
 
-const INDEX_HEADER = 'messageId,date,from,subject,hasAttachment,bodyLinkCount';
+const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
 
 function ensureIndexCsv(path: string): void {
   if (existsSync(path)) return;
@@ -142,6 +157,7 @@ function appendIndexRow(path: string, m: RawMail): void {
     csvCell(m.date.toISOString()),
     csvCell(m.from),
     csvCell(m.subject),
+    csvCell(m.mailbox),
     m.hasAttachment ? '1' : '0',
     String(m.bodyLinkCount),
   ].join(',');
@@ -342,6 +358,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   const rawDir = cfg.paths.samples;
   let processed = 0;
   let skipped = 0;
+  const networkFailures: ProcessMailResult[] = [];
 
   try {
     for await (const emlPath of walkEmls(rawDir)) {
@@ -376,7 +393,10 @@ async function cmdRun(argv: string[]): Promise<number> {
         continue;
       }
 
-      await processMail(mail, cfg, log, state, saveStateFn, getBrowser, { force: opts.onlyMail !== undefined });
+      const result = await processMail(mail, cfg, log, state, saveStateFn, getBrowser, { force: opts.onlyMail !== undefined });
+      if (result.outcome === 'manual' && result.reason?.includes('network_retry_failed')) {
+        networkFailures.push(result);
+      }
       processed++;
     }
   } catch (e) {
@@ -389,6 +409,127 @@ async function cmdRun(argv: string[]): Promise<number> {
   }
 
   log.info(`Run complete: processed=${processed}, skipped=${skipped}`);
+  if (networkFailures.length > 0) {
+    log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
+    for (const failure of networkFailures) {
+      log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
+    }
+  }
+  return 0;
+}
+
+interface PendingRow {
+  messageId: string;
+  date: string;
+  from: string;
+  subject: string;
+  reason: string;
+}
+
+interface PendingOpts {
+  configPath: string;
+}
+
+function parsePendingArgs(argv: string[]): PendingOpts | 'help' {
+  if (argv.length === 0) return 'help';
+  const [subcmd, ...rest] = argv;
+  if (subcmd === '-h' || subcmd === '--help') return 'help';
+  if (subcmd !== 'list') throw new Error(`unknown pending command: ${subcmd}`);
+
+  const opts: PendingOpts = { configPath: './config.json' };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
+    throw new Error(`unknown option: ${a}`);
+  }
+  return opts;
+}
+
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      quoted = true;
+    } else if (ch === ',') {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function readPendingRows(csvPath: string): PendingRow[] {
+  if (!existsSync(csvPath)) return [];
+  const text = readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+  const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
+  const rows: PendingRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i] ?? '');
+    rows.push({
+      messageId: cols[0] ?? '',
+      date: cols[1] ?? '',
+      from: cols[2] ?? '',
+      subject: cols[3] ?? '',
+      reason: cols[4] ?? '',
+    });
+  }
+  return rows;
+}
+
+function printPendingGroup(title: string, rows: PendingRow[]): void {
+  if (rows.length === 0) return;
+  process.stdout.write(`${title}: ${rows.length}\n`);
+  for (const row of rows) {
+    const hash = msgIdHash(row.messageId || undefined, row.from, row.date, row.subject);
+    process.stdout.write(`  ${hash} date=${row.date} from="${row.from}" subject="${row.subject}" reason=${row.reason}\n`);
+  }
+}
+
+async function cmdPending(argv: string[]): Promise<number> {
+  let parsed: PendingOpts | 'help';
+  try {
+    parsed = parsePendingArgs(argv);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n`);
+    process.stderr.write(PENDING_USAGE);
+    return 2;
+  }
+  if (parsed === 'help') { process.stdout.write(PENDING_USAGE); return 0; }
+
+  let cfg: Config;
+  try {
+    cfg = loadConfig(resolve(parsed.configPath));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 2;
+  }
+
+  const csvPath = join(resolve(cfg.paths.pending), 'pending.csv');
+  const rows = readPendingRows(csvPath);
+  const networkRows = rows.filter((row) => row.reason.includes('network_retry_failed'));
+  const manualRows = rows.filter((row) => !row.reason.includes('network_retry_failed'));
+
+  process.stdout.write(`Pending queue: ${rows.length} (${csvPath})\n`);
+  printPendingGroup('Network retry failures', networkRows);
+  printPendingGroup('Manual', manualRows);
   return 0;
 }
 
@@ -404,6 +545,8 @@ async function main(): Promise<number> {
       return cmdFetch(rest);
     case 'run':
       return cmdRun(rest);
+    case 'pending':
+      return cmdPending(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n`);
       process.stderr.write(ROOT_USAGE);

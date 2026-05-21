@@ -52,8 +52,15 @@
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">收件箱</label>
-                        <input class="input" value="INBOX">
+                        <label class="field__label">邮箱文件夹 <span class="field__hint">不选择则扫描全部</span></label>
+                        <select class="select" multiple size="5">
+                            <option>INBOX</option>
+                            <option>其他文件夹/已处理 2025发票</option>
+                            <option>其他文件夹/已处理 2026发票</option>
+                            <option>Sent Messages</option>
+                            <option>邮件归档</option>
+                        </select>
+                        <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">imap.mailbox</code>；空数组表示全部 mailbox</div>
                     </div>
                     <div class="field">
                         <label class="field__label">TLS 加密</label>
@@ -245,6 +252,24 @@
                         <input class="input input--mono" value="30000">
                     </div>
                 </div>
+            </div>
+
+            <!-- 网络重试 -->
+            <div class="card">
+                <h3 class="card__title">网络重试</h3>
+                <p class="card__sub">第三方站点或直链下载临时失败时自动重试；仍失败会进入待人工队列并在运行结束列出</p>
+
+                <div class="field-row">
+                    <div class="field">
+                        <label class="field__label">重试次数</label>
+                        <input class="input input--mono" value="3">
+                    </div>
+                    <div class="field">
+                        <label class="field__label">基础间隔（毫秒）</label>
+                        <input class="input input--mono" value="1000">
+                    </div>
+                </div>
+                <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">network.retries</code> 与 <code class="code-inline">network.retryDelayMs</code></div>
             </div>
 
             <!-- 保存按钮 -->

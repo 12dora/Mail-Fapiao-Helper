@@ -30,7 +30,7 @@ export function safeFilename(name: string, fallback: string): string {
   return cleaned.length > 0 ? cleaned : fallback;
 }
 
-export async function fetchBuffer(url: string, ctx: Ctx, referer?: string): Promise<{ data: Buffer; contentType: string }> {
+export async function fetchBuffer(url: string, ctx: Ctx, referer?: string): Promise<{ data: Buffer; contentType: string; contentDisposition: string }> {
   const response = await ctx.http(url, {
     redirect: 'follow',
     headers: {
@@ -47,6 +47,7 @@ export async function fetchBuffer(url: string, ctx: Ctx, referer?: string): Prom
   return {
     data: Buffer.from(await response.arrayBuffer()),
     contentType: response.headers.get('content-type') ?? '',
+    contentDisposition: response.headers.get('content-disposition') ?? '',
   };
 }
 
