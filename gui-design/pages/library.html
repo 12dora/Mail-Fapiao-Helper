@@ -16,85 +16,82 @@
             <span class="toolbar__crumb">工作流</span>
             <span class="toolbar__title">发票库</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">1,142 张发票 · invoices.csv</span>
+            <span class="toolbar__meta"><span data-lib="recognized">0</span> 条识别结果 · 发票清册</span>
         </div>
 
         <div class="page stagger">
             <!-- 统计卡片 -->
             <div class="stats">
                 <div class="stat">
-                    <div class="stat__label">OCR 队列</div>
-                    <div class="stat__value">1,086</div>
-                    <div class="stat__delta is-flat">ocr-pending.csv</div>
+                    <div class="stat__label">待识别文件</div>
+                    <div class="stat__value" data-lib="total">0</div>
+                    <div class="stat__delta is-flat">待识别清单</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">已识别</div>
-                    <div class="stat__value">784</div>
-                    <div class="stat__delta">recognized</div>
+                    <div class="stat__value" data-lib="recognized">0</div>
+                    <div class="stat__delta">已识别</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">支撑材料</div>
-                    <div class="stat__value">301</div>
-                    <div class="stat__delta is-flat">ignored</div>
+                    <div class="stat__value" data-lib="ignored">0</div>
+                    <div class="stat__delta is-flat">已归档</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">失败</div>
-                    <div class="stat__value" style="color: var(--err);">1</div>
-                    <div class="stat__delta is-down">rule_unhandled</div>
+                    <div class="stat__value" style="color: var(--err);" data-lib="failed">0</div>
+                    <div class="stat__delta is-down">暂未识别</div>
                 </div>
             </div>
 
             <!-- 过滤栏 -->
             <div class="filterbar">
-                <input class="input" placeholder="按销售方、票号、金额范围搜索…" style="width: 280px;">
+                <input class="input" data-search="library" placeholder="按销售方、票号、金额搜索…" style="width: 280px;">
 
                 <div class="tabs">
-                    <button class="tab is-active">全部</button>
-                    <button class="tab">已识别</button>
-                    <button class="tab">失败</button>
-                    <button class="tab">支撑材料</button>
-                    <button class="tab">行程单</button>
+                    <button class="tab is-active" data-library-tab="all">全部</button>
+                    <button class="tab" data-library-tab="recognized">已识别</button>
+                    <button class="tab" data-library-tab="failed">失败</button>
+                    <button class="tab" data-library-tab="supporting">支撑材料</button>
+                    <button class="tab" data-library-tab="itinerary">行程单</button>
                 </div>
 
-                <select class="select" style="width: 160px;">
-                    <option>全部销售方</option>
-                    <option>国家电网</option>
-                    <option>携程</option>
-                    <option>阿里云</option>
+                <select class="select" data-library-seller style="width: 160px;">
+                    <option value="">全部销售方</option>
                 </select>
 
                 <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                    <div class="check"></div>
+                    <div class="check" data-filter="library-failed"></div>
                     仅失败项
                 </label>
 
                 <div class="spacer"></div>
-                <button class="btn btn--sm">手动改分类</button>
-                <button class="btn btn--sm">重跑 OCR</button>
-                <button class="btn btn--sm">整理输出</button>
+                <button class="btn btn--sm" data-action="open-invoices-folder">打开归档目录</button>
+                <button class="btn btn--sm btn--primary" data-action="run-ocr" data-force="true">开始识别</button>
+                <button class="btn btn--sm" data-action="organize">整理输出</button>
             </div>
 
             <div class="grid-3">
                 <div class="card card--tight">
                     <div class="row row--between">
                         <span class="small muted">通行费汇总单</span>
-                        <span class="mono strong">260</span>
+                        <span class="mono strong" data-lib="supporting">0</span>
                     </div>
-                    <div class="small muted mt-12">supporting_document:toll_summary</div>
+                    <div class="small muted mt-12">通行费汇总材料</div>
                 </div>
                 <div class="card card--tight">
                     <div class="row row--between">
                         <span class="small muted">行程/订单明细</span>
-                        <span class="mono strong">32</span>
+                        <span class="mono strong" data-lib="itinerary">0</span>
                     </div>
-                    <div class="small muted mt-12">travel_detail + order_detail</div>
+                    <div class="small muted mt-12">行程明细与订单明细</div>
                 </div>
                 <div class="card card--tight">
                     <div class="row row--between">
                         <span class="small muted">结账单/堂食明细</span>
-                        <span class="mono strong">9</span>
+                        <span class="mono strong" data-lib="pending">0</span>
                     </div>
-                    <div class="small muted mt-12">statement + meal_detail</div>
+                    <div class="small muted mt-12">结账单与堂食明细</div>
                 </div>
             </div>
 
@@ -103,136 +100,24 @@
                 <table class="table">
                     <thead>
                         <tr>
-                            <th style="width: 110px;">开票日期</th>
-                            <th>销售方</th>
-                            <th style="width: 200px;">发票号码</th>
-                            <th class="col-num" style="width: 130px;">金额</th>
-                            <th style="width: 100px;">来源</th>
-                            <th style="width: 180px;">文件名</th>
-                            <th style="width: 90px;">状态</th>
+                            <th style="width: 110px;" data-sort-key="date">开票日期</th>
+                            <th data-sort-key="seller">销售方</th>
+                            <th style="width: 200px;" data-sort-key="invoiceNo">发票号码</th>
+                            <th class="col-num" style="width: 130px;" data-sort-key="amount">金额</th>
+                            <th style="width: 100px;" data-sort-key="source">来源</th>
+                            <th style="width: 180px;" data-sort-key="filename">文件名</th>
+                            <th style="width: 90px;" data-sort-key="status">状态</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        <tr>
-                            <td class="mono">2026-05-20</td>
-                            <td>国家电网有限公司 上海市电力公司</td>
-                            <td class="mono">25312000000482183920</td>
-                            <td class="mono col-num">¥ 318.42</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">国家电网-318.42.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-20</td>
-                            <td>携程计算机技术（上海）有限公司</td>
-                            <td class="mono">25310000000391847201</td>
-                            <td class="mono col-num">¥ 1,280.00</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">携程-1280.00.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-20</td>
-                            <td>阿里云计算有限公司</td>
-                            <td class="mono">25330000000128494102</td>
-                            <td class="mono col-num">¥ 3,418.20</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">阿里云-3418.20.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-20</td>
-                            <td>北京三快在线科技有限公司</td>
-                            <td class="mono">25110000000392040133</td>
-                            <td class="mono col-num">¥ 482.50</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">美团-482.50.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-19</td>
-                            <td>滴滴出行科技有限公司</td>
-                            <td class="mono muted">—</td>
-                            <td class="mono col-num">¥ 1,128.40</td>
-                            <td><span class="pill">直链</span></td>
-                            <td class="mono small">2026-05-19-d7a1.pdf</td>
-                            <td><span class="pill pill--warn">缺票号</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-19</td>
-                            <td>深圳市腾讯计算机系统有限公司</td>
-                            <td class="mono">25440000000418293002</td>
-                            <td class="mono col-num">¥ 12,800.00</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">腾讯云-12800.00.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-19</td>
-                            <td>北京京东世纪贸易有限公司</td>
-                            <td class="mono">25110000000419201733</td>
-                            <td class="mono col-num">¥ 2,194.00</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">京东-2194.00.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-19</td>
-                            <td>高德软件有限公司</td>
-                            <td class="mono">25110000000418448710</td>
-                            <td class="mono col-num">¥ 87.30</td>
-                            <td><span class="pill">直链</span></td>
-                            <td class="mono small">高德-87.30.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-18</td>
-                            <td>飞猪信息技术有限公司</td>
-                            <td class="mono">25330000000128299481</td>
-                            <td class="mono col-num muted">¥ —</td>
-                            <td><span class="pill">站点</span></td>
-                            <td class="mono small">飞猪-2026-05-18.pdf</td>
-                            <td><span class="pill pill--warn">缺金额</span></td>
-                        </tr>
-                        <tr>
-                            <td class="mono">2026-05-18</td>
-                            <td>中国移动通信集团 上海有限公司</td>
-                            <td class="mono">25310000000391020188</td>
-                            <td class="mono col-num">¥ 218.00</td>
-                            <td><span class="pill">附件</span></td>
-                            <td class="mono small">中国移动-218.00.pdf</td>
-                            <td><span class="pill pill--ok">完整</span></td>
-                        </tr>
+                    <tbody data-library-rows>
+                        <tr><td colspan="7" class="muted">暂无识别结果。请先抓取邮件并运行识别。</td></tr>
                     </tbody>
                 </table>
             </div>
 
-            <!-- 汇总 -->
-            <div class="card mt-16">
-                <div class="row row--between">
-                    <div>
-                        <div class="small muted">本页合计</div>
-                        <div class="mono strong" style="font-size: 20px; margin-top: 4px;">¥ 21,927.82</div>
-                    </div>
-                    <div class="right">
-                        <div class="small muted">显示 1–10 · 共 1,142 张</div>
-                        <div class="small muted" style="margin-top: 4px;">归档体积 <span class="strong">418.2 MB</span></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 分页 -->
+            <!-- 结果统计 -->
             <div class="row row--between mt-16">
-                <div class="small mono muted">Top 销售方：国家电网 · 携程 · 阿里云</div>
-                <div class="row gap-4">
-                    <button class="btn btn--sm btn--ghost">← 上一页</button>
-                    <button class="btn btn--sm btn--primary">1</button>
-                    <button class="btn btn--sm">2</button>
-                    <button class="btn btn--sm">3</button>
-                    <button class="btn btn--sm btn--ghost">…</button>
-                    <button class="btn btn--sm">115</button>
-                    <button class="btn btn--sm btn--ghost">下一页 →</button>
-                </div>
+                <div class="small mono muted"><span data-library-page>显示 0 · 共 0 条</span> · <span data-library-sellers>销售方：全部</span></div>
             </div>
         </div>
     </main>

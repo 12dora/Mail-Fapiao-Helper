@@ -13,222 +13,106 @@
 
     <main class="main">
         <div class="toolbar">
-            <span class="toolbar__crumb">系统</span>
+            <span class="toolbar__crumb">设置</span>
             <span class="toolbar__title">关于</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">v0.1.0-phase1 · 2026-05-20</span>
+            <span class="toolbar__meta">本地预览版</span>
         </div>
 
         <div class="page stagger">
-            <!-- 版本信息 -->
             <div class="card">
                 <div class="row row--between mb-16">
                     <div>
-                        <div class="h2">Mail Fapiao Helper</div>
-                        <div class="small muted mt-4">邮件发票自动归档助手</div>
+                        <div class="h2">发票助手</div>
+                        <div class="small muted mt-4">从邮箱保存发票、行程单和识别结果</div>
                     </div>
                     <div class="right">
-                        <div class="mono strong" style="font-size: 18px;">v0.1.0-phase1</div>
-                        <div class="small muted mt-4">构建 2026-05-20</div>
+                        <div class="mono strong" style="font-size: 18px;">v0.1.0</div>
+                        <div class="small muted mt-4">桌面端预览</div>
                     </div>
                 </div>
-                <div class="row gap-12 mt-16" style="padding: 12px 16px; background: var(--bg-hover); border-radius: var(--radius-sm);">
-                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                    <div class="small">本程序不上传任何邮件至云端 · 所有处理均在本地完成 · MIT 许可证</div>
+                <div class="row gap-12 mt-16" style="padding: 12px 16px; background: var(--ok-soft); border-radius: var(--radius-sm);">
+                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" style="color: var(--ok);"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                    <div class="small">邮件、附件、识别结果默认只保存在本机。除非你主动配置云端识别服务，否则不会上传邮件内容。</div>
                 </div>
             </div>
 
-            <!-- 实施进度 -->
-            <div class="card">
-                <div class="h3 mb-16">实施进度</div>
-                <div class="small muted mb-12">按 docs/NEXT_STEPS.md 的 9 个阶段推进 · 已完成 2 / 9</div>
-
-                <div class="table-wrap">
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th style="width: 60px;">#</th>
-                                <th>阶段</th>
-                                <th style="width: 180px;">产物</th>
-                                <th style="width: 100px;">状态</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td class="mono">P0</td>
-                                <td>脚手架 · CLI 与配置</td>
-                                <td class="mono small">src/* skeleton</td>
-                                <td><span class="pill pill--ok">完成</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P1</td>
-                                <td>邮件抓取 · mfh fetch</td>
-                                <td class="mono small">samples/raw/*.eml</td>
-                                <td><span class="pill pill--ok">完成</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P2</td>
-                                <td>样本聚类（不写代码）</td>
-                                <td class="mono small">samples/INDEX.md</td>
-                                <td><span class="pill pill--warn">进行中</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P3</td>
-                                <td>附件提取器</td>
-                                <td class="mono small">extract/attachment.ts</td>
-                                <td><span class="pill">未开始</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P4</td>
-                                <td>直链提取器</td>
-                                <td class="mono small">extract/directLink.ts</td>
-                                <td><span class="pill">未开始</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P5</td>
-                                <td>第三方站点 handler（迭代）</td>
-                                <td class="mono small">sites/&lt;vendor&gt;.ts</td>
-                                <td><span class="pill">未开始</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P6</td>
-                                <td>LLM 兜底（可选）</td>
-                                <td class="mono small">extract/llm.ts</td>
-                                <td><span class="pill">可选</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P7</td>
-                                <td>OCR + 智能命名</td>
-                                <td class="mono small">ocr/baidu.ts</td>
-                                <td><span class="pill">未开始</span></td>
-                            </tr>
-                            <tr>
-                                <td class="mono">P8</td>
-                                <td>打包发布</td>
-                                <td class="mono small">mfh-macos / mfh-win.exe</td>
-                                <td><span class="pill">未开始</span></td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- 设计原则 -->
-            <div class="card">
-                <div class="h3 mb-16">设计原则 · 三条铁律</div>
-
-                <div class="row gap-12 mb-16" style="padding: 14px 16px; background: var(--accent-soft); border-left: 3px solid var(--accent); border-radius: var(--radius-sm);">
-                    <div class="mono strong" style="font-size: 24px; color: var(--accent); line-height: 1;">一</div>
-                    <div style="flex: 1;">
-                        <div class="strong mb-4">顺序 + 数组就是架构</div>
-                        <div class="small muted">单封邮件串行通过固定顺序的 Extractor 数组。无并发、无 DI、无插件。复杂度锁死在"一晚上读完"的量级。</div>
-                    </div>
-                </div>
-
-                <div class="row gap-12 mb-16" style="padding: 14px 16px; background: var(--ok-soft); border-left: 3px solid var(--ok); border-radius: var(--radius-sm);">
-                    <div class="mono strong" style="font-size: 24px; color: var(--ok); line-height: 1;">二</div>
-                    <div style="flex: 1;">
-                        <div class="strong mb-4">CSV 是真相，state.json 是缓存</div>
-                        <div class="small muted">所有幂等围绕 messageId 展开。COMMIT 顺序 = staging → final → CSV → state。启动时用 CSV 自愈未提交窗口。</div>
-                    </div>
-                </div>
-
-                <div class="row gap-12" style="padding: 14px 16px; background: var(--bg-hover); border-left: 3px solid var(--fg-strong); border-radius: var(--radius-sm);">
-                    <div class="mono strong" style="font-size: 24px; color: var(--fg-strong); line-height: 1;">三</div>
-                    <div style="flex: 1;">
-                        <div class="strong mb-4">失败永远降级为 manual</div>
-                        <div class="small muted">除 IMAP 连接与 state 写盘两条底线外，任何错误都让当前邮件进入 pending 队列，继续处理下一封。</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 构建信息 -->
-            <div class="row gap-16">
-                <div class="card" style="flex: 1;">
-                    <div class="h3 mb-16">构建信息</div>
-                    <div class="table-wrap">
-                        <table class="table">
-                            <tbody>
-                                <tr><td class="small muted">version</td><td class="mono">v0.1.0-phase1</td></tr>
-                                <tr><td class="small muted">commit</td><td class="mono">e46bffd (HEAD → main)</td></tr>
-                                <tr><td class="small muted">node</td><td class="mono">20.11.0</td></tr>
-                                <tr><td class="small muted">typescript</td><td class="mono">5.4.5 · strict + noUncheckedIndexedAccess</td></tr>
-                                <tr><td class="small muted">imapflow</td><td class="mono">1.0.137</td></tr>
-                                <tr><td class="small muted">mailparser</td><td class="mono">3.7.0</td></tr>
-                                <tr><td class="small muted">playwright</td><td class="mono muted">not yet · (phase 5)</td></tr>
-                                <tr><td class="small muted">platform</td><td class="mono">darwin / arm64</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div class="card" style="flex: 1;">
-                    <div class="h3 mb-16">扩展点</div>
-                    <div class="small muted mb-12">仅有两个扩展点 · 禁止自动发现 / 插件加载 / 装饰器注册</div>
-
-                    <div style="padding: 12px 14px; background: var(--err-soft); border-left: 2px solid var(--err); border-radius: var(--radius-sm); margin-bottom: 12px;">
-                        <div class="mono small strong mb-6" style="color: var(--err); letter-spacing: 0.08em;">A · SiteHandler</div>
-                        <div class="small strong mb-4">第三方开票站点处理器</div>
-                        <ol class="small muted" style="margin-left: 18px; line-height: 1.6;">
-                            <li>samples/by-type/&lt;vendor&gt;/ 至少 1 封 .eml</li>
-                            <li>新建 src/sites/&lt;vendor&gt;.ts</li>
-                            <li>registry.ts 追加 handlers.push(x)</li>
-                            <li>mfh run --only-mail &lt;hash&gt; 回归</li>
-                        </ol>
-                    </div>
-
-                    <div style="padding: 12px 14px; background: var(--ok-soft); border-left: 2px solid var(--ok); border-radius: var(--radius-sm);">
-                        <div class="mono small strong mb-6" style="color: var(--ok); letter-spacing: 0.08em;">B · OcrProvider</div>
-                        <div class="small strong mb-4">OCR 厂商提供商</div>
-                        <ol class="small muted" style="margin-left: 18px; line-height: 1.6;">
-                            <li>新建 src/ocr/&lt;vendor&gt;.ts</li>
-                            <li>registry.ts 追加 providers.push(x)</li>
-                            <li>config.ocr.provider = "&lt;vendor&gt;"</li>
-                        </ol>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 字体与色谱 -->
-            <div class="card">
-                <div class="h3 mb-16">字体与色谱</div>
-                <div class="row gap-24 mb-16">
-                    <div style="flex: 1;">
-                        <div class="small muted mb-8">字体</div>
-                        <div class="small" style="line-height: 1.8;">
-                            标题字 · <span class="strong" style="font-family: var(--f-display);">Noto Serif SC</span><br>
-                            等宽字 · <span class="mono strong">IBM Plex Mono</span><br>
-                            正文 · <span class="strong">Noto Sans SC / PingFang SC</span>
+            <div class="grid-2">
+                <div class="card">
+                    <div class="h3 mb-16">数据保存</div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">原始邮件缓存</div>
+                            <div class="setting-row__desc">用于避免开发和日常使用时反复连接邮箱</div>
                         </div>
+                        <span class="mono small muted">.mfh-cache</span>
                     </div>
-                    <div style="flex: 1;">
-                        <div class="small muted mb-8">色谱</div>
-                        <div class="row gap-8" style="flex-wrap: wrap;">
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--bg-app); border: 1px solid var(--border);"></div>
-                                <span class="mono small">bg-app</span>
-                            </div>
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--fg-strong);"></div>
-                                <span class="mono small">fg-strong</span>
-                            </div>
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--accent);"></div>
-                                <span class="mono small">accent</span>
-                            </div>
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--ok);"></div>
-                                <span class="mono small">ok</span>
-                            </div>
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--warn);"></div>
-                                <span class="mono small">warn</span>
-                            </div>
-                            <div class="row gap-6" style="align-items: center;">
-                                <div style="width: 16px; height: 16px; background: var(--err);"></div>
-                                <span class="mono small">err</span>
-                            </div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">发票和行程单原件</div>
+                            <div class="setting-row__desc">先保存原件，再做识别和整理</div>
                         </div>
+                        <span class="mono small muted">invoices</span>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">需要确认的邮件</div>
+                            <div class="setting-row__desc">链接过期、没有找到文件或附件类型不支持时进入这里</div>
+                        </div>
+                        <span class="mono small muted">pending</span>
+                    </div>
+                    <div class="row gap-8 mt-16">
+                        <button class="btn btn--sm" data-action="open-invoices-folder">打开保存位置</button>
+                        <button class="btn btn--sm" data-action="open-pending-folder">打开待确认文件夹</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="h3 mb-16">识别与隐私</div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">默认识别引擎</div>
+                            <div class="setting-row__desc">使用本机内置 efapiao，引擎启动后可批量处理文件</div>
+                        </div>
+                        <span class="pill pill--ok">已配置</span>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">腾讯云鉴权</div>
+                            <div class="setting-row__desc">如启用腾讯识别，密钥只保存在本机并透传给 efapiao</div>
+                        </div>
+                        <span class="pill">可选</span>
+                    </div>
+                    <div class="setting-row">
+                        <div class="setting-row__main">
+                            <div class="setting-row__title">云端服务</div>
+                            <div class="setting-row__desc">只有你在“邮箱与保存”里填写鉴权后才会使用</div>
+                        </div>
+                        <span class="pill pill--warn">用户控制</span>
+                    </div>
+                    <div class="row gap-8 mt-16">
+                        <a class="btn btn--sm" href="config.html">管理识别设置</a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="h3 mb-16">使用流程</div>
+                <div class="grid-3">
+                    <div>
+                        <div class="mono strong" style="font-size: 18px;">1</div>
+                        <div class="strong mt-12">连接邮箱</div>
+                        <div class="small muted mt-12">选择日期范围，搜索包含发票或行程单的邮件。</div>
+                    </div>
+                    <div>
+                        <div class="mono strong" style="font-size: 18px;">2</div>
+                        <div class="strong mt-12">保存原件</div>
+                        <div class="small muted mt-12">所有找到的票据先落到本机，避免识别失败导致丢文件。</div>
+                    </div>
+                    <div>
+                        <div class="mono strong" style="font-size: 18px;">3</div>
+                        <div class="strong mt-12">识别整理</div>
+                        <div class="small muted mt-12">识别金额、票号和开票方，再按你的规则改名或分文件夹。</div>
                     </div>
                 </div>
             </div>
