@@ -21,7 +21,7 @@ flowchart LR
   Pipe -->|DocumentArtifact[]| DL[download/downloader\n.staging→final]
   DL --> Out[(invoices/ + invoices.csv)]
   DL --> OcrQ[ocr queue\nall documents pending]
-  OcrQ --> Ocr[ocr provider?]
+  OcrQ --> Ocr["efapiao binary\n12dora/E-Fapiao-OCR"]
   Ocr --> OcrOut[(ocr-results.csv)]
   Ocr --> Post[mfh organize\ncopy to rename / type folders]
   M --> Pend[(pending/*.eml + pending.csv)]
@@ -81,7 +81,13 @@ interface SiteHandler {
 // ocr/types.ts
 interface OcrProvider {
   name: string;
-  parse(data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<Partial<InvoiceFields>>;
+  parse(data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<OcrResult>;
+}
+interface OcrResult {
+  status: 'success' | 'error';
+  fields: Partial<InvoiceFields>;
+  error: string;
+  raw: unknown;
 }
 interface InvoiceFields {
   seller: string;
@@ -155,7 +161,7 @@ DISCOVERED                  // 来自 fetcher
 | state.json | `state.json.tmp` → `rename`,POSIX 原子 |
 | pending 写入 | `pending/<msgIdHash>.eml` 覆盖式写；pending.csv 同样以 messageId 查重 |
 | OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/source 记录全部已归档文档，状态初始为 `pending` |
-| OCR 结果 | `config.ocr.resultsCsv` 保存识别字段、状态、错误；`mfh organize` 以结果 CSV 为输入，复制到 `rename.organizedDir` 并写 `organize-results.csv` 审计 |
+| OCR 结果 | `mfh ocr run` 调用 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`，`config.ocr.resultsCsv` 保存识别字段、状态、错误；`mfh organize` 以结果 CSV 为输入，复制到 `rename.organizedDir` 并写 `organize-results.csv` 审计 |
 
 **启动时自愈**：读 state.json 后，扫一遍 `invoices.csv` 的 messageId 列做 union，弥补"FINALIZED 后未 COMMIT"的小窗口。CSV 即真实归档证据。
 
@@ -186,6 +192,10 @@ DISCOVERED                  // 来自 fetcher
 1. 新建 `src/ocr/<vendor>.ts`，导出 `default: OcrProvider`。
 2. `src/ocr/registry.ts`：同上 push。
 3. config.json `ocr.provider = "<vendor>"`。
+
+**当前默认 OCR Provider**：
+- `provider="efapiao"`，通过 `config.ocr.binaryPath` 寻找 `12dora/E-Fapiao-OCR` 发布的 `efapiao` 二进制。
+- 调用方式固定为 stdin 传文件字节，stdout/stderr 解析 JSON；非 0 退出码写入 `ocr-results.csv` 的失败行，不影响原始归档。
 
 **禁止**：写"自动发现/插件加载/装饰器注册"。一律手动 import + push。
 

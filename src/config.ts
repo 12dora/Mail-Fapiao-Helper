@@ -38,6 +38,8 @@ export interface Config {
   ocr: {
     enabled: boolean;
     provider: string;
+    binaryPath: string;
+    timeoutMs: number;
     resultsCsv: string;
     credentials: Record<string, string>;
   };
@@ -197,6 +199,12 @@ export function loadConfig(path: string): Config {
     ocr: {
       enabled: asBool(requireField(raw, 'ocr.enabled'), 'ocr.enabled'),
       provider: asString(requireField(raw, 'ocr.provider'), 'ocr.provider'),
+      binaryPath: typeof (raw as { ocr?: { binaryPath?: unknown } }).ocr?.binaryPath === 'string'
+        ? ((raw as { ocr: { binaryPath: string } }).ocr.binaryPath)
+        : 'efapiao',
+      timeoutMs: typeof (raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs === 'number'
+        ? ((raw as { ocr: { timeoutMs: number } }).ocr.timeoutMs)
+        : 120000,
       resultsCsv: typeof (raw as { ocr?: { resultsCsv?: unknown } }).ocr?.resultsCsv === 'string'
         ? ((raw as { ocr: { resultsCsv: string } }).ocr.resultsCsv)
         : './invoices/ocr/ocr-results.csv',
@@ -246,9 +254,6 @@ export function loadConfig(path: string): Config {
   }
   if (cfg.network.retryDelayMs < 0) {
     throw new Error('config.network.retryDelayMs must be >= 0');
-  }
-  if (cfg.ocr.enabled) {
-    throw new Error('config.ocr.enabled=true is not supported in this build');
   }
   if (cfg.llm.enabled) {
     throw new Error('config.llm.enabled=true is not supported in this build');

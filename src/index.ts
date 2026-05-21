@@ -12,6 +12,7 @@ import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
 import { organizeFromOcrResults } from './rename/rename.js';
+import { runOcrPending } from './ocr/runner.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -21,6 +22,7 @@ Usage:
 Commands:
   fetch    Fetch matching mails as .eml into samples/raw/
   run      Process emails and extract invoices
+  ocr      Run OCR for archived documents
   pending  Inspect manual processing queue
   organize Copy archived invoices into optional OCR-based names/folders
 
@@ -59,6 +61,20 @@ Notes:
   * It never moves or overwrites the original files in config.paths.invoices.
 `;
 
+const OCR_USAGE = `mfh ocr — run OCR for archived documents
+
+Usage:
+  mfh ocr <command> [options]
+
+Commands:
+  run    Parse documents listed in invoices/ocr/ocr-pending.csv
+
+Options:
+  --config <path>      Path to config.json        (default: ./config.json)
+  --force              Re-parse rows already present in ocr.resultsCsv
+  -h, --help           Show this help
+`;
+
 const FETCH_USAGE = `mfh fetch — fetch matching mails as .eml
 
 Usage:
@@ -94,6 +110,11 @@ interface OrganizeOpts {
   configPath: string;
   resultsCsv: string | undefined;
   outDir: string | undefined;
+}
+
+interface OcrOpts {
+  configPath: string;
+  force: boolean;
 }
 
 function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
@@ -152,6 +173,26 @@ function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--results-csv') { opts.resultsCsv = requireValue(argv, ++i, a); continue; }
     if (a === '--out') { opts.outDir = requireValue(argv, ++i, a); continue; }
+    throw new Error(`unknown option: ${a}`);
+  }
+  return opts;
+}
+
+function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
+  if (argv.length === 0) return 'help';
+  const [subcmd, ...rest] = argv;
+  if (subcmd === '-h' || subcmd === '--help') return 'help';
+  if (subcmd !== 'run') throw new Error(`unknown ocr command: ${subcmd}`);
+
+  const opts: OcrOpts = {
+    configPath: './config.json',
+    force: false,
+  };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--force') { opts.force = true; continue; }
+    if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
     throw new Error(`unknown option: ${a}`);
   }
   return opts;
@@ -601,6 +642,35 @@ async function cmdOrganize(argv: string[]): Promise<number> {
   return summary.failed > 0 ? 1 : 0;
 }
 
+async function cmdOcr(argv: string[]): Promise<number> {
+  let parsed: OcrOpts | 'help';
+  try {
+    parsed = parseOcrArgs(argv);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n`);
+    process.stderr.write(OCR_USAGE);
+    return 2;
+  }
+  if (parsed === 'help') { process.stdout.write(OCR_USAGE); return 0; }
+
+  let cfg: Config;
+  try {
+    cfg = loadConfig(resolve(parsed.configPath));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 2;
+  }
+
+  try {
+    const summary = await runOcrPending(cfg, log, { force: parsed.force });
+    log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}`);
+    return summary.failed > 0 ? 1 : 0;
+  } catch (e) {
+    log.error((e as Error).message);
+    return 1;
+  }
+}
+
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') {
@@ -613,6 +683,8 @@ async function main(): Promise<number> {
       return cmdFetch(rest);
     case 'run':
       return cmdRun(rest);
+    case 'ocr':
+      return cmdOcr(rest);
     case 'pending':
       return cmdPending(rest);
     case 'organize':

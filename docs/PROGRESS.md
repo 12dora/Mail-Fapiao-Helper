@@ -329,3 +329,11 @@
 - [x] `mfh organize`: 新增 CLI 子命令,只复制原始归档文件到 `rename.organizedDir`,不移动/覆盖 `invoices/` 原件
 - [x] `organize-results.csv`: 写入复制/跳过/失败审计记录,便于后续 GUI 展示
 - [x] `src/config.ts` / `config.example.json`: 增加 `rename.organizedDir`
+
+## Phase 6.0 — 接入 E-Fapiao-OCR 二进制  [完成 2026-05-21]
+
+- [x] `src/ocr/efapiao.ts`: 接入 `12dora/E-Fapiao-OCR` 发布的 `efapiao` 二进制,通过 stdin 传入 PDF/OFD 字节并解析 JSON 输出
+- [x] `src/ocr/runner.ts`: 新增 OCR 队列执行器,读取 `invoices/ocr/ocr-pending.csv`,写入 `ocr.resultsCsv`
+- [x] `src/index.ts`: 新增 `mfh ocr run [--force]`
+- [x] `src/config.ts` / `config.example.json`: `ocr.provider=efapiao`,增加 `ocr.binaryPath` 与 `ocr.timeoutMs`,允许 `ocr.enabled=true`
+- [x] 本地回归: 使用模拟 `efapiao` 二进制验证 `mfh ocr run` 可写出 seller/amount/date/invoiceNo/status
