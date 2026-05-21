@@ -8,6 +8,13 @@ export interface DownloadResult {
   filename: string;
 }
 
+function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
+  if (artifact.format === 'ofd') return 'ofd';
+  if (artifact.suggestedName?.toLowerCase().endsWith('.ofd')) return 'ofd';
+  if (artifact.source.toLowerCase().endsWith('.ofd')) return 'ofd';
+  return 'pdf';
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -44,12 +51,13 @@ export async function downloadPdfs(
     const pdf = pdfs[i];
     if (!pdf) continue;
 
-    const stagingPath = path.join(stagingDir, `${i}.pdf`);
+    const ext = artifactExt(pdf);
+    const stagingPath = path.join(stagingDir, `${i}.${ext}`);
 
     fs.writeFileSync(stagingPath, pdf.data);
     log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
 
-    const suggestedName = pdf.suggestedName || `${msgIdHash}-${i}.pdf`;
+    const suggestedName = pdf.suggestedName || `${msgIdHash}-${i}.${ext}`;
     const targetPath = path.join(invoicesDir, suggestedName);
     const finalPath = resolveConflict(targetPath);
 
@@ -70,3 +78,5 @@ export async function downloadPdfs(
 
   return results;
 }
+
+export const downloadDocuments = downloadPdfs;

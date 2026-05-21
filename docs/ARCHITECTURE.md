@@ -18,8 +18,8 @@ flowchart LR
   Reg --> M[manual fallback]
   T --> SR["sites/registry (数组)"]
   SR --> SH[SiteHandler*]
-  Pipe -->|PdfArtifact[]| DL[download/downloader\n.staging→final]
-  DL --> Ocr[ocr? optional]
+  Pipe -->|DocumentArtifact[]| DL[download/downloader\n.staging→final]
+  DL --> Ocr[ocr queue\nOFD itinerary pending]
   Ocr --> Rn[rename]
   Rn --> Out[(invoices/ + invoices.csv)]
   M --> Pend[(pending/*.eml + pending.csv)]
@@ -28,7 +28,7 @@ flowchart LR
 
 **边界**：
 - `mail/` 只负责 IMAP I/O 与产出 `ParsedMail`，不感知发票语义。
-- `extract/` 决策 + 产出 `PdfArtifact` 或 `manual`，不写盘。
+- `extract/` 决策 + 产出 `DocumentArtifact` 或 `manual`，不写盘。
 - `download/` 唯一落盘者（含 .staging→final、冲突重命名）。
 - `rename/` + CSV 写入唯一发生点。
 - `state.ts` 唯一 state.json 读写者，其他模块不直接 fs。
@@ -55,11 +55,17 @@ type ExtractResult =
   | { kind: 'manual'; reason: string }
   | { kind: 'skip' };
 
-interface PdfArtifact {
+type DocumentFormat = 'pdf' | 'ofd';
+type DocumentType = 'invoice' | 'itinerary';
+interface DocumentArtifact {
   data: Buffer;
   source: string;          // 附件名或来源 URL,排错用
   suggestedName?: string;  // 提取器若已知则给,否则 rename 阶段决定
+  format?: DocumentFormat; // 默认 pdf; OFD 行程单必须显式 ofd
+  documentType?: DocumentType;
+  requiresOcr?: boolean;   // OFD 行程单先落盘并进入 OCR 待识别队列
 }
+type PdfArtifact = DocumentArtifact; // 兼容旧命名,后续逐步收敛
 
 // sites/types.ts
 interface SiteHandler {
@@ -95,10 +101,10 @@ interface InvoiceFields {
 ```
 DISCOVERED                  // 来自 fetcher
   └─> MATCHED(extractorName) // registry 顺序首个 canHandle
-        ├─> PDF_READY        // ExtractResult.kind=='pdf'
-        │     └─> STAGED     // 写入 .staging/<msgIdHash>/<i>.pdf
-        │           └─> OCR_DONE?   // 可选
-        │                 └─> FINALIZED   // 移到 invoices/ + 渲染名 + 冲突后缀
+        ├─> DOCUMENT_READY   // ExtractResult.kind=='pdf'，可含 PDF 发票 + OFD 行程单
+        │     └─> STAGED     // 写入 .staging/<msgIdHash>/<i>.<pdf|ofd>
+        │           └─> FINALIZED   // 移到 invoices/ + 渲染名 + 冲突后缀
+        │                 └─> OCR_PENDING? // OFD 行程单写 invoices/ocr/ocr-pending.csv
         │                       └─> CSV_APPENDED
         │                             └─> COMMITTED  // state.json processedIds += msgId
         ├─> MANUAL           // kind=='manual' 或任意上游抛错
@@ -108,9 +114,9 @@ DISCOVERED                  // 来自 fetcher
 ```
 
 **幂等点（必须能安全重跑）**：
-- `STAGED`：staging 文件以 `<msgIdHash>/<index>.pdf` 命名，重写覆盖即可。
+- `STAGED`：staging 文件以 `<msgIdHash>/<index>.<pdf|ofd>` 命名，重写覆盖即可。
 - `FINALIZED`：原子 `rename`；目标存在则追加 `-1/-2`。
-- `CSV_APPENDED`：以 `messageId` 为去重键，追加前 grep 一次。
+- `CSV_APPENDED`：以 `messageId + source` 为去重键，允许同一封邮件登记 PDF 发票与 OFD 行程单。
 - `COMMITTED`：state.json 走 "tmp + rename" 原子写。
 
 **msgIdHash**：取 `sha1(messageId || from+date+subject).slice(0,12)`。Message-Id 可能缺失，必须有 fallback。
@@ -124,6 +130,7 @@ DISCOVERED                  // 来自 fetcher
 | `Extractor.extract` 抛错 | 该封 → manual(reason=`<extractor>:<err.message>`) |
 | `SiteHandler.handle` 抛错或超时 | 视同 thirdParty Extractor 失败 → manual |
 | 下载 HTTP / Playwright 超时 | manual |
+| OFD 行程单 | 照常归档 `.ofd`，并写 `invoices/ocr/ocr-pending.csv`；后续 OCR 引擎负责识别，不阻塞同封邮件中的 PDF 发票 |
 | OCR 失败或字段缺失 | **不阻塞**：走 rename.fallback 模板，照常归档；CSV 字段留空 |
 | rename 模板渲染失败 | 用 fallback 模板；再失败用 `<msgIdHash>.pdf` |
 | CSV 追加失败 | 整封回滚（不 COMMIT），下次重跑 |
@@ -136,11 +143,12 @@ DISCOVERED                  // 来自 fetcher
 | 操作 | 幂等手段 |
 |---|---|
 | IMAP fetch | 每封拉完即可重复 SEARCH；以 messageId 去重 |
-| PDF 落盘 | 先写 `.staging/<msgIdHash>/`,目标已存在则跳过下载;`rename` 是原子的 |
+| PDF/OFD 落盘 | 先写 `.staging/<msgIdHash>/`,目标已存在则跳过下载;`rename` 是原子的 |
 | 命名冲突 | `name.pdf` 存在 → `name-1.pdf`、`name-2.pdf`。**重跑产生重复的窗口**：FINALIZED 完成但 COMMITTED 前崩溃 → 重跑会再生成一个 `-N`。缓解：CSV 追加前用 messageId 查重；若 CSV 已有该 messageId 行，跳过整封 |
-| CSV 追加 | 写之前 grep messageId；追加用 `fs.appendFileSync`,单行原子 |
+| CSV 追加 | 写之前检查 `messageId + source`；追加用 `fs.appendFileSync`,单行原子 |
 | state.json | `state.json.tmp` → `rename`,POSIX 原子 |
 | pending 写入 | `pending/<msgIdHash>.eml` 覆盖式写；pending.csv 同样以 messageId 查重 |
+| OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/filename/source 记录待识别文档，OFD 行程单先进入此队列 |
 
 **启动时自愈**：读 state.json 后，扫一遍 `invoices.csv` 的 messageId 列做 union，弥补"FINALIZED 后未 COMMIT"的小窗口。CSV 即真实归档证据。
 
@@ -197,7 +205,7 @@ DISCOVERED                  // 来自 fetcher
 | R1 | Message-Id 缺失或重复（部分国内邮件服务器） | 幂等失效、重复下载 | 用 `sha1(messageId || from+date+subject)` 做 msgIdHash；以此为状态键 |
 | R2 | Playwright 在打包后（pkg / node --sea）找不到 Chromium | 第三方站点全部失败 | 文档明确"首次运行执行 `npx playwright install chromium`"；不内嵌浏览器到单文件 |
 | R3 | SiteHandler 长尾无止境，开发者持续往里塞 | 代码腐烂 | 硬性门槛：vendor 邮件数 ≥ 累计 5% 才写 handler；否则进 manual。覆盖到 80% 就停手（NEXT_STEPS Phase 5 已规约） |
-| R4 | 大附件 PDF 全部驻留内存（`PdfArtifact.data: Buffer`） | OOM 风险 | v1 接受；约束单封邮件 PDF 总大小上限 50MB，超过则 manual。**不引入流式接口** |
+| R4 | 大附件 PDF/OFD 全部驻留内存（`DocumentArtifact.data: Buffer`） | OOM 风险 | v1 接受；约束单封邮件文档总大小上限 50MB，超过则 manual。**不引入流式接口** |
 | R5 | CSV 在 Excel 打开时被锁（Windows） | 追加失败导致整封回滚 | 追加失败重试 3 次（指数退避 100ms→1s），仍失败 → manual(reason="csv_locked")，邮件不丢 |
 
 ---
@@ -206,9 +214,9 @@ DISCOVERED                  // 来自 fetcher
 
 | 变更 | 原文 | 新规约 | 原因 |
 |---|---|---|---|
-| C1 | `ExtractResult.pdf.buffers: {filename,data}[]` | `pdfs: PdfArtifact[]`（含 `source`、`suggestedName?`） | 排错需要来源；filename 字段语义模糊（建议名 vs 最终名） |
+| C1 | `ExtractResult.pdf.buffers: {filename,data}[]` | `pdfs: DocumentArtifact[]`（兼容旧名 `PdfArtifact`，含 `source`、`suggestedName?`、`format?`） | 排错需要来源；filename 字段语义模糊（建议名 vs 最终名）；OFD 行程单也要进入同一封邮件的归档链路 |
 | C2 | `state.json = { processedMessageIds: string[] }` | 仍是数组，但**键改为 msgIdHash**；启动时与 invoices.csv 求并集 | 应对 Message-Id 缺失/重复 |
-| C3 | 命名冲突直接 `-1/-2` | 保留 `-1/-2`，但 CSV 追加前用 messageId 查重 | 关闭 FINALIZED→COMMIT 间的重复窗口 |
+| C3 | 命名冲突直接 `-1/-2` | 保留 `-1/-2`，但 CSV 追加前用 `messageId + source` 查重 | 关闭 FINALIZED→COMMIT 间的重复窗口，同时允许一封邮件多文档 |
 | C4 | 主流程未说明并发 | 明确：**单封串行**，仅 HEAD 探测局部并发 | 锁定 v1 复杂度 |
 | C5 | OCR/LLM 失败行为未定义 | OCR 失败 → fallback 模板，不阻塞 | "绝不阻塞主流程"硬约束的具体化 |
 | C6 | `SiteHandler.handle` 签名缺 `ctx` | 加 `ctx: Ctx` | logger / config 必须可注入 |

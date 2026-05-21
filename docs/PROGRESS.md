@@ -251,3 +251,11 @@
 - 第三方站点样本已全部完成自动处理。
 - 信用卡账单与 12306 支付/改签通知已从 fetch/run 排除,不再进入 manual。
 - 全量样本回归: `Run complete: processed=105, skipped=0`,输出 PDF 166 个,`pending/` 为空。
+
+## Phase 5.2 — OFD 行程单前置支持  [完成 2026-05-21]
+
+- [x] `src/extract/types.ts`: `PdfArtifact` 扩展为兼容旧名的 `DocumentArtifact`,新增 `format` / `documentType` / `requiresOcr`
+- [x] `src/extract/attachment.ts`: 识别附件与 ZIP 内 `.ofd`,将 OFD 标记为 `documentType=itinerary` 且 `requiresOcr=true`
+- [x] `src/download/downloader.ts`: staging 与最终归档保留 `.ofd` 扩展名,PDF 路径保持兼容
+- [x] `src/pipeline.ts`: OFD 与 PDF 可在同一封邮件中共同归档;`invoices.csv` 去重粒度改为 `messageId + source`
+- [x] `src/pipeline.ts`: OFD 行程单写入 `invoices/ocr/ocr-pending.csv`,等待后续 OCR 识别引擎集成
