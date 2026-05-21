@@ -41,6 +41,11 @@ export interface ProcessMailResult {
   reason?: string;
 }
 
+export interface ProcessMailOpts {
+  force?: boolean;
+  raw?: Buffer;
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -109,6 +114,7 @@ function appendCsv(csvPath: string, row: CsvRow): void {
     row.source,
   ].map(csvCell).join(',') + '\n';
 
+  ensureDir(path.dirname(csvPath));
   if (!exists) {
     fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
   } else {
@@ -162,16 +168,35 @@ function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
   }
 }
 
-function writePendingEml(mail: ParsedMail, pendingDir: string, hash: string): void {
+function writePendingEml(raw: Buffer | undefined, pendingDir: string, hash: string): void {
   ensureDir(pendingDir);
   const emlPath = path.join(pendingDir, `${hash}.eml`);
   const tmpPath = `${emlPath}.tmp`;
 
-  if (fs.existsSync(emlPath)) return;
+  if (fs.existsSync(emlPath) && fs.statSync(emlPath).size > 0) return;
 
-  const raw = (mail as any).raw || Buffer.from('');
-  fs.writeFileSync(tmpPath, raw);
+  fs.writeFileSync(tmpPath, raw ?? Buffer.from(''));
   fs.renameSync(tmpPath, emlPath);
+}
+
+function pendingCsvContainsRow(csvPath: string, row: { messageId: string; date: string; from: string; subject: string }): boolean {
+  if (!fs.existsSync(csvPath)) return false;
+  const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+  const lines = content.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+    if (
+      (cols[0] ?? '') === row.messageId
+      && (cols[1] ?? '') === row.date
+      && (cols[2] ?? '') === row.from
+      && (cols[3] ?? '') === row.subject
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): void {
@@ -181,13 +206,13 @@ function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): vo
   const date = mail.date?.toISOString() || '';
   const from = mail.from?.text || '';
   const subject = mail.subject || '';
+  const row = { messageId, date, from, subject };
   const line = [messageId, date, from, subject, reason].map(csvCell).join(',') + '\n';
 
   if (!exists) {
     fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
   } else {
-    const content = fs.readFileSync(csvPath, 'utf8');
-    if (content.includes(messageId)) {
+    if (pendingCsvContainsRow(csvPath, row)) {
       return;
     }
     fs.appendFileSync(csvPath, line, 'utf8');
@@ -257,7 +282,7 @@ export async function processMail(
   state: State,
   saveState: () => void,
   browser: () => Promise<Browser>,
-  opts: { force?: boolean } = {},
+  opts: ProcessMailOpts = {},
 ): Promise<ProcessMailResult> {
   const hash = msgIdHashFn(
     mail.messageId ?? undefined,
@@ -296,7 +321,7 @@ export async function processMail(
 
   if (!matchedExtractor) {
     log.info(`No extractor matched ${hash}, -> manual`);
-    writePendingEml(mail, cfg.paths.pending, hash);
+    writePendingEml(opts.raw, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, 'no_extractor');
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
@@ -312,7 +337,7 @@ export async function processMail(
     const errMsg = err instanceof Error ? err.message : String(err);
     const reason = `${matchedExtractor.name}:${errMsg}`;
     log.warn(`Extractor failed for ${hash}: ${reason}`);
-    writePendingEml(mail, cfg.paths.pending, hash);
+    writePendingEml(opts.raw, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, reason);
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
@@ -328,7 +353,7 @@ export async function processMail(
 
   if (result.kind === 'manual') {
     log.info(`Manual ${hash}: ${result.reason}`);
-    writePendingEml(mail, cfg.paths.pending, hash);
+    writePendingEml(opts.raw, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, result.reason);
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
@@ -337,7 +362,7 @@ export async function processMail(
 
   const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log);
 
-  const csvPath = path.join(cfg.paths.invoices, 'invoices.csv');
+  const csvPath = path.resolve(cfg.output.csv);
   const ocrPendingCsvPath = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
   for (let i = 0; i < downloads.length; i++) {
     const dl = downloads[i];
