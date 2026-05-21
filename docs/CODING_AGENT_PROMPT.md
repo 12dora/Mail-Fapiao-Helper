@@ -13,7 +13,7 @@
 - 单一 `config.json`，不拆分
 - 接口字段严格按 `ARCHITECTURE.md §2`，不要加 `priority/init/dispose/login/version` 之类
 - LLM / OCR / Playwright 是可选模块，未到对应阶段不写
-- 单封邮件串行处理，不要 `Promise.all` / `p-limit`
+- `mfh run` 使用受控 worker pool 并发处理多封邮件；不要绕过 `--concurrency` 自行散落并发。单封邮件内部仍按 extractor 注册顺序匹配
 - 任何 Extractor / SiteHandler / OCR 抛错 → 当前邮件走 manual，主循环继续
 - 不写多余注释、不写 README，除非我让你写
 - YAGNI：不为"将来"留接口；样本驱动：没有真实 .eml 不写 Extractor / SiteHandler

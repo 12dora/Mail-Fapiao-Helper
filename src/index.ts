@@ -360,6 +360,7 @@ Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --state <path>       Path to state.json         (default: ./state.json)
   --only-mail <hash>   Process one msgIdHash, even if already processed
+  --concurrency <n>    Process up to N cached emails in parallel (default: 4)
   -h, --help           Show this help
 `;
 
@@ -367,6 +368,7 @@ interface RunOpts {
   configPath: string;
   statePath: string;
   onlyMail: string | undefined;
+  concurrency: number;
 }
 
 function parseRunArgs(argv: string[]): RunOpts | 'help' {
@@ -374,6 +376,7 @@ function parseRunArgs(argv: string[]): RunOpts | 'help' {
     configPath: './config.json',
     statePath: './state.json',
     onlyMail: undefined,
+    concurrency: 4,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -381,6 +384,12 @@ function parseRunArgs(argv: string[]): RunOpts | 'help' {
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--state') { opts.statePath = requireValue(argv, ++i, a); continue; }
     if (a === '--only-mail') { opts.onlyMail = requireValue(argv, ++i, a); continue; }
+    if (a === '--concurrency') {
+      const v = Number(requireValue(argv, ++i, a));
+      if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
+      opts.concurrency = v;
+      continue;
+    }
     throw new Error(`unknown option: ${a}`);
   }
   return opts;
@@ -398,6 +407,12 @@ async function* walkEmls(dir: string): AsyncGenerator<string> {
       yield fullPath;
     }
   }
+}
+
+async function collectEmlPaths(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for await (const emlPath of walkEmls(dir)) out.push(emlPath);
+  return out;
 }
 
 async function cmdRun(argv: string[]): Promise<number> {
@@ -422,15 +437,21 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const statePath = resolve(opts.statePath);
   const state: State = loadState(statePath);
+  const processedHashes = new Set(state.processedHashes);
 
-  const saveStateFn = () => saveState(statePath, state);
+  const saveStateFn = () => {
+    state.processedHashes = Array.from(processedHashes);
+    saveState(statePath, state);
+  };
   let browserInstance: Browser | undefined;
+  let browserPromise: Promise<Browser> | undefined;
   const getBrowser = async (): Promise<Browser> => {
     if (!browserInstance) {
-      browserInstance = await chromium.launch({
+      browserPromise ??= chromium.launch({
         headless: cfg.playwright.headless,
         timeout: cfg.playwright.timeoutMs,
       });
+      browserInstance = await browserPromise;
     }
     return browserInstance;
   };
@@ -440,47 +461,89 @@ async function cmdRun(argv: string[]): Promise<number> {
   const rawDir = cfg.paths.samples;
   let processed = 0;
   let skipped = 0;
+  let failed = 0;
   const networkFailures: ProcessMailResult[] = [];
+  const inFlight = new Set<string>();
 
-  try {
-    for await (const emlPath of walkEmls(rawDir)) {
-      const raw = readFileSync(emlPath);
-      const mail = await simpleParser(raw);
+  const handleEml = async (emlPath: string): Promise<void> => {
+    const raw = readFileSync(emlPath);
+    const mail = await simpleParser(raw);
 
-      const hash = msgIdHash(
-        mail.messageId ?? undefined,
-        mail.from?.text ?? '',
-        mail.date?.toISOString() ?? '',
-        mail.subject ?? '',
-      );
+    const hash = msgIdHash(
+      mail.messageId ?? undefined,
+      mail.from?.text ?? '',
+      mail.date?.toISOString() ?? '',
+      mail.subject ?? '',
+    );
 
-      if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
-        continue;
-      }
+    if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
+      return;
+    }
 
-      const excludeReason = nonInvoiceReason({
-        from: mail.from?.text ?? '',
-        subject: mail.subject ?? '',
-      });
-      if (excludeReason) {
-        log.info(`Excluded ${hash}: ${excludeReason}`);
-        processed++;
-        if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
-        saveState(statePath, state);
-        continue;
-      }
+    if (inFlight.has(hash)) {
+      skipped++;
+      return;
+    }
 
-      if (opts.onlyMail === undefined && state.processedHashes.includes(hash)) {
-        skipped++;
-        continue;
-      }
+    const excludeReason = nonInvoiceReason({
+      from: mail.from?.text ?? '',
+      subject: mail.subject ?? '',
+    });
+    if (excludeReason) {
+      log.info(`Excluded ${hash}: ${excludeReason}`);
+      processed++;
+      processedHashes.add(hash);
+      saveStateFn();
+      return;
+    }
 
-      const result = await processMail(mail, cfg, log, state, saveStateFn, getBrowser, { force: opts.onlyMail !== undefined });
+    if (opts.onlyMail === undefined && processedHashes.has(hash)) {
+      skipped++;
+      return;
+    }
+
+    inFlight.add(hash);
+    try {
+      const taskState: State = {
+        processedHashes: Array.from(processedHashes),
+        fetchedHashes: state.fetchedHashes,
+      };
+      const taskSaveState = () => {
+        for (const item of taskState.processedHashes) processedHashes.add(item);
+        saveStateFn();
+      };
+
+      const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, { force: opts.onlyMail !== undefined });
+      for (const item of taskState.processedHashes) processedHashes.add(item);
       if (result.outcome === 'manual' && result.reason?.includes('network_retry_failed')) {
         networkFailures.push(result);
       }
       processed++;
+    } finally {
+      inFlight.delete(hash);
     }
+  };
+
+  try {
+    const emlPaths = await collectEmlPaths(rawDir);
+    let next = 0;
+    const workerCount = Math.min(opts.concurrency, Math.max(emlPaths.length, 1));
+    log.info(`Queued ${emlPaths.length} cached emails with concurrency=${workerCount}`);
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const emlPath = emlPaths[next++];
+        if (!emlPath) return;
+        try {
+          await handleEml(emlPath);
+        } catch (err) {
+          failed++;
+          log.warn(`Failed to process ${emlPath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
   } catch (e) {
     log.error(`run aborted: ${(e as Error).message}`);
     return 1;
@@ -490,7 +553,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   }
 
-  log.info(`Run complete: processed=${processed}, skipped=${skipped}`);
+  log.info(`Run complete: processed=${processed}, skipped=${skipped}, failed=${failed}`);
   if (networkFailures.length > 0) {
     log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
     for (const failure of networkFailures) {

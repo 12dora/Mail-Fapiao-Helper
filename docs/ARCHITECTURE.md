@@ -9,7 +9,7 @@
 flowchart LR
   CLI[mfh CLI] --> Cfg[config.json]
   CLI --> Fetcher[mail/fetcher\nIMAP+SEARCH]
-  Fetcher -->|ParsedMail| Pipe((pipeline\n顺序处理单封))
+  Fetcher -->|ParsedMail| Pipe((pipeline\nworker pool 处理邮件))
   Pipe --> Reg["extract/registry\n(普通数组,顺序匹配)"]
   Reg --> A[attachment]
   Reg --> D[directLink]
@@ -170,16 +170,16 @@ DISCOVERED                  // 来自 fetcher
 
 ## 6. 并发模型
 
-**结论**：**单封邮件串行处理**。不引入并发池。
+`mfh run` 使用受控 worker pool 处理本地 `.eml` 缓存，默认 `--concurrency 4`，可按机器与网络情况调高或调低。`--only-mail <hash>` 仍用于单封定向回归。
 
-理由：
-- IMAP 单连接顺序拉取已足够（v1 量级 < 千封/次）。
-- Playwright headed/headless 启动昂贵且共享浏览器实例；并发会争抢 download 目录。
-- 顺序执行让 state.json 不需要锁。
+边界：
+- IMAP `fetch` 阶段仍逐 mailbox 串行抓取，避免邮箱服务端限流和状态复杂度。
+- 本地 `.eml` 解析、附件/ZIP 提取、直链下载、第三方站点处理可以多封并发。
+- 同一轮内用 `processedHashes` + `inFlight` 防止同一 hash 被重复处理。
+- Playwright Browser 采用懒加载单例；多个 worker 共享同一个 browser，但各 SiteHandler 仍自行创建/关闭 page。
+- 单封失败只记 `failed` 或进入 pending，不终止整轮 worker pool。
 
-**唯一例外**：`directLink` Extractor 内部对单封邮件中的多个候选链接，用 `Promise.all` 并发 HEAD 探测（只是探测，不下载）。这是局部优化，不算并发模型。
-
-如果将来真的慢，扩展点是 `pipeline` 那一层加 `p-limit(N)`，**但 v1 不要写**。
+`directLink` Extractor 内部仍会对单封邮件中的多个候选链接用 `Promise.all` 并发 HEAD 探测，这是单封内部的局部并发。
 
 ## 7. 扩展点契约
 
@@ -246,7 +246,7 @@ DISCOVERED                  // 来自 fetcher
 | C1 | `ExtractResult.pdf.buffers: {filename,data}[]` | `pdfs: DocumentArtifact[]`（兼容旧名 `PdfArtifact`，含 `source`、`suggestedName?`、`format?`） | 排错需要来源；filename 字段语义模糊（建议名 vs 最终名）；OFD 行程单也要进入同一封邮件的归档链路 |
 | C2 | `state.json = { processedMessageIds: string[] }` | 仍是数组，但**键改为 msgIdHash**；启动时与 invoices.csv 求并集 | 应对 Message-Id 缺失/重复 |
 | C3 | 命名冲突直接 `-1/-2` | 保留 `-1/-2`，但 CSV 追加前用 `messageId + source` 查重 | 关闭 FINALIZED→COMMIT 间的重复窗口，同时允许一封邮件多文档 |
-| C4 | 主流程未说明并发 | 明确：**单封串行**，仅 HEAD 探测局部并发 | 锁定 v1 复杂度 |
+| C4 | 主流程未说明并发 | `mfh run --concurrency <n>` 使用受控 worker pool，默认 4；同 hash 防重，单封失败不终止整轮 | 兼顾真实使用速度与状态复杂度 |
 | C5 | OCR/LLM 失败行为未定义 | OCR 失败 → fallback 模板，不阻塞 | "绝不阻塞主流程"硬约束的具体化 |
 | C6 | `SiteHandler.handle` 签名缺 `ctx` | 加 `ctx: Ctx` | logger / config 必须可注入 |
 | C7 | 未明确 Playwright 生命周期 | `ctx.browser()` 懒启动，CLI 退出统一关 | 避免 SiteHandler 各自管理 |
@@ -255,7 +255,7 @@ DISCOVERED                  // 来自 fetcher
 
 ## 三句话总结
 
-1. **顺序 + 数组就是架构**：单封邮件串行通过一个固定顺序的 Extractor 数组，无并发、无 DI、无插件、无热插拔；这是为了把 v1 的复杂度锁死在"读得懂一晚上"的量级。
+1. **固定顺序 + 受控并发就是架构**：多封邮件由 worker pool 并发处理；每封邮件内部仍按固定顺序的 Extractor 数组匹配，无 DI、无插件、无热插拔；这是为了把 v1 的复杂度锁死在"读得懂一晚上"的量级。
 2. **CSV 是归档真相，state.json 是缓存**：所有幂等都围绕 messageId（缺失则用 hash 兜底），COMMIT 顺序固定为 staging→final→CSV→state，启动时用 CSV 自愈未提交窗口。
 3. **失败永远降级为 manual**：除 IMAP 连接和 state 写盘两个底线外，任何层抛错都把当前邮件丢进 pending 队列继续下一封，保证一次 `mfh run` 永远能跑完。
 

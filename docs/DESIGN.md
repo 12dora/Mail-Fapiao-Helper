@@ -181,7 +181,7 @@ disconnect
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
 - GUI 待处理队列按 `network_retry_failed` 单独分组，运行控制台展示重试日志与最终失败汇总
 - 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 `messageId + source` 查重，避免 FINALIZED→COMMIT 窗口产生重复行
-- 并发：单封邮件串行处理，无并发池（详见 `ARCHITECTURE.md §6`）
+- 并发：`mfh run` 默认 `--concurrency 4`，用 worker pool 并发处理本地 `.eml`；同一封内部仍按 extractor 顺序匹配（详见 `ARCHITECTURE.md §6`）
 
 ## 8. 可扩展性（仅这两个扩展点）
 
