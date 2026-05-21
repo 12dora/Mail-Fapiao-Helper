@@ -3,6 +3,8 @@
 1. `docs/ARCHITECTURE.md`（规约，冲突以它为准）
 2. `docs/DESIGN.md`（产品视角）
 3. `docs/NEXT_STEPS.md`（分阶段路线，确认当前阶段）
+4. `docs/progress.md`（当前进度）
+
 
 ## 硬约束（违反即返工）
 

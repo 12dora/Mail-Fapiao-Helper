@@ -26,6 +26,19 @@ interface OcrPendingRow extends CsvRow {
   reason: string;
 }
 
+type FetchInput = Parameters<typeof fetch>[0];
+type FetchInit = Parameters<typeof fetch>[1];
+
+export interface ProcessMailResult {
+  hash: string;
+  messageId: string;
+  date: string;
+  from: string;
+  subject: string;
+  outcome: 'pdf' | 'manual' | 'skip';
+  reason?: string;
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -151,7 +164,7 @@ function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): vo
   const date = mail.date?.toISOString() || '';
   const from = mail.from?.text || '';
   const subject = mail.subject || '';
-  const line = `${messageId},${date},${from},${subject},${reason}\n`;
+  const line = [messageId, date, from, subject, reason].map(csvCell).join(',') + '\n';
 
   if (!exists) {
     fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
@@ -164,6 +177,62 @@ function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): vo
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function requestUrl(input: FetchInput): string {
+  if (typeof input === 'string') return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}
+
+function requestMethod(init: FetchInit): string {
+  return (init?.method ?? 'GET').toUpperCase();
+}
+
+function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
+  return (async (input: FetchInput, init?: FetchInit): Promise<Response> => {
+    const attempts = cfg.network.retries + 1;
+    const url = requestUrl(input);
+    const method = requestMethod(init);
+    let lastError = '';
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const response = await fetch(input, init);
+        if (!isRetryableStatus(response.status)) {
+          return response;
+        }
+        lastError = `http_${response.status}`;
+        if (attempt === attempts) {
+          throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
+        }
+        log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('network_retry_failed:')) {
+          throw err;
+        }
+        lastError = err instanceof Error ? err.message : String(err);
+        if (attempt === attempts) {
+          throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
+        }
+        log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
+      }
+
+      if (cfg.network.retryDelayMs > 0) {
+        await sleep(cfg.network.retryDelayMs * attempt);
+      }
+    }
+
+    throw new Error(`network_retry_failed:${method}:${url}:${lastError || 'unknown'}`);
+  }) as typeof fetch;
+}
+
 export async function processMail(
   mail: ParsedMail,
   cfg: Config,
@@ -172,7 +241,7 @@ export async function processMail(
   saveState: () => void,
   browser: () => Promise<Browser>,
   opts: { force?: boolean } = {},
-): Promise<void> {
+): Promise<ProcessMailResult> {
   const hash = msgIdHashFn(
     mail.messageId ?? undefined,
     mail.from?.text ?? '',
@@ -180,17 +249,24 @@ export async function processMail(
     mail.subject ?? '',
   );
   const messageId = mail.messageId || hash;
+  const baseResult = {
+    hash,
+    messageId,
+    date: mail.date?.toISOString() || '',
+    from: mail.from?.text || '',
+    subject: mail.subject || '',
+  };
 
   if (!opts.force && state.processedHashes.includes(hash)) {
     log.debug(`Skip already processed ${hash}`);
-    return;
+    return { ...baseResult, outcome: 'skip', reason: 'already_processed' };
   }
 
   const ctx: Ctx = {
     cfg,
     log,
     browser,
-    http: fetch,
+    http: makeRetryingFetch(cfg, log),
   };
 
   let matchedExtractor = null;
@@ -207,7 +283,7 @@ export async function processMail(
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, 'no_extractor');
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
-    return;
+    return { ...baseResult, outcome: 'manual', reason: 'no_extractor' };
   }
 
   log.info(`Matched extractor: ${matchedExtractor.name} for ${hash}`);
@@ -216,20 +292,21 @@ export async function processMail(
   try {
     result = await matchedExtractor.extract(mail, ctx);
   } catch (err) {
-    const reason = `${matchedExtractor.name}:${err}`;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const reason = `${matchedExtractor.name}:${errMsg}`;
     log.warn(`Extractor failed for ${hash}: ${reason}`);
     writePendingEml(mail, cfg.paths.pending, hash);
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, reason);
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
-    return;
+    return { ...baseResult, outcome: 'manual', reason };
   }
 
   if (result.kind === 'skip') {
     log.info(`Skipped ${hash}`);
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
-    return;
+    return { ...baseResult, outcome: 'skip' };
   }
 
   if (result.kind === 'manual') {
@@ -238,7 +315,7 @@ export async function processMail(
     appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, result.reason);
     if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
     saveState();
-    return;
+    return { ...baseResult, outcome: 'manual', reason: result.reason };
   }
 
   const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log);
@@ -278,4 +355,5 @@ export async function processMail(
   log.info(`Processed ${hash}: ${downloads.length} documents`);
   if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
   saveState();
+  return { ...baseResult, outcome: 'pdf' };
 }

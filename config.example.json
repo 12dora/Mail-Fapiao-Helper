@@ -5,7 +5,7 @@
     "user": "me@example.com",
     "pass": "",
     "tls": true,
-    "mailbox": "INBOX"
+    "mailbox": []
   },
   "filter": {
     "keywords": ["发票"],
@@ -38,5 +38,9 @@
   "playwright": {
     "headless": true,
     "timeoutMs": 30000
+  },
+  "network": {
+    "retries": 3,
+    "retryDelayMs": 1000
   }
 }

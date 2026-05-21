@@ -12,7 +12,7 @@
 - [x] `src/log.ts`: 三级日志
 - [x] CLI 入口 (`src/index.ts`): `mfh --help` / `mfh fetch --help` / 未知命令 exit 2
 - [ ] `mfh run` 子命令 (Phase 3 之后才落地)
-- [ ] `mfh pending list` 子命令 (Phase 3 之后才落地)
+- [x] `mfh pending list` 子命令 (2026-05-20: 读取 pending.csv,按网络失败/普通 manual 分组展示)
 - [x] lint: 跳过 eslint,依赖 `tsc strict` (已与用户对齐)
 
 ## Phase 1 — 邮件抓取  [完成 2026-05-20]
@@ -252,10 +252,64 @@
 - 信用卡账单与 12306 支付/改签通知已从 fetch/run 排除,不再进入 manual。
 - 全量样本回归: `Run complete: processed=105, skipped=0`,输出 PDF 166 个,`pending/` 为空。
 
-## Phase 5.2 — OFD 行程单前置支持  [完成 2026-05-21]
+## Phase 5.2 — mailbox 选择与全邮箱抓取  [完成 2026-05-20]
+
+- [x] 除错发现: 网页端“主题或内容包含发票”约 323 封包含多个 mailbox;原 CLI 只查 `INBOX`,半年窗口 SEARCH 为 233
+- [x] IMAP 复核:
+  - `INBOX`: SEARCH 233,可 fetch 232,排除非发票 17,保留 215
+  - `其他文件夹/已处理 2025发票`: SEARCH 92,可 fetch 86
+  - `其他文件夹/已处理 2026发票`: SEARCH 1,可 fetch 1
+- [x] `src/config.ts`: `imap.mailbox` 支持字符串或字符串数组;空数组表示全部 mailbox
+- [x] `src/mail/fetcher.ts`: 未选择 mailbox 时 `LIST` 全部 mailbox,逐 mailbox 串行 SEARCH/FETCH
+- [x] `src/index.ts`: `samples/raw/INDEX.csv` 增加 `mailbox` 列,便于追溯样本来源
+- [x] `gui-design/pages/config.html`: 配置页改为 mailbox 多选,提示空选扫描全部
+- [x] `config.example.json` / 架构与设计文档同步 mailbox 规则
+
+## Phase 5.3 — 网络重试与失败汇总  [完成 2026-05-20]
+
+- [x] `config.network.retries` / `config.network.retryDelayMs`: 单一 `config.json` 内配置网络重试
+- [x] `src/pipeline.ts`: `Ctx.http` 统一包装重试逻辑,覆盖 directLink 与 SiteHandler HTTP 请求
+- [x] 重试耗尽后抛出 `network_retry_failed`,当前邮件写入 `pending/` 与 `pending.csv`,主循环继续
+- [x] `src/index.ts`: `mfh run` 结束时汇总本轮网络重试失败的邮件 hash/date/from/subject/reason
+- [x] `gui-design/pages/config.html`: 配置页增加网络重试次数与基础间隔
+- [x] `gui-design/pages/pending.html`: 待处理队列增加 `network_retry_failed` 分组,显示失败邮件 hash/subject/reason
+- [x] `gui-design/pages/dashboard.html`: 运行控制台展示网络重试日志与最终失败汇总
+
+## Phase 5.4 — 半年全 mailbox 样本回归  [完成 2026-05-20]
+
+- [x] 对 `samples/raw` 302 封 `.eml` 使用临时 state/invoices/pending 全量跑 `mfh run`
+- [x] `src/extract/directLink.ts`: 修复正文 URL 边界,中文说明不再黏进 URL;单封邮件已有 PDF 候选时,无关坏链接失败不再让整封进 pending
+- [x] `src/extract/directLink.ts`: 跳过 `inv-veri.chinatax.gov.cn` 查验说明链接,避免无效 HEAD 重试拖慢
+- [x] 全量结果: `Run complete: processed=302, skipped=0`,输出 PDF 560 个
+- [x] Pending 2 封:
+  - 淘宝闪购 1 封仅含 OSS `.jpg` 图片链接,无 PDF/ZIP,按当前 PDF-only 架构留 manual
+  - 个人转发 1 封仅含税务 App 截图附件,无平台 vendor,留 manual
+- [x] 结论: 本轮未发现需要新增的发票 SiteHandler vendor
+
+## Phase 5.5 — 待人工队列查看  [完成 2026-05-20]
+
+- [x] `mfh pending list`: 读取 `pending/pending.csv`,输出 hash/date/from/subject/reason
+- [x] 按 `network_retry_failed` 与普通 manual 分组,方便区分网络抖动与真实不支持的样本
+
+## Phase 5.6 — 半年到一年前样本回归  [完成 2026-05-21]
+
+- [x] 清空 `samples/raw` 后抓取 `2025-05-20..2025-11-20` 全 mailbox 邮件: SEARCH/FETCH 275 封 `.eml`
+- [x] `src/extract/directLink.ts`: 税局 `exportDzfpwjEwm` 链接从 OFD/XML 自动切到 PDF,并按发票号去重同一邮件里的重复税局链接
+- [x] `src/extract/directLink.ts`: 支持无 `.pdf` 后缀但实际返回 PDF 的亚朵 OSS `inv-file` 链接
+- [x] `src/sites/baiwang.ts`: 支持云票/旧百望短链与 `i.baiwang.com` 预览接口转 PDF
+- [x] `src/sites/huaweiTravel.ts`: 新增慧通差旅 `invoiceViewDownload` token 链接处理器
+- [x] 全量结果: `Run complete: processed=275, skipped=0`,输出 PDF 524 个
+- [x] Pending 11 封,无新增可适配 vendor:
+  - 飞猪接送机 7 封: 历史 OSS 签名 PDF 链接返回 403,留 manual
+  - 通行费授权自动开票 2 封: 邮件仅含二维码/授权入口,无 PDF 链接,留 manual
+  - 慧通差旅 1 封: 平台返回 `130071003` 发票链接超过有效期,留 manual
+  - 飞猪旅行报销凭证 1 封: 仅 OFD 附件,当前阶段不做 OFD/OCR,留 manual
+
+## Phase 5.7 — OFD 行程单前置支持  [完成 2026-05-21]
 
 - [x] `src/extract/types.ts`: `PdfArtifact` 扩展为兼容旧名的 `DocumentArtifact`,新增 `format` / `documentType` / `requiresOcr`
 - [x] `src/extract/attachment.ts`: 识别附件与 ZIP 内 `.ofd`,将 OFD 标记为 `documentType=itinerary` 且 `requiresOcr=true`
 - [x] `src/download/downloader.ts`: staging 与最终归档保留 `.ofd` 扩展名,PDF 路径保持兼容
 - [x] `src/pipeline.ts`: OFD 与 PDF 可在同一封邮件中共同归档;`invoices.csv` 去重粒度改为 `messageId + source`
 - [x] `src/pipeline.ts`: OFD 行程单写入 `invoices/ocr/ocr-pending.csv`,等待后续 OCR 识别引擎集成
+- [x] 代表样本验证: `84bda1cccdc2` 同时输出 `.ofd` 与 `.pdf`,并生成 1 行 `ocr-pending.csv`

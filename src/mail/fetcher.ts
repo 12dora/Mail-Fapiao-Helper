@@ -5,6 +5,7 @@ import type { Logger } from '../log.js';
 import { nonInvoiceReason } from './exclude.js';
 
 export interface RawMail {
+  mailbox: string;
   uid: number;
   raw: Buffer;
   messageId: string | undefined;
@@ -70,6 +71,13 @@ function buildSearch(cfg: Config): SearchObject {
   return out;
 }
 
+function listAllMailboxPaths(client: ImapFlow): Promise<string[]> {
+  return client.list().then((boxes) => boxes
+    .filter((box) => box.listed !== false)
+    .map((box) => box.path)
+    .filter((path) => path.length > 0));
+}
+
 function countLinks(html: string | false | undefined, text: string | undefined): number {
   let n = 0;
   if (typeof html === 'string' && html.length > 0) {
@@ -93,66 +101,77 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
   });
 
   await client.connect();
-  const lock = await client.getMailboxLock(cfg.imap.mailbox);
   try {
     const search = buildSearch(cfg);
     const win = resolveDateWindow(cfg);
-    log.info(`IMAP SEARCH ${JSON.stringify(search)}`);
-    const uids = await client.search(search, { uid: true });
-    if (!uids || uids.length === 0) {
-      log.info('IMAP SEARCH: 0 matches');
-      return;
-    }
-    log.info(`IMAP SEARCH: ${uids.length} matches`);
+    const mailboxes = cfg.imap.mailbox.length > 0
+      ? cfg.imap.mailbox
+      : await listAllMailboxPaths(client);
+    log.info(`IMAP mailboxes: ${JSON.stringify(mailboxes)}`);
 
-    for await (const msg of client.fetch(uids, { source: true, envelope: true }, { uid: true })) {
-      if (!msg.source) continue;
-      const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
-      let parsed;
+    for (const mailbox of mailboxes) {
+      const lock = await client.getMailboxLock(mailbox);
       try {
-        parsed = await simpleParser(raw);
-      } catch (e) {
-        log.warn(`parse failed for uid=${msg.uid}: ${(e as Error).message}`);
-        continue;
-      }
-      const env = msg.envelope;
-      const from = parsed.from?.text
-        ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
-      const subject = parsed.subject ?? env?.subject ?? '';
-      const date = parsed.date ?? env?.date ?? new Date(0);
-      const messageId = parsed.messageId ?? env?.messageId ?? undefined;
-      const hasAttachment = (parsed.attachments?.length ?? 0) > 0;
-      const bodyLinkCount = countLinks(parsed.html, parsed.text);
-      const excludeReason = nonInvoiceReason({ from, subject });
-      if (excludeReason) {
-        log.info(`exclude uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
-        continue;
-      }
+        log.info(`IMAP SEARCH mailbox="${mailbox}" ${JSON.stringify(search)}`);
+        const uids = await client.search(search, { uid: true });
+        if (!uids || uids.length === 0) {
+          log.info(`IMAP SEARCH mailbox="${mailbox}": 0 matches`);
+          continue;
+        }
+        log.info(`IMAP SEARCH mailbox="${mailbox}": ${uids.length} matches`);
 
-      // Defensive header-date filter: some servers return messages outside the
-      // IMAP SEARCH window (mismatch between INTERNALDATE and the Date header).
-      if (date.getTime() < win.since.getTime()) {
-        log.info(`skip uid=${msg.uid} date=${date.toISOString()} < since=${win.since.toISOString()}`);
-        continue;
-      }
-      if (win.before && date.getTime() >= win.before.getTime()) {
-        log.info(`skip uid=${msg.uid} date=${date.toISOString()} >= before=${win.before.toISOString()}`);
-        continue;
-      }
+        for await (const msg of client.fetch(uids, { source: true, envelope: true }, { uid: true })) {
+          if (!msg.source) continue;
+          const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+          let parsed;
+          try {
+            parsed = await simpleParser(raw);
+          } catch (e) {
+            log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}: ${(e as Error).message}`);
+            continue;
+          }
+          const env = msg.envelope;
+          const from = parsed.from?.text
+            ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
+          const subject = parsed.subject ?? env?.subject ?? '';
+          const date = parsed.date ?? env?.date ?? new Date(0);
+          const messageId = parsed.messageId ?? env?.messageId ?? undefined;
+          const hasAttachment = (parsed.attachments?.length ?? 0) > 0;
+          const bodyLinkCount = countLinks(parsed.html, parsed.text);
+          const excludeReason = nonInvoiceReason({ from, subject });
+          if (excludeReason) {
+            log.info(`exclude mailbox="${mailbox}" uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
+            continue;
+          }
 
-      yield {
-        uid: msg.uid,
-        raw,
-        messageId,
-        from,
-        date,
-        subject,
-        hasAttachment,
-        bodyLinkCount,
-      };
+          // Defensive header-date filter: some servers return messages outside the
+          // IMAP SEARCH window (mismatch between INTERNALDATE and the Date header).
+          if (date.getTime() < win.since.getTime()) {
+            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${date.toISOString()} < since=${win.since.toISOString()}`);
+            continue;
+          }
+          if (win.before && date.getTime() >= win.before.getTime()) {
+            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${date.toISOString()} >= before=${win.before.toISOString()}`);
+            continue;
+          }
+
+          yield {
+            mailbox,
+            uid: msg.uid,
+            raw,
+            messageId,
+            from,
+            date,
+            subject,
+            hasAttachment,
+            bodyLinkCount,
+          };
+        }
+      } finally {
+        lock.release();
+      }
     }
   } finally {
-    lock.release();
     await client.logout().catch(() => undefined);
   }
 }

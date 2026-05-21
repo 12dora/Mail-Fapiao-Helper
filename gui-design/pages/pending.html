@@ -16,7 +16,7 @@
             <span class="toolbar__crumb">工作流</span>
             <span class="toolbar__title">待处理队列</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">6 封待处理 · pending/</span>
+            <span class="toolbar__meta">8 封待处理 · pending/</span>
         </div>
 
         <div class="page stagger">
@@ -38,9 +38,9 @@
                     <div class="stat__delta is-flat">parse_error</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">最久等待</div>
-                    <div class="stat__value">9</div>
-                    <div class="stat__delta is-flat">天前</div>
+                    <div class="stat__label">网络失败</div>
+                    <div class="stat__value" style="color: var(--warn);">2</div>
+                    <div class="stat__delta is-flat">network_retry_failed</div>
                 </div>
             </div>
 
@@ -63,9 +63,10 @@
             <!-- 过滤栏 -->
             <div class="filterbar">
                 <div class="tabs">
-                    <button class="tab is-active">全部 · 6</button>
+                    <button class="tab is-active">全部 · 8</button>
                     <button class="tab">需登录 · 2</button>
                     <button class="tab">vendor 未注册 · 3</button>
+                    <button class="tab">网络失败 · 2</button>
                     <button class="tab">解析失败 · 1</button>
                 </div>
 
@@ -196,6 +197,60 @@
                                 <button class="btn btn--sm btn--primary">手动归档</button>
                                 <button class="btn btn--sm">新建 handler</button>
                                 <button class="btn btn--sm btn--ghost">忽略</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 待处理项 - 网络失败 -->
+            <div class="group is-open">
+                <div class="group__head">
+                    <svg class="ic group__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    <div class="group__title">网络失败</div>
+                    <span class="group__count">2</span>
+                </div>
+                <div class="group__body">
+                    <div class="group__inner">
+                        <div class="card card--tight" style="margin-bottom: 12px;">
+                            <div class="row gap-8 mb-12">
+                                <span class="pill pill--warn">network_retry_failed</span>
+                                <span class="pill">thirdParty: nuonuo</span>
+                                <span class="mono small muted">msgIdHash <span class="strong">53a93fd33bea</span></span>
+                            </div>
+                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">您的电子发票已开具，请查收</div>
+                            <div class="mono small muted">
+                                from · <span class="fg">service@nuonuo.com</span> · 2026-05-20 13:26 ·
+                                <a href="#" style="color: var(--accent); text-decoration: underline;">打开 .eml</a>
+                            </div>
+                            <div style="margin-top: 10px; padding: 10px 12px; background: var(--warn-soft); border-left: 2px solid var(--warn); border-radius: var(--radius-sm);">
+                                <div class="mono small">已重试 3 次 · GET https://nnfp.jss.com.cn/... · http_500 · 本封已进入 pending.csv</div>
+                            </div>
+                            <div class="row gap-8 mt-12">
+                                <button class="btn btn--sm btn--primary">重新处理</button>
+                                <button class="btn btn--sm">手动归档</button>
+                                <button class="btn btn--sm btn--ghost">复制 reason</button>
+                            </div>
+                        </div>
+
+                        <div class="card card--tight">
+                            <div class="row gap-8 mb-12">
+                                <span class="pill pill--warn">network_retry_failed</span>
+                                <span class="pill">directLink</span>
+                                <span class="mono small muted">msgIdHash <span class="strong">a2365b841458</span></span>
+                            </div>
+                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">发票下载链接</div>
+                            <div class="mono small muted">
+                                from · <span class="fg">invoice@example.com</span> · 2026-05-19 10:04 ·
+                                <a href="#" style="color: var(--accent); text-decoration: underline;">打开 .eml</a>
+                            </div>
+                            <div style="margin-top: 10px; padding: 10px 12px; background: var(--warn-soft); border-left: 2px solid var(--warn); border-radius: var(--radius-sm);">
+                                <div class="mono small">network_retry_failed:GET:https://example.com/invoice.pdf:http_503</div>
+                            </div>
+                            <div class="row gap-8 mt-12">
+                                <button class="btn btn--sm btn--primary">重新处理</button>
+                                <button class="btn btn--sm">手动归档</button>
+                                <button class="btn btn--sm btn--ghost">复制 reason</button>
                             </div>
                         </div>
                     </div>

@@ -110,7 +110,7 @@ disconnect
     "user": "me@example.com",
     "pass": "***",
     "tls": true,
-    "mailbox": "INBOX"
+    "mailbox": []
   },
   "filter": {
     "keywords": ["发票"],
@@ -141,9 +141,15 @@ disconnect
   "playwright": {
     "headless": true,
     "timeoutMs": 30000
+  },
+  "network": {
+    "retries": 3,
+    "retryDelayMs": 1000
   }
 }
 ```
+
+`imap.mailbox` 可填字符串数组；空数组表示扫描 IMAP `LIST` 返回的全部 mailbox。旧格式 `"INBOX"` 仍兼容，会被当作 `["INBOX"]`。
 
 ## 7. 状态与防重
 
@@ -151,6 +157,8 @@ disconnect
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
 - 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，OFD 另写 `invoices/ocr/ocr-pending.csv` 等待后续 OCR 识别引擎
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
+- 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
+- GUI 待处理队列按 `network_retry_failed` 单独分组，运行控制台展示重试日志与最终失败汇总
 - 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 messageId 查重，避免 FINALIZED→COMMIT 窗口产生重复行
 - 并发：单封邮件串行处理，无并发池（详见 `ARCHITECTURE.md §6`）
 

@@ -16,6 +16,7 @@
 **目标**：让 AI / 用户尽快拿到真实邮件做本地分析。本阶段不做任何"识别 / 提取 / 下载 PDF"逻辑。
 
 - `mail/fetcher.ts`：IMAP 连接、按关键词 SEARCH SUBJECT/BODY、SINCE N 天
+- mailbox 由用户选择；未选择时扫描全部 IMAP mailbox，逐 mailbox 串行抓取
 - `mfh fetch` 子命令：把命中的邮件原文以 `.eml` 落到 `samples/raw/<YYYY-MM>/<messageId>.eml`
   - 同时写 `samples/raw/INDEX.csv`：messageId, date, from, subject, hasAttachment, bodyLinkCount
 - `state.json` 记录已 fetch 过的 messageId，重跑只增量拉取
