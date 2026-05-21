@@ -2,6 +2,7 @@ import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { handlers } from '../sites/registry.js';
+import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
 
 function cleanLink(url: string): string {
   let cleaned = url
@@ -150,7 +151,11 @@ function documentFormat(data: Buffer, source: string): 'pdf' | 'ofd' {
 }
 
 function looksLikeItinerary(value: string | undefined): boolean {
-  return /行程单|行程报销|航空运输电子客票|客票|机票|航班|itinerary|e-ticket|eticket/i.test(value || '');
+  return looksLikeItineraryText(value);
+}
+
+function looksLikeOfdItinerary(value: string | undefined): boolean {
+  return looksLikeOfdItineraryText(value);
 }
 
 function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], subject: string | undefined, log: Ctx['log']): PdfArtifact[] {
@@ -160,7 +165,7 @@ function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], subject: string | u
   return artifacts.filter((item) => {
     if (item.format !== 'ofd') return true;
     const text = `${item.suggestedName || ''} ${item.source}`;
-    if (looksLikeItinerary(text) || looksLikeItinerary(subject)) return true;
+    if (looksLikeOfdItinerary(text) || looksLikeOfdItinerary(subject)) return true;
     log.debug(`Filtered likely duplicate OFD invoice ${item.source}; keeping PDF from same mail`);
     return false;
   });

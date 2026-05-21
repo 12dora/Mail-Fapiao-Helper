@@ -97,7 +97,7 @@ disconnect
 
 | 情况 | Extractor | 实现要点 |
 |---|---|---|
-| 1. 附件含 PDF/OFD | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf/ofd 或文件名 .pdf/.ofd；PDF/OFD 成对发票优先保留 PDF，行程单 OFD 继续归档并进入 OCR 待识别队列 |
+| 1. 附件含 PDF/OFD | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf/ofd 或文件名 .pdf/.ofd；PDF/OFD 成对发票优先保留 PDF；明确 `电子行程单` / `航空运输电子客票` 的 OFD 继续归档并进入 OCR 待识别队列 |
 | 2. 正文直链 | `directLink.ts` | 提取 `<a href>`，HEAD 探测 Content-Type=application/pdf 或 .pdf 后缀，命中即下载 |
 | 3. 第三方站点 | `thirdParty.ts` + `sites/*` | 遍历正文链接，按 SiteHandler.match 命中后用 Playwright 跑脚本 |
 | 4. 未识别 | `manual.ts` | 把 .eml 原文写入 `pending/<messageId>.eml`，写一行索引到 `pending.csv` |
@@ -172,10 +172,12 @@ disconnect
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 真实邮件开发缓存放在 `.mfh-cache/<window>/raw/`，例如当前本机一年缓存 `.mfh-cache/year-2025-05-21_2026-05-21/raw/`；该目录包含真实邮件和发票信息，必须被 `.gitignore` 忽略，不能提交。开发时优先用该缓存目录离线回归，避免反复调用 IMAP
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
-- 同一封邮件可包含 PDF 发票和 OFD 行程单；附件提取会过滤 PDF/OFD 成对发票中的重复 OFD，只保留 PDF。若 OFD 名称/来源含 `行程单`、`客票`、`机票` 等行程信号，则保留 OFD。`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
+- 同一封邮件可包含 PDF 发票和 OFD 行程单；附件提取会过滤 PDF/OFD 成对发票中的重复 OFD，只保留 PDF。若 OFD 名称/来源明确含 `行程单`、`航空运输电子客票`、`itinerary` 等行程单信号，则保留 OFD；普通“报销凭证”有 PDF 副本时不保留 OFD 副本。`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
+- 通行费汇总单、订单/运单明细、结账单/账单、堂食明细、PDF 行程/行程报销单等支撑材料仍会归档，但在 OCR 队列中标记为 `documentType=supporting,status=ignored`，默认不送 OCR；原文件不删除，后续 GUI 可展示/手动处理
 - `mfh ocr run` 默认使用 `ocr.executionMode="auto"`：先探活/启动 `efapiao serve` 本地 HTTP 服务，按 `ocr.batchSize` 聚合后向 `/v1/invoices/parse-batch` POST，整批 `hint_type=auto` 以兼容 PDF/OFD 混合队列；服务不可用时回退逐张 CLI。`ocr.binaryPath="auto"` 时优先使用 `vendor/efapiao/0.1.2/<platform-arch>/` 下的内置二进制，缺失时回退 PATH
 - `ocr.resultsCsv` 记录 `transport/extractedBy/parserVersion/ocrVendor`；`extractedBy=text_layer` 表示文本层规则命中，`qrcode` 表示二维码/渲染兜底命中，`ocr` 表示 OCR vendor 介入
-- `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`，行本身保留，便于 GUI 和重复执行查看历史
+- `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`；支撑材料标记为 `ignored`；行本身保留，便于 GUI 和重复执行查看历史
+- `mfh ocr run --allow-parse-failures` 可用于批量任务：只要 OCR 程序/接口本身完成，即使个别文档业务解析失败也返回 0；默认行为仍在存在失败行时返回非零
 - `mfh organize` 只消费 `ocr.resultsCsv`，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件

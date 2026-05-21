@@ -93,6 +93,7 @@ function asFormat(value: string): DocumentFormat {
 }
 
 function asDocumentType(value: string): DocumentType {
+  if (value === 'supporting') return 'supporting';
   return value === 'itinerary' ? 'itinerary' : 'invoice';
 }
 
@@ -334,6 +335,12 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
   for (let i = 0; i < nextRows.length; i++) {
     const row = nextRows[i];
     if (!row) continue;
+    if (row.status === 'ignored' || row.documentType === 'supporting') {
+      row.status = 'ignored';
+      row.reason ||= 'supporting_document';
+      summary.skipped++;
+      continue;
+    }
     const key = `${row.hash}\0${row.source}`;
     if (seenResults.has(key)) {
       await flushBatch();

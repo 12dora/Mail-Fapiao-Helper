@@ -344,7 +344,7 @@ function okResult(payload: EfapiaoPayload, fallbackDocumentType: DocumentType, t
   };
 }
 
-function errorResult(payload: EfapiaoPayload, fallbackError: string, transport: 'cli' | 'http'): OcrResult {
+function errorResult(payload: EfapiaoPayload, fallbackError: string, transport: 'cli' | 'http', fallbackDocumentType: DocumentType): OcrResult {
   const code = stringValue(payload.code);
   const message = stringValue(payload.message);
   const error = [code, message].filter(Boolean).join(':') || fallbackError;
@@ -352,7 +352,7 @@ function errorResult(payload: EfapiaoPayload, fallbackError: string, transport: 
     status: 'error',
     fields: {
       invoiceType: stringValue(payload.invoice_type),
-      documentType: documentTypeFromEfapiao(stringValue(payload.document_type), 'invoice'),
+      documentType: documentTypeFromEfapiao(stringValue(payload.document_type), fallbackDocumentType),
     },
     error,
     transport,
@@ -379,7 +379,7 @@ async function parseViaCli(cfg: Config, data: Buffer, meta: { format: DocumentFo
   if (result.code === 0 && payload.status === 'ok') {
     return okResult(payload, meta.documentType, 'cli');
   }
-  return errorResult(payload, `efapiao_exit_${result.code}`, 'cli');
+  return errorResult(payload, `efapiao_exit_${result.code}`, 'cli', meta.documentType);
 }
 
 async function parseViaService(cfg: Config, data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<OcrResult> {
@@ -387,7 +387,7 @@ async function parseViaService(cfg: Config, data: Buffer, meta: { format: Docume
   if (payload.status === 'ok') {
     return okResult(payload, meta.documentType, 'http');
   }
-  return errorResult(payload, 'efapiao_http_error', 'http');
+  return errorResult(payload, 'efapiao_http_error', 'http', meta.documentType);
 }
 
 async function parseBatchViaService(
@@ -400,7 +400,7 @@ async function parseBatchViaService(
     if (payload.status === 'ok') {
       return okResult(payload, meta?.documentType ?? 'invoice', 'http');
     }
-    return errorResult(payload, 'efapiao_http_error', 'http');
+    return errorResult(payload, 'efapiao_http_error', 'http', meta?.documentType ?? 'invoice');
   });
 }
 
