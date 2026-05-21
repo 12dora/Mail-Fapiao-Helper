@@ -15,6 +15,7 @@ import { organizeFromOcrResults } from './rename/rename.js';
 import { runOcrPending } from './ocr/runner.js';
 import { summarizeOcr } from './ocr/summary.js';
 import { pendingEmlExists, summarizePending } from './pending/summary.js';
+import { readCsvRows } from './util/csv.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -379,6 +380,7 @@ Options:
   --state <path>       Path to state.json         (default: ./state.json)
   --only-mail <hash>   Process one msgIdHash, even if already processed
   --concurrency <n>    Process up to N cached emails in parallel (default: 4)
+  --force              Re-process cached emails even if state says they were handled
   -h, --help           Show this help
 `;
 
@@ -387,6 +389,7 @@ interface RunOpts {
   statePath: string;
   onlyMail: string | undefined;
   concurrency: number;
+  force: boolean;
 }
 
 function parseRunArgs(argv: string[]): RunOpts | 'help' {
@@ -395,6 +398,7 @@ function parseRunArgs(argv: string[]): RunOpts | 'help' {
     statePath: './state.json',
     onlyMail: undefined,
     concurrency: 4,
+    force: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -402,6 +406,7 @@ function parseRunArgs(argv: string[]): RunOpts | 'help' {
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--state') { opts.statePath = requireValue(argv, ++i, a); continue; }
     if (a === '--only-mail') { opts.onlyMail = requireValue(argv, ++i, a); continue; }
+    if (a === '--force') { opts.force = true; continue; }
     if (a === '--concurrency') {
       const v = Number(requireValue(argv, ++i, a));
       if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
@@ -433,6 +438,12 @@ async function collectEmlPaths(dir: string): Promise<string[]> {
   return out;
 }
 
+function archivedMessageIdSet(cfg: Config): Set<string> {
+  return new Set(readCsvRows(resolve(cfg.output.csv))
+    .map((row) => row.messageId ?? '')
+    .filter((messageId) => messageId.length > 0));
+}
+
 async function cmdRun(argv: string[]): Promise<number> {
   let parsed: RunOpts | 'help';
   try {
@@ -456,6 +467,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   const statePath = resolve(opts.statePath);
   const state: State = loadState(statePath);
   const processedHashes = new Set(state.processedHashes);
+  const archivedMessageIds = archivedMessageIdSet(cfg);
 
   const saveStateFn = () => {
     state.processedHashes = Array.from(processedHashes);
@@ -493,6 +505,7 @@ async function cmdRun(argv: string[]): Promise<number> {
       mail.date?.toISOString() ?? '',
       mail.subject ?? '',
     );
+    const messageId = mail.messageId ?? '';
 
     if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
       return;
@@ -515,7 +528,14 @@ async function cmdRun(argv: string[]): Promise<number> {
       return;
     }
 
-    if (opts.onlyMail === undefined && processedHashes.has(hash)) {
+    if (opts.onlyMail === undefined && !opts.force && messageId && archivedMessageIds.has(messageId)) {
+      processedHashes.add(hash);
+      saveStateFn();
+      skipped++;
+      return;
+    }
+
+    if (opts.onlyMail === undefined && !opts.force && processedHashes.has(hash)) {
       skipped++;
       return;
     }
@@ -531,8 +551,11 @@ async function cmdRun(argv: string[]): Promise<number> {
         saveStateFn();
       };
 
-      const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, { force: opts.onlyMail !== undefined });
+      const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, { force: opts.force || opts.onlyMail !== undefined, raw });
       for (const item of taskState.processedHashes) processedHashes.add(item);
+      if (result.outcome === 'pdf' && result.messageId.length > 0) {
+        archivedMessageIds.add(result.messageId);
+      }
       if (result.outcome === 'manual' && result.reason?.includes('network_retry_failed')) {
         networkFailures.push(result);
       }
