@@ -23,24 +23,24 @@
             <!-- 统计卡片 -->
             <div class="stats">
                 <div class="stat">
-                    <div class="stat__label">本月归档</div>
-                    <div class="stat__value">96</div>
-                    <div class="stat__delta">+18 vs 上月</div>
+                    <div class="stat__label">OCR 队列</div>
+                    <div class="stat__value">1,086</div>
+                    <div class="stat__delta is-flat">ocr-pending.csv</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">本月金额</div>
-                    <div class="stat__value mono" style="font-size: 18px;">¥28,431</div>
-                    <div class="stat__delta">+¥3,118</div>
+                    <div class="stat__label">已识别</div>
+                    <div class="stat__value">784</div>
+                    <div class="stat__delta">recognized</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">销售方去重</div>
-                    <div class="stat__value">42</div>
-                    <div class="stat__delta is-flat">家企业</div>
+                    <div class="stat__label">支撑材料</div>
+                    <div class="stat__value">301</div>
+                    <div class="stat__delta is-flat">ignored</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">字段完整率</div>
-                    <div class="stat__value">88%</div>
-                    <div class="stat__delta">+2.1%</div>
+                    <div class="stat__label">失败</div>
+                    <div class="stat__value" style="color: var(--err);">1</div>
+                    <div class="stat__delta is-down">rule_unhandled</div>
                 </div>
             </div>
 
@@ -50,10 +50,10 @@
 
                 <div class="tabs">
                     <button class="tab is-active">全部</button>
-                    <button class="tab">本月</button>
-                    <button class="tab">上月</button>
-                    <button class="tab">Q2</button>
-                    <button class="tab">2026 年</button>
+                    <button class="tab">已识别</button>
+                    <button class="tab">失败</button>
+                    <button class="tab">支撑材料</button>
+                    <button class="tab">行程单</button>
                 </div>
 
                 <select class="select" style="width: 160px;">
@@ -65,12 +65,37 @@
 
                 <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
                     <div class="check"></div>
-                    仅字段缺失
+                    仅失败项
                 </label>
 
                 <div class="spacer"></div>
-                <button class="btn btn--sm">导出 CSV</button>
-                <button class="btn btn--sm">批量重命名</button>
+                <button class="btn btn--sm">手动改分类</button>
+                <button class="btn btn--sm">重跑 OCR</button>
+                <button class="btn btn--sm">整理输出</button>
+            </div>
+
+            <div class="grid-3">
+                <div class="card card--tight">
+                    <div class="row row--between">
+                        <span class="small muted">通行费汇总单</span>
+                        <span class="mono strong">260</span>
+                    </div>
+                    <div class="small muted mt-12">supporting_document:toll_summary</div>
+                </div>
+                <div class="card card--tight">
+                    <div class="row row--between">
+                        <span class="small muted">行程/订单明细</span>
+                        <span class="mono strong">32</span>
+                    </div>
+                    <div class="small muted mt-12">travel_detail + order_detail</div>
+                </div>
+                <div class="card card--tight">
+                    <div class="row row--between">
+                        <span class="small muted">结账单/堂食明细</span>
+                        <span class="mono strong">9</span>
+                    </div>
+                    <div class="small muted mt-12">statement + meal_detail</div>
+                </div>
             </div>
 
             <!-- 发票表格 -->

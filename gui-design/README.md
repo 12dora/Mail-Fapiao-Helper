@@ -22,10 +22,10 @@ gui-design/
   styles/main.css            — design system (paper-ledger aesthetic)
   scripts/shell.js           — shared sidebar nav injector
   pages/
-    dashboard.html           — 01 Run Console (trigger fetch, live console, run history)
+    dashboard.html           — 01 Run Console (trigger fetch/run, OCR and pending summary)
     inbox.html               — 02 Inbox Ledger (INDEX.csv view, filters, grouping by month)
-    library.html             — 03 Invoice Library (filed invoices with OCR fields)
-    pending.html             — 04 Manual Queue (failures grouped by reason)
+    library.html             — 03 Invoice Library (OCR result states, supporting documents, actions)
+    pending.html             — 04 Manual Queue (grouped by handling action from mfh pending list)
     config.html              — 05 Configuration (config.json editor with section index)
     settings.html            — 06 About & Build (roadmap, principles, build info)
 ```
@@ -38,4 +38,11 @@ gui-design/
 - **Decorative motif** — the red square "chop" (印章) appears as brand mark, large action affordance, status indicator, and decorative seal — a single visual signature that ties the system together.
 - **Microinteractions** — page-load stagger (60/120/180ms), hard-shadow button press (2px → 3px → 1px), animated progress bar + pulsing dot on the run console, rotating dashed-stamp transform on chops.
 
-This is design-only. The existing CLI is unmodified.
+The preview is still static, but the numbers and action model now mirror the CLI contracts:
+
+```bash
+mfh pending list --json
+mfh ocr summary --json
+```
+
+Those two JSON outputs are intended as the first GUI data source when the static design becomes Electron/Tauri/Web UI.

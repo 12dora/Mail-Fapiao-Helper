@@ -23,24 +23,75 @@
             <!-- Stats -->
             <div class="stats">
                 <div class="stat">
-                    <div class="stat__label">本月命中</div>
-                    <div class="stat__value">128</div>
-                    <div class="stat__delta">+12 vs 上月</div>
+                    <div class="stat__label">一年缓存邮件</div>
+                    <div class="stat__value">577</div>
+                    <div class="stat__delta">2025-05-21 至 2026-05-21</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">已归档</div>
-                    <div class="stat__value">122</div>
-                    <div class="stat__delta">96% 完成率</div>
+                    <div class="stat__label">OCR 已识别</div>
+                    <div class="stat__value">784</div>
+                    <div class="stat__delta">recognized</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">待处理</div>
-                    <div class="stat__value">8</div>
-                    <div class="stat__delta is-down">需人工介入</div>
+                    <div class="stat__label">OCR 失败</div>
+                    <div class="stat__value" style="color: var(--err);">1</div>
+                    <div class="stat__delta is-down">rule_unhandled</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">OCR 完整率</div>
-                    <div class="stat__value">88%</div>
-                    <div class="stat__delta">百度智能云</div>
+                    <div class="stat__label">支撑材料</div>
+                    <div class="stat__value">301</div>
+                    <div class="stat__delta is-flat">ignored, 已归档</div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <div class="card">
+                    <div class="row row--between mb-12">
+                        <div>
+                            <h3 class="card__title" style="margin: 0 0 4px;">OCR 队列</h3>
+                            <p class="card__sub" style="margin: 0;">来自 <span class="mono">mfh ocr summary</span></p>
+                        </div>
+                        <span class="pill pill--ok">pending 0</span>
+                    </div>
+                    <div class="grid-3">
+                        <div>
+                            <div class="small muted">发票</div>
+                            <div class="mono strong" style="font-size: 18px;">782</div>
+                        </div>
+                        <div>
+                            <div class="small muted">行程单</div>
+                            <div class="mono strong" style="font-size: 18px;">3</div>
+                        </div>
+                        <div>
+                            <div class="small muted">支撑材料</div>
+                            <div class="mono strong" style="font-size: 18px;">301</div>
+                        </div>
+                    </div>
+                    <hr class="hairline">
+                    <div class="row gap-8">
+                        <button class="btn btn--sm btn--primary">重跑失败项</button>
+                        <button class="btn btn--sm">整理输出</button>
+                        <button class="btn btn--sm">导出结果</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="row row--between mb-12">
+                        <div>
+                            <h3 class="card__title" style="margin: 0 0 4px;">待处理邮件</h3>
+                            <p class="card__sub" style="margin: 0;">来自 <span class="mono">mfh pending list</span></p>
+                        </div>
+                        <span class="pill pill--warn">12 封</span>
+                    </div>
+                    <div class="row row--between small mono"><span>飞猪/接送机历史链接过期</span><span class="strong">7</span></div>
+                    <div class="row row--between small mono mt-12"><span>无直接 PDF 链接</span><span class="strong">3</span></div>
+                    <div class="row row--between small mono mt-12"><span>慧通差旅链接过期</span><span class="strong">1</span></div>
+                    <div class="row row--between small mono mt-12"><span>附件无支持文档</span><span class="strong">1</span></div>
+                    <hr class="hairline">
+                    <div class="row gap-8">
+                        <button class="btn btn--sm btn--primary">打开人工队列</button>
+                        <button class="btn btn--sm">刷新链接</button>
+                    </div>
                 </div>
             </div>
 
