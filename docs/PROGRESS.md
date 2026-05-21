@@ -358,3 +358,9 @@
 - [x] 真实样本链路: 清空本地运行缓存后抓取 2026-02-21 至 2026-05-21 邮件,保存 138 封候选邮件;归档 372 个文档(PDF 246,OFD 126),归档阶段 skipped=0
 - [x] 真实 OCR 观察: `efapiao v0.1.2` PDF 文本层可识别;OFD 发票返回 `not_implemented`;通行费汇总/行程 PDF 返回 `parse_failed`
 - [x] 上游问题定位: `v0.1.2 darwin-arm64` 的 `efapiao serve` 因 PyInstaller exclude `uvicorn.middleware.wsgi` 启动失败;本项目 `auto` 模式会回退 CLI,待上游 release 修复后自动走 HTTP
+
+## Phase 6.4 — PDF/OFD 成对发票过滤  [完成 2026-05-21]
+
+- [x] `src/extract/attachment.ts`: 同邮件附件或 ZIP 内 PDF/OFD 成对发票优先保留 PDF,过滤重复 OFD 发票副本
+- [x] 行程单例外: OFD 文件名/来源含 `行程单`、`行程报销`、`客票`、`机票`、`itinerary` 等信号时继续保留并送 OCR
+- [x] 真实样本回归: 扫描 2026-02-21 至 2026-05-21 的 138 封样本邮件,过滤 48 份重复 OFD,普通混合附件不再残留 OFD 发票副本
