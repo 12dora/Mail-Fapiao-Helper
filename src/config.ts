@@ -201,7 +201,7 @@ export function loadConfig(path: string): Config {
       provider: asString(requireField(raw, 'ocr.provider'), 'ocr.provider'),
       binaryPath: typeof (raw as { ocr?: { binaryPath?: unknown } }).ocr?.binaryPath === 'string'
         ? ((raw as { ocr: { binaryPath: string } }).ocr.binaryPath)
-        : 'efapiao',
+        : 'auto',
       timeoutMs: typeof (raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs === 'number'
         ? ((raw as { ocr: { timeoutMs: number } }).ocr.timeoutMs)
         : 120000,

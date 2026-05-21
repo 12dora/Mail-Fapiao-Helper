@@ -195,6 +195,7 @@ DISCOVERED                  // 来自 fetcher
 
 **当前默认 OCR Provider**：
 - `provider="efapiao"`，通过 `config.ocr.binaryPath` 寻找 `12dora/E-Fapiao-OCR` 发布的 `efapiao` 二进制。
+- `binaryPath="auto"` 时按 `process.platform/process.arch` 优先寻找 `vendor/efapiao/0.1.2/<platform-arch>/efapiao`；当前已内置 `darwin-arm64`，其他平台按同样目录补 release 资产即可。
 - 调用方式固定为 stdin 传文件字节，stdout/stderr 解析 JSON；非 0 退出码写入 `ocr-results.csv` 的失败行，不影响原始归档。
 
 **禁止**：写"自动发现/插件加载/装饰器注册"。一律手动 import + push。
