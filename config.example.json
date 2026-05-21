@@ -34,8 +34,10 @@
     "organizedDir": "./invoices/organized"
   },
   "ocr": {
-    "enabled": false,
-    "provider": "baidu",
+    "enabled": true,
+    "provider": "efapiao",
+    "binaryPath": "efapiao",
+    "timeoutMs": 120000,
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
   },

@@ -52,7 +52,8 @@ src/
   ocr/
     types.ts            # OcrProvider 接口
     registry.ts         # Provider 注册
-    <vendor>.ts         # 每家 OCR 一个文件（按需新增）
+    efapiao.ts          # 通过 12dora/E-Fapiao-OCR 的 efapiao 二进制解析
+    runner.ts           # 读取 ocr-pending.csv，写入 ocr-results.csv
   rename/
     rename.ts           # 消费 ocr-results.csv，复制到二次命名/类型目录
   log.ts                # 简单分级日志
@@ -86,7 +87,7 @@ for each mail not in state.processed:
     if canHandle: result = extract(mail); break
   if result.kind == 'pdf':
     for each document: save → conflict-safe filename → append invoices.csv → append ocr-pending.csv
-  optional later: OCR pending documents → ocr-results.csv → mfh organize copies into user-selected names/type folders
+  optional later: mfh ocr run → ocr-results.csv → mfh organize copies into user-selected names/type folders
   if result.kind == 'manual': enqueue to state.pending with raw .eml
   mark message-id processed
 disconnect
@@ -133,8 +134,10 @@ disconnect
     "organizedDir": "./invoices/organized"
   },
   "ocr": {
-    "enabled": false,
-    "provider": "baidu",
+    "enabled": true,
+    "provider": "efapiao",
+    "binaryPath": "efapiao",
+    "timeoutMs": 120000,
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
   },
@@ -161,8 +164,9 @@ disconnect
 
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
-- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv` 等待后续 OCR 识别引擎
-- OCR 识别结果写入 `ocr.resultsCsv`；`mfh organize` 只消费该 CSV，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
+- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
+- `mfh ocr run` 调用 `ocr.binaryPath` 指向的 `efapiao` 二进制，执行 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`，识别结果写入 `ocr.resultsCsv`
+- `mfh organize` 只消费 `ocr.resultsCsv`，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
 - GUI 待处理队列按 `network_retry_failed` 单独分组，运行控制台展示重试日志与最终失败汇总

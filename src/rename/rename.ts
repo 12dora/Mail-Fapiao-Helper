@@ -87,7 +87,7 @@ function resultRow(raw: Record<string, string>): OcrResultRow {
   return {
     hash: raw.hash ?? '',
     messageId: raw.messageId ?? '',
-    date: raw.date ?? '',
+    date: raw.dateValue ?? raw.date ?? '',
     from: raw.from ?? '',
     subject: raw.subject ?? '',
     filename: raw.filename ?? '',
