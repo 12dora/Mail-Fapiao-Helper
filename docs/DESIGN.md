@@ -97,7 +97,7 @@ disconnect
 
 | 情况 | Extractor | 实现要点 |
 |---|---|---|
-| 1. 附件含 PDF/OFD | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf/ofd 或文件名 .pdf/.ofd；OFD 行程单归档后进入 OCR 待识别队列 |
+| 1. 附件含 PDF/OFD | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf/ofd 或文件名 .pdf/.ofd；PDF/OFD 成对发票优先保留 PDF，行程单 OFD 继续归档并进入 OCR 待识别队列 |
 | 2. 正文直链 | `directLink.ts` | 提取 `<a href>`，HEAD 探测 Content-Type=application/pdf 或 .pdf 后缀，命中即下载 |
 | 3. 第三方站点 | `thirdParty.ts` + `sites/*` | 遍历正文链接，按 SiteHandler.match 命中后用 Playwright 跑脚本 |
 | 4. 未识别 | `manual.ts` | 把 .eml 原文写入 `pending/<messageId>.eml`，写一行索引到 `pending.csv` |
@@ -170,7 +170,7 @@ disconnect
 
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
-- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
+- 同一封邮件可包含 PDF 发票和 OFD 行程单；附件提取会过滤 PDF/OFD 成对发票中的重复 OFD，只保留 PDF。若 OFD 名称/来源含 `行程单`、`客票`、`机票` 等行程信号，则保留 OFD。`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
 - `mfh ocr run` 默认使用 `ocr.executionMode="auto"`：先探活/启动 `efapiao serve` 本地 HTTP 服务，向 `/v1/invoices/parse` 批量 POST；服务不可用时回退逐张 CLI。`ocr.binaryPath="auto"` 时优先使用 `vendor/efapiao/0.1.2/<platform-arch>/` 下的内置二进制，缺失时回退 PATH
 - `ocr.resultsCsv` 记录 `transport/extractedBy/parserVersion/ocrVendor`；`extractedBy=text_layer` 表示文本层规则命中，`qrcode` 表示二维码/渲染兜底命中，`ocr` 表示 OCR vendor 介入
 - `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`，行本身保留，便于 GUI 和重复执行查看历史

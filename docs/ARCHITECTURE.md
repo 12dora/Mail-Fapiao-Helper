@@ -130,7 +130,7 @@ DISCOVERED                  // 来自 fetcher
 **幂等点（必须能安全重跑）**：
 - `STAGED`：staging 文件以 `<msgIdHash>/<index>.<pdf|ofd>` 命名，重写覆盖即可。
 - `FINALIZED`：原子 `rename`；目标存在则追加 `-1/-2`；建议文件名会先做 basename 与非法字符清理。
-- `CSV_APPENDED`：以 `messageId + source` 为去重键，允许同一封邮件登记 PDF 发票与 OFD 行程单。
+- `CSV_APPENDED`：以 `messageId + source` 为去重键，允许同一封邮件登记 PDF 发票与独立行程单。
 - `COMMITTED`：state.json 走 "tmp + rename" 原子写。
 
 **msgIdHash**：取 `sha1(messageId || from+date+subject).slice(0,12)`。Message-Id 可能缺失，必须有 fallback。
@@ -144,6 +144,7 @@ DISCOVERED                  // 来自 fetcher
 | `Extractor.extract` 抛错 | 该封 → manual(reason=`<extractor>:<err.message>`) |
 | `SiteHandler.handle` 抛错或超时 | 视同 thirdParty Extractor 失败 → manual |
 | 下载 HTTP / SiteHandler 网络抖动 / Playwright 超时 | 按 `config.network.retries` 自动重试；仍失败 → manual(reason 含 `network_retry_failed`) |
+| PDF/OFD 成对发票 | 附件提取阶段优先保留 PDF，过滤同一封邮件里的重复 OFD 发票副本；若文件名/来源含行程单、客票、机票等行程信号，则保留 OFD |
 | OFD 行程单 | 照常归档 `.ofd`，并写 `invoices/ocr/ocr-pending.csv`；后续 OCR 引擎负责识别，不阻塞同封邮件中的 PDF 发票 |
 | OCR 失败或字段缺失 | **不影响首轮归档**：识别结果留空或标记失败，原文件与 `invoices.csv` 不回滚 |
 | 二次 rename 模板渲染失败 | 保留首轮归档文件名；记录失败原因，不影响原文件 |
