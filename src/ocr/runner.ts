@@ -25,6 +25,7 @@ export interface OcrRunSummary {
   parsed: number;
   skipped: number;
   failed: number;
+  updated: number;
 }
 
 function csvCell(v: string): string {
@@ -109,12 +110,44 @@ function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-function readResultKeys(csvPath: string): Set<string> {
-  const keys = new Set<string>();
+interface ResultStatus {
+  status: string;
+  error: string;
+}
+
+function readResultIndex(csvPath: string): Map<string, ResultStatus> {
+  const index = new Map<string, ResultStatus>();
   for (const row of readCsv(csvPath)) {
-    keys.add(`${row.hash ?? ''}\0${row.source ?? ''}`);
+    index.set(`${row.hash ?? ''}\0${row.source ?? ''}`, {
+      status: row.status ?? '',
+      error: row.error ?? '',
+    });
   }
-  return keys;
+  return index;
+}
+
+function pendingLine(row: PendingRow): string {
+  return [
+    row.hash,
+    row.messageId,
+    row.date,
+    row.from,
+    row.subject,
+    row.filename,
+    row.source,
+    row.format,
+    row.documentType,
+    row.status,
+    row.reason,
+  ].map(csvCell).join(',') + '\n';
+}
+
+function writePendingCsv(csvPath: string, rows: PendingRow[]): void {
+  ensureDir(path.dirname(csvPath));
+  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason\n';
+  const tmpPath = `${csvPath}.tmp`;
+  fs.writeFileSync(tmpPath, '﻿' + header + rows.map(pendingLine).join(''), 'utf8');
+  fs.renameSync(tmpPath, csvPath);
 }
 
 function resultLine(row: PendingRow, result: OcrResult): string {
@@ -158,21 +191,37 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
   const pendingCsv = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
   const resultCsv = cfg.ocr.resultsCsv;
   const rows = readCsv(pendingCsv).map(pendingRow);
-  const seenResults = opts.force ? new Set<string>() : readResultKeys(resultCsv);
+  const nextRows = rows.map((row) => ({ ...row }));
+  const seenResults = opts.force ? new Map<string, ResultStatus>() : readResultIndex(resultCsv);
   const provider = getOcrProvider(cfg);
-  const summary: OcrRunSummary = { scanned: rows.length, parsed: 0, skipped: 0, failed: 0 };
+  const summary: OcrRunSummary = { scanned: rows.length, parsed: 0, skipped: 0, failed: 0, updated: 0 };
 
-  for (const row of rows) {
+  for (let i = 0; i < nextRows.length; i++) {
+    const row = nextRows[i];
+    if (!row) continue;
     const key = `${row.hash}\0${row.source}`;
     if (seenResults.has(key)) {
+      const existing = seenResults.get(key);
+      if (existing?.status === 'success') {
+        row.status = 'recognized';
+        row.reason = 'already_in_results';
+      } else if (existing?.status === 'error') {
+        row.status = 'failed';
+        row.reason = existing.error || 'already_failed_in_results';
+      }
       summary.skipped++;
       continue;
     }
 
     const filePath = path.join(cfg.paths.invoices, row.filename);
     if (!fs.existsSync(filePath)) {
-      appendResult(resultCsv, row, { status: 'error', fields: {}, error: `missing_file:${filePath}`, raw: null });
+      const error = `missing_file:${filePath}`;
+      appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
+      row.status = 'failed';
+      row.reason = error;
+      seenResults.set(key, { status: 'error', error });
       summary.failed++;
+      summary.updated++;
       continue;
     }
 
@@ -184,21 +233,34 @@ export async function runOcrPending(cfg: Config, log: Logger, opts: { force?: bo
         filename: row.filename,
       });
       appendResult(resultCsv, row, result);
-      seenResults.add(key);
+      seenResults.set(key, { status: result.status, error: result.error });
       if (result.status === 'success') {
+        row.status = 'recognized';
+        row.reason = '';
         summary.parsed++;
+        summary.updated++;
         log.info(`OCR parsed ${row.filename}`);
       } else {
+        row.status = 'failed';
+        row.reason = result.error;
         summary.failed++;
+        summary.updated++;
         log.warn(`OCR failed ${row.filename}: ${result.error}`);
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
-      seenResults.add(key);
+      seenResults.set(key, { status: 'error', error });
+      row.status = 'failed';
+      row.reason = error;
       summary.failed++;
+      summary.updated++;
       log.warn(`OCR failed ${row.filename}: ${error}`);
     }
+  }
+
+  if (nextRows.length > 0) {
+    writePendingCsv(pendingCsv, nextRows);
   }
 
   return summary;

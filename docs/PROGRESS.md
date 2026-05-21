@@ -337,3 +337,9 @@
 - [x] `src/index.ts`: 新增 `mfh ocr run [--force]`
 - [x] `src/config.ts` / `config.example.json`: `ocr.provider=efapiao`,增加 `ocr.binaryPath` 与 `ocr.timeoutMs`,允许 `ocr.enabled=true`
 - [x] 本地回归: 使用模拟 `efapiao` 二进制验证 `mfh ocr run` 可写出 seller/amount/date/invoiceNo/status
+
+## Phase 6.1 — OCR 工作队列状态回写  [完成 2026-05-21]
+
+- [x] `mfh ocr run`: 识别成功后将 `ocr-pending.csv` 对应行标记为 `recognized`,失败标记为 `failed`,但保留原始队列行
+- [x] 复跑幂等: 已存在 `ocr-results.csv` 结果时跳过重复识别,不追加重复结果行,并保持队列状态可读
+- [x] 本地回归: 模拟 `efapiao` 二进制验证 `pending -> recognized`,复跑 `skipped=1`

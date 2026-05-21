@@ -166,6 +166,7 @@ disconnect
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
 - 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
 - `mfh ocr run` 调用 `ocr.binaryPath` 指向的 `efapiao` 二进制，执行 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`，识别结果写入 `ocr.resultsCsv`
+- `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`，行本身保留，便于 GUI 和重复执行查看历史
 - `mfh organize` 只消费 `ocr.resultsCsv`，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
