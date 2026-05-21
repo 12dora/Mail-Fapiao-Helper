@@ -210,6 +210,11 @@ DISCOVERED                  // 来自 fetcher
 
 样本驱动，分两层。
 
+**真实邮件缓存**：
+- 为避免开发过程中反复调用 IMAP，可先运行 `mfh fetch` 把真实邮件缓存为 `.eml`。当前本机一年样本缓存位于 `.mfh-cache/year-2025-05-21_2026-05-21/raw/`，时间窗为 2025-05-21 至 2026-05-21。
+- `.mfh-cache/` 必须保持在 `.gitignore` 中；其中包含真实邮件内容、发票信息和可能的个人/企业敏感数据，禁止提交或上传。
+- 后续开发和回归优先读取本地缓存目录：`node dist/index.js run --config <temp-config> --state <temp-state>`，其中临时配置的 `paths.samples` 指向上述 `raw/` 目录。
+
 **单元层（mock IMAP，不 mock 解析）**：
 - 给 `extract/*` 直接喂 `mailparser.simpleParser(fs.readFileSync('samples/by-type/.../x.eml'))` 产出的 `ParsedMail`，断言 `ExtractResult`。
 - 不 mock `mailparser`；mock `fetch` 与 `SiteHandler.handle`（返回固定 Buffer）。
