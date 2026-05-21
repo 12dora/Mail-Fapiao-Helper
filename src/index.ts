@@ -663,7 +663,7 @@ async function cmdOcr(argv: string[]): Promise<number> {
 
   try {
     const summary = await runOcrPending(cfg, log, { force: parsed.force });
-    log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}`);
+    log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}, updated=${summary.updated}`);
     return summary.failed > 0 ? 1 : 0;
   } catch (e) {
     log.error((e as Error).message);
