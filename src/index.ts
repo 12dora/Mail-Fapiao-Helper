@@ -13,6 +13,8 @@ import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
 import { organizeFromOcrResults } from './rename/rename.js';
 import { runOcrPending } from './ocr/runner.js';
+import { summarizeOcr } from './ocr/summary.js';
+import { pendingEmlExists, summarizePending } from './pending/summary.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -42,6 +44,7 @@ Commands:
 
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
+  --json               Print machine-readable summary for GUI integration
   -h, --help           Show this help
 `;
 
@@ -67,13 +70,15 @@ Usage:
   mfh ocr <command> [options]
 
 Commands:
-  run    Parse documents listed in invoices/ocr/ocr-pending.csv
+  run      Parse documents listed in invoices/ocr/ocr-pending.csv
+  summary  Summarize recognized / failed / ignored OCR queue state
 
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --force              Re-parse rows already present in ocr.resultsCsv
   --allow-parse-failures
                        Exit 0 when OCR transport completed but some rows failed to parse
+  --json               Print machine-readable summary for GUI integration
   -h, --help           Show this help
 `;
 
@@ -115,9 +120,11 @@ interface OrganizeOpts {
 }
 
 interface OcrOpts {
+  command: 'run' | 'summary';
   configPath: string;
   force: boolean;
   allowParseFailures: boolean;
+  json: boolean;
 }
 
 function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
@@ -185,20 +192,26 @@ function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
   if (argv.length === 0) return 'help';
   const [subcmd, ...rest] = argv;
   if (subcmd === '-h' || subcmd === '--help') return 'help';
-  if (subcmd !== 'run') throw new Error(`unknown ocr command: ${subcmd}`);
+  if (subcmd !== 'run' && subcmd !== 'summary') throw new Error(`unknown ocr command: ${subcmd}`);
 
   const opts: OcrOpts = {
+    command: subcmd,
     configPath: './config.json',
     force: false,
     allowParseFailures: false,
+    json: false,
   };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--force') { opts.force = true; continue; }
     if (a === '--allow-parse-failures') { opts.allowParseFailures = true; continue; }
+    if (a === '--json') { opts.json = true; continue; }
     if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
     throw new Error(`unknown option: ${a}`);
+  }
+  if (opts.command === 'summary' && (opts.force || opts.allowParseFailures)) {
+    throw new Error('--force and --allow-parse-failures are only valid for mfh ocr run');
   }
   return opts;
 }
@@ -568,16 +581,9 @@ async function cmdRun(argv: string[]): Promise<number> {
   return 0;
 }
 
-interface PendingRow {
-  messageId: string;
-  date: string;
-  from: string;
-  subject: string;
-  reason: string;
-}
-
 interface PendingOpts {
   configPath: string;
+  json: boolean;
 }
 
 function parsePendingArgs(argv: string[]): PendingOpts | 'help' {
@@ -586,71 +592,15 @@ function parsePendingArgs(argv: string[]): PendingOpts | 'help' {
   if (subcmd === '-h' || subcmd === '--help') return 'help';
   if (subcmd !== 'list') throw new Error(`unknown pending command: ${subcmd}`);
 
-  const opts: PendingOpts = { configPath: './config.json' };
+  const opts: PendingOpts = { configPath: './config.json', json: false };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
+    if (a === '--json') { opts.json = true; continue; }
     throw new Error(`unknown option: ${a}`);
   }
   return opts;
-}
-
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === ',') {
-      out.push(cur);
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur);
-  return out;
-}
-
-function readPendingRows(csvPath: string): PendingRow[] {
-  if (!existsSync(csvPath)) return [];
-  const text = readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
-  const rows: PendingRow[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvLine(lines[i] ?? '');
-    rows.push({
-      messageId: cols[0] ?? '',
-      date: cols[1] ?? '',
-      from: cols[2] ?? '',
-      subject: cols[3] ?? '',
-      reason: cols[4] ?? '',
-    });
-  }
-  return rows;
-}
-
-function printPendingGroup(title: string, rows: PendingRow[]): void {
-  if (rows.length === 0) return;
-  process.stdout.write(`${title}: ${rows.length}\n`);
-  for (const row of rows) {
-    const hash = msgIdHash(row.messageId || undefined, row.from, row.date, row.subject);
-    process.stdout.write(`  ${hash} date=${row.date} from="${row.from}" subject="${row.subject}" reason=${row.reason}\n`);
-  }
 }
 
 async function cmdPending(argv: string[]): Promise<number> {
@@ -672,14 +622,21 @@ async function cmdPending(argv: string[]): Promise<number> {
     return 2;
   }
 
-  const csvPath = join(resolve(cfg.paths.pending), 'pending.csv');
-  const rows = readPendingRows(csvPath);
-  const networkRows = rows.filter((row) => row.reason.includes('network_retry_failed'));
-  const manualRows = rows.filter((row) => !row.reason.includes('network_retry_failed'));
+  const summary = summarizePending(cfg);
+  if (parsed.json) {
+    process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
+    return 0;
+  }
 
-  process.stdout.write(`Pending queue: ${rows.length} (${csvPath})\n`);
-  printPendingGroup('Network retry failures', networkRows);
-  printPendingGroup('Manual', manualRows);
+  process.stdout.write(`Pending queue: ${summary.total} (${summary.csvPath})\n`);
+  for (const group of summary.groups) {
+    process.stdout.write(`${group.title}: ${group.count} action=${group.action}\n`);
+    process.stdout.write(`  ${group.description}\n`);
+    for (const row of group.rows) {
+      const eml = pendingEmlExists(cfg, row) ? 'eml=yes' : 'eml=no';
+      process.stdout.write(`  ${row.hash} date=${row.date} from="${row.from}" subject="${row.subject}" reason=${row.reason} ${eml}\n`);
+    }
+  }
   return 0;
 }
 
@@ -730,6 +687,33 @@ async function cmdOcr(argv: string[]): Promise<number> {
   }
 
   try {
+    if (parsed.command === 'summary') {
+      const summary = summarizeOcr(cfg);
+      if (parsed.json) {
+        process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
+      } else {
+        process.stdout.write(`OCR queue: ${summary.total} (${summary.pendingCsv})\n`);
+        process.stdout.write(`  recognized=${summary.recognized} failed=${summary.failed} ignored=${summary.ignored} pending=${summary.pending}\n`);
+        process.stdout.write(`  results=${summary.resultsCsv}\n`);
+        process.stdout.write('By document type:\n');
+        for (const group of summary.byDocumentType) process.stdout.write(`  ${group.key}: ${group.count}\n`);
+        if (summary.bySupportingReason.length > 0) {
+          process.stdout.write('Ignored supporting documents:\n');
+          for (const group of summary.bySupportingReason) process.stdout.write(`  ${group.key}: ${group.count}\n`);
+        }
+        if (summary.byFailureReason.length > 0) {
+          process.stdout.write('Failure reasons:\n');
+          for (const group of summary.byFailureReason) {
+            process.stdout.write(`  ${group.key}: ${group.count}\n`);
+            for (const example of group.examples) {
+              process.stdout.write(`    ${example.hash} ${example.filename} subject="${example.subject}" reason=${example.reason}\n`);
+            }
+          }
+        }
+      }
+      return 0;
+    }
+
     const summary = await runOcrPending(cfg, log, { force: parsed.force });
     log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}, updated=${summary.updated}`);
     if (summary.failed > 0 && !parsed.allowParseFailures) return 1;

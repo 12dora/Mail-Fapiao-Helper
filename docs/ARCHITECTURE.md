@@ -205,6 +205,8 @@ DISCOVERED                  // 来自 fetcher
 - `ocr-results.csv` 保存 `transport/extractedBy/parserVersion/ocrVendor`，用于判断识别是否走了 `text_layer`、`qrcode` 或 OCR 兜底；旧版结果 CSV 会自动补空列后继续追加。
 - 当前重新下载的 `efapiao v0.1.2 darwin-arm64` release 已验证 `serve`、`/v1/health`、`/v1/capabilities` 与 `/v1/invoices/parse-batch` 可用。
 - `mfh ocr run --allow-parse-failures` 会在 OCR 服务/程序完成且单行失败已写入结果时返回 0；默认仍在存在单行业务失败时返回 1，便于交互式发现问题。
+- `mfh ocr summary [--json]` 是 GUI 和人工排障入口：读取 `ocr-pending.csv` 与 `ocr-results.csv`，输出 `recognized / failed / ignored / pending`、文档类型、支撑材料原因和失败原因示例。
+- `mfh pending list [--json]` 是 GUI 手工队列入口：读取 `pending.csv`，把原始 reason 归并为 `retry / refresh_link / manual_archive / ignore`，并保留每封邮件的 hash、主题、发件人和日期。
 
 **禁止**：写"自动发现/插件加载/装饰器注册"。一律手动 import + push。
 

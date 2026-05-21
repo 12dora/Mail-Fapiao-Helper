@@ -178,10 +178,12 @@ disconnect
 - `ocr.resultsCsv` 记录 `transport/extractedBy/parserVersion/ocrVendor`；`extractedBy=text_layer` 表示文本层规则命中，`qrcode` 表示二维码/渲染兜底命中，`ocr` 表示 OCR vendor 介入
 - `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`；支撑材料标记为 `ignored`；行本身保留，便于 GUI 和重复执行查看历史
 - `mfh ocr run --allow-parse-failures` 可用于批量任务：只要 OCR 程序/接口本身完成，即使个别文档业务解析失败也返回 0；默认行为仍在存在失败行时返回非零
+- `mfh ocr summary [--json]` 汇总 GUI 所需的 OCR 状态：`recognized / failed / ignored / pending`、文档类型、支撑材料分类与失败原因示例
 - `mfh organize` 只消费 `ocr.resultsCsv`，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
+- `mfh pending list [--json]` 会按处置策略分组：可重试、刷新链接、手动归档、确认忽略；GUI 应直接消费该分组，而不是只展示原始 reason
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
-- GUI 待处理队列按 `network_retry_failed` 单独分组，运行控制台展示重试日志与最终失败汇总
+- GUI 待处理队列展示 pending 分组、原始 `.eml` 打开入口、重新授权/刷新链接、手动上传归档、确认忽略；OCR 页面展示支撑材料分类、失败原因、手动改分类、手动重跑 OCR 和整理输出
 - 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 `messageId + source` 查重，避免 FINALIZED→COMMIT 窗口产生重复行
 - 并发：`mfh run` 默认 `--concurrency 4`，用 worker pool 并发处理本地 `.eml`；同一封内部仍按 extractor 顺序匹配（详见 `ARCHITECTURE.md §6`）
 

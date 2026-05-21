@@ -408,3 +408,14 @@
   - Pending: 12 封;`directLink:no_pdf_links` 3,`directLink:download_failed` 7,`thirdParty:huawei_travel_query_failed:130071003` 1,`no_supported_documents_in_attachments` 1
 - [x] OFD 行程单验证: 3 个飞猪 `电子行程单.ofd` 通过 efapiao `text_layer` 识别,返回 `invoiceType=air_itinerary`,承运人、金额、日期、票号字段满足当前整理需求
 - [x] 上游 efapiao 待反馈: 剩余 1 个真实 PDF `26317000000010839783.pdf` 返回 `rule_unhandled`,可作为新增规则样本;当前本地未配置 OCR vendor,所有成功均为 `text_layer`
+
+## Phase 6.9 — Pending/OCR GUI 数据契约  [完成 2026-05-21]
+
+- [x] `src/pending/summary.ts`: `pending.csv` 按处置策略分组,输出 `retry / refresh_link / manual_archive / ignore`,保留 hash/date/from/subject/reason
+- [x] `mfh pending list --json`: 为 GUI 提供机器可读 pending 分组;文本输出同步显示建议动作和 `.eml` 是否存在
+- [x] 一年缓存 pending 分组验证: 飞猪/接送机历史链接过期 7,无 PDF 链接 3,慧通差旅链接过期 1,附件无支持文档 1
+- [x] `src/ocr/summary.ts`: 汇总 `recognized / failed / ignored / pending`,并按文档类型、支撑材料原因、失败原因输出示例
+- [x] `mfh ocr summary --json`: 为 GUI 提供 OCR 结果视图数据;文本输出可直接用于排障
+- [x] 一年缓存 OCR 汇总验证: total=1086,recognized=784,failed=1,ignored=301,pending=0;失败原因仅 `rule_unhandled`
+- [x] `docs/EFAPIAO_UPSTREAM_FEEDBACK.md`: 记录小米之家 `26317000000010839783.pdf` 上游 fixture/规则补齐建议,不提交真实 PDF
+- [x] `gui-design/pages/dashboard.html` / `library.html` / `pending.html`: 静态 GUI 更新为当前真实状态,覆盖 recognized/failed/ignored、支撑材料分类、失败原因、手动重跑 OCR、手动改分类、整理输出、刷新链接与手动归档入口

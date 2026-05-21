@@ -1,0 +1,125 @@
+import path from 'node:path';
+import type { Config } from '../config.js';
+import { readCsvRows } from '../util/csv.js';
+
+export interface OcrSummaryExample {
+  hash: string;
+  date: string;
+  from: string;
+  subject: string;
+  filename: string;
+  format: string;
+  documentType: string;
+  status: string;
+  reason: string;
+}
+
+export interface OcrSummaryGroup {
+  key: string;
+  count: number;
+  examples: OcrSummaryExample[];
+}
+
+export interface OcrSummary {
+  pendingCsv: string;
+  resultsCsv: string;
+  total: number;
+  recognized: number;
+  failed: number;
+  ignored: number;
+  pending: number;
+  byDocumentType: OcrSummaryGroup[];
+  bySupportingReason: OcrSummaryGroup[];
+  byFailureReason: OcrSummaryGroup[];
+}
+
+function exampleFromRow(row: Record<string, string>, reason: string): OcrSummaryExample {
+  return {
+    hash: row.hash ?? '',
+    date: row.date ?? '',
+    from: row.from ?? '',
+    subject: row.subject ?? '',
+    filename: row.filename ?? '',
+    format: row.format ?? '',
+    documentType: row.documentType ?? '',
+    status: row.status ?? '',
+    reason,
+  };
+}
+
+function bump(map: Map<string, OcrSummaryGroup>, key: string, example: OcrSummaryExample): void {
+  const normalized = key || 'unknown';
+  const group = map.get(normalized);
+  if (group) {
+    group.count++;
+    if (group.examples.length < 5) group.examples.push(example);
+  } else {
+    map.set(normalized, { key: normalized, count: 1, examples: [example] });
+  }
+}
+
+function sortedGroups(map: Map<string, OcrSummaryGroup>): OcrSummaryGroup[] {
+  return Array.from(map.values()).sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+function compactReason(reason: string): string {
+  if (!reason) return '';
+  const colon = reason.indexOf(':');
+  if (colon > 0) return reason.slice(0, colon);
+  return reason;
+}
+
+export function summarizeOcr(cfg: Config): OcrSummary {
+  const pendingCsv = path.join(path.resolve(cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
+  const resultsCsv = path.resolve(cfg.ocr.resultsCsv);
+  const pendingRows = readCsvRows(pendingCsv);
+  const resultRows = readCsvRows(resultsCsv);
+  const byDocumentType = new Map<string, OcrSummaryGroup>();
+  const bySupportingReason = new Map<string, OcrSummaryGroup>();
+  const byFailureReason = new Map<string, OcrSummaryGroup>();
+
+  let recognized = 0;
+  let failed = 0;
+  let ignored = 0;
+  let pending = 0;
+
+  for (const row of pendingRows) {
+    const status = (row.status ?? '').toLowerCase();
+    const documentType = row.documentType ?? '';
+    const reason = row.reason ?? '';
+    const example = exampleFromRow(row, reason);
+    bump(byDocumentType, documentType || 'unknown', example);
+
+    if (status === 'recognized') {
+      recognized++;
+    } else if (status === 'failed') {
+      failed++;
+      bump(byFailureReason, compactReason(reason) || 'failed', example);
+    } else if (status === 'ignored') {
+      ignored++;
+      bump(bySupportingReason, reason || 'ignored', example);
+    } else {
+      pending++;
+    }
+  }
+
+  if (failed === 0 && resultRows.length > 0) {
+    for (const row of resultRows) {
+      if ((row.status ?? '').toLowerCase() !== 'error') continue;
+      bump(byFailureReason, compactReason(row.error ?? '') || 'error', exampleFromRow(row, row.error ?? ''));
+    }
+  }
+
+  return {
+    pendingCsv,
+    resultsCsv,
+    total: pendingRows.length,
+    recognized,
+    failed,
+    ignored,
+    pending,
+    byDocumentType: sortedGroups(byDocumentType),
+    bySupportingReason: sortedGroups(bySupportingReason),
+    byFailureReason: sortedGroups(byFailureReason),
+  };
+}
