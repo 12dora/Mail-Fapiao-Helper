@@ -9,6 +9,7 @@ import { msgIdHash as msgIdHashFn } from './util/hash.js';
 import { extractors } from './extract/registry.js';
 import type { Ctx } from './extract/types.js';
 import { downloadDocuments } from './download/downloader.js';
+import { supportingReason } from './extract/classify.js';
 
 interface CsvRow {
   messageId: string;
@@ -361,9 +362,11 @@ export async function processMail(
       filename: dl.filename,
       source: pdf.source,
       format: dl.format,
-      documentType: pdf.documentType ?? 'invoice',
-      status: 'pending',
-      reason: dl.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr',
+      documentType: dl.documentType,
+      status: dl.requiresOcr ? 'pending' : 'ignored',
+      reason: dl.requiresOcr
+        ? (dl.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr')
+        : supportingReason({ ...pdf, format: dl.format, documentType: dl.documentType }),
     });
   }
 

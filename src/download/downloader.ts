@@ -1,12 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DocumentFormat, PdfArtifact } from '../extract/types.js';
+import { withDocumentClassification } from '../extract/classify.js';
 import type { Logger } from '../log.js';
 
 export interface DownloadResult {
   finalPath: string;
   filename: string;
   format: DocumentFormat;
+  documentType: NonNullable<PdfArtifact['documentType']>;
+  requiresOcr: boolean;
 }
 
 function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
@@ -19,8 +22,7 @@ function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
 }
 
 function normalizeArtifact(artifact: PdfArtifact, ext: 'pdf' | 'ofd'): PdfArtifact {
-  if (artifact.format === ext) return artifact;
-  return { ...artifact, format: ext, requiresOcr: ext === 'ofd' ? true : artifact.requiresOcr };
+  return withDocumentClassification({ ...artifact, format: ext }, ext);
 }
 
 function safeFilename(name: string, fallback: string, ext: 'pdf' | 'ofd'): string {
@@ -90,6 +92,8 @@ export async function downloadPdfs(
       finalPath,
       filename: path.basename(finalPath),
       format: pdf.format ?? ext,
+      documentType: pdf.documentType ?? 'invoice',
+      requiresOcr: pdf.requiresOcr ?? true,
     });
   }
 

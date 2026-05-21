@@ -60,13 +60,13 @@ type ExtractResult =
   | { kind: 'skip' };
 
 type DocumentFormat = 'pdf' | 'ofd';
-type DocumentType = 'invoice' | 'itinerary';
+type DocumentType = 'invoice' | 'itinerary' | 'supporting';
 interface DocumentArtifact {
   data: Buffer;
   source: string;          // 附件名或来源 URL,排错用
   suggestedName?: string;  // 提取器若已知则给,否则 rename 阶段决定
   format?: DocumentFormat; // 默认 pdf; OFD 行程单必须显式 ofd
-  documentType?: DocumentType;
+  documentType?: DocumentType; // supporting = 已归档但默认不送 OCR 的支撑材料
   requiresOcr?: boolean;   // 提取器可显式标记；pipeline 会把所有归档文档写入 OCR 队列
 }
 type PdfArtifact = DocumentArtifact; // 兼容旧命名,后续逐步收敛
@@ -144,8 +144,9 @@ DISCOVERED                  // 来自 fetcher
 | `Extractor.extract` 抛错 | 该封 → manual(reason=`<extractor>:<err.message>`) |
 | `SiteHandler.handle` 抛错或超时 | 视同 thirdParty Extractor 失败 → manual |
 | 下载 HTTP / SiteHandler 网络抖动 / Playwright 超时 | 按 `config.network.retries` 自动重试；仍失败 → manual(reason 含 `network_retry_failed`) |
-| PDF/OFD 成对发票 | 附件提取阶段优先保留 PDF，过滤同一封邮件里的重复 OFD 发票副本；若文件名/来源含行程单、客票、机票等行程信号，则保留 OFD |
+| PDF/OFD 成对发票 | 附件提取阶段优先保留 PDF，过滤同一封邮件里的重复 OFD 发票副本；只有文件名/来源明确含 `行程单`、`航空运输电子客票`、`itinerary` 等信号时才保留 OFD 行程单；普通“报销凭证”有 PDF 副本时只保留 PDF |
 | OFD 行程单 | 照常归档 `.ofd`，并写 `invoices/ocr/ocr-pending.csv`；后续 OCR 引擎负责识别，不阻塞同封邮件中的 PDF 发票 |
+| 非发票支撑 PDF | 通行费汇总单、订单/运单明细、结账单/账单、堂食明细、PDF 行程/行程报销单仍归档并写队列，但 `documentType=supporting,status=ignored`，默认不送 OCR |
 | OCR 失败或字段缺失 | **不影响首轮归档**：识别结果留空或标记失败，原文件与 `invoices.csv` 不回滚 |
 | 二次 rename 模板渲染失败 | 保留首轮归档文件名；记录失败原因，不影响原文件 |
 | CSV 追加失败 | 整封回滚（不 COMMIT），下次重跑 |
@@ -163,7 +164,7 @@ DISCOVERED                  // 来自 fetcher
 | CSV 追加 | 写之前检查 `messageId + source`；追加用 `fs.appendFileSync`,单行原子 |
 | state.json | `state.json.tmp` → `rename`,POSIX 原子 |
 | pending 写入 | `pending/<msgIdHash>.eml` 覆盖式写；pending.csv 同样以 messageId 查重 |
-| OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/source 记录全部已归档文档，状态初始为 `pending` |
+| OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/source 记录全部已归档文档；发票/行程单状态初始为 `pending`，明确支撑材料状态为 `ignored` |
 | OCR 结果 | `mfh ocr run` 默认优先使用 `efapiao serve` 本地 HTTP 服务，失败再回退 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`；`config.ocr.resultsCsv` 保存识别字段、状态、错误、transport 与 extractedBy；`mfh organize` 以结果 CSV 为输入，复制到 `rename.organizedDir` 并写 `organize-results.csv` 审计 |
 
 **启动时自愈**：读 state.json 后，扫一遍 `invoices.csv` 的 messageId 列做 union，弥补"FINALIZED 后未 COMMIT"的小窗口。CSV 即真实归档证据。
@@ -203,6 +204,7 @@ DISCOVERED                  // 来自 fetcher
 - `ocr.executionMode="serve"` 强制 HTTP 服务模式，不回退 CLI；`ocr.executionMode="cli"` 强制逐张 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`。
 - `ocr-results.csv` 保存 `transport/extractedBy/parserVersion/ocrVendor`，用于判断识别是否走了 `text_layer`、`qrcode` 或 OCR 兜底；旧版结果 CSV 会自动补空列后继续追加。
 - 当前重新下载的 `efapiao v0.1.2 darwin-arm64` release 已验证 `serve`、`/v1/health`、`/v1/capabilities` 与 `/v1/invoices/parse-batch` 可用。
+- `mfh ocr run --allow-parse-failures` 会在 OCR 服务/程序完成且单行失败已写入结果时返回 0；默认仍在存在单行业务失败时返回 1，便于交互式发现问题。
 
 **禁止**：写"自动发现/插件加载/装饰器注册"。一律手动 import + push。
 

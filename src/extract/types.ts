@@ -11,7 +11,7 @@ export interface Ctx {
 }
 
 export type DocumentFormat = 'pdf' | 'ofd';
-export type DocumentType = 'invoice' | 'itinerary';
+export type DocumentType = 'invoice' | 'itinerary' | 'supporting';
 
 export interface DocumentArtifact {
   data: Buffer;

@@ -2,6 +2,7 @@ import type { ParsedMail } from 'mailparser';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
 
 function isPdfAttachment(att: { contentType?: string; filename?: string }): boolean {
   if (att.contentType === 'application/pdf') return true;
@@ -54,11 +55,16 @@ function invoiceNoKey(artifact: PdfArtifact): string {
 
 function looksLikeItinerary(artifact: PdfArtifact): boolean {
   const text = `${artifact.suggestedName || ''} ${artifact.source}`.toLowerCase();
-  return /行程单|行程报销|航空运输电子客票|客票|机票|航班|itinerary|e-ticket|eticket/.test(text);
+  return looksLikeItineraryText(text);
+}
+
+function looksLikeOfdItinerary(artifact: PdfArtifact): boolean {
+  const text = `${artifact.suggestedName || ''} ${artifact.source}`.toLowerCase();
+  return looksLikeOfdItineraryText(text);
 }
 
 function subjectLooksLikeItinerary(subject: string | undefined): boolean {
-  return /行程单|行程报销|航空运输电子客票|客票|机票|航班|itinerary|e-ticket|eticket/i.test(subject || '');
+  return looksLikeItineraryText(subject);
 }
 
 function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
@@ -81,7 +87,7 @@ function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], log: Ctx['log'], su
       continue;
     }
 
-    if (looksLikeItinerary(artifact)) {
+    if (looksLikeOfdItinerary(artifact)) {
       out.push({ ...artifact, documentType: 'itinerary', requiresOcr: true });
       continue;
     }
@@ -132,7 +138,7 @@ const attachmentExtractor: Extractor = {
           source: att.filename || 'unnamed.ofd',
           suggestedName: att.filename,
           format: 'ofd',
-          documentType: looksLikeItinerary({ data: att.content, source: att.filename || 'unnamed.ofd', suggestedName: att.filename, format: 'ofd' })
+          documentType: looksLikeOfdItinerary({ data: att.content, source: att.filename || 'unnamed.ofd', suggestedName: att.filename, format: 'ofd' })
             ? 'itinerary'
             : 'invoice',
           requiresOcr: true,
@@ -153,7 +159,7 @@ const attachmentExtractor: Extractor = {
               source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
               suggestedName: entry.name,
               format: isOfd ? 'ofd' : 'pdf',
-              documentType: isOfd && looksLikeItinerary({
+              documentType: isOfd && looksLikeOfdItinerary({
                 data: content,
                 source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
                 suggestedName: entry.name,

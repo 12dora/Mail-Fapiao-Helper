@@ -72,6 +72,8 @@ Commands:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --force              Re-parse rows already present in ocr.resultsCsv
+  --allow-parse-failures
+                       Exit 0 when OCR transport completed but some rows failed to parse
   -h, --help           Show this help
 `;
 
@@ -115,6 +117,7 @@ interface OrganizeOpts {
 interface OcrOpts {
   configPath: string;
   force: boolean;
+  allowParseFailures: boolean;
 }
 
 function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
@@ -187,11 +190,13 @@ function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
   const opts: OcrOpts = {
     configPath: './config.json',
     force: false,
+    allowParseFailures: false,
   };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--force') { opts.force = true; continue; }
+    if (a === '--allow-parse-failures') { opts.allowParseFailures = true; continue; }
     if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
     throw new Error(`unknown option: ${a}`);
   }
@@ -727,7 +732,8 @@ async function cmdOcr(argv: string[]): Promise<number> {
   try {
     const summary = await runOcrPending(cfg, log, { force: parsed.force });
     log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}, updated=${summary.updated}`);
-    return summary.failed > 0 ? 1 : 0;
+    if (summary.failed > 0 && !parsed.allowParseFailures) return 1;
+    return 0;
   } catch (e) {
     log.error((e as Error).message);
     return 1;

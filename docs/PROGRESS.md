@@ -390,3 +390,21 @@
 - [x] 真实缓存验证: 577 封一年本地缓存用 `--concurrency 6` 跑完,processed=577,failed=0
 - [x] PDF OCR 验证: 修复前的 1085 个 PDF 通过 `efapiao serve` `/v1/invoices/parse-batch` 跑完,transport 全部为 http;成功 784,失败 301(rule_unhandled 282,parse_failed 17,not_implemented 2)
 - [x] 真实样本修复: 下载器按 magic bytes 修正 PDF/OFD 格式;直链提取也过滤普通发票 PDF/OFD 成对重复,避免 OFD 内容伪装成 `.pdf` 污染 PDF OCR 队列
+
+## Phase 6.8 — 一年真实缓存 OCR 队列降噪  [完成 2026-05-21]
+
+- [x] `src/extract/classify.ts`: 新增文档分类器,把通行费汇总单、订单/运单明细、结账单/账单、堂食明细、PDF 行程/行程报销单标记为 `documentType=supporting`
+- [x] `src/download/downloader.ts` / `src/pipeline.ts`: 所有文档仍先归档;`supporting` 行写入 `ocr-pending.csv` 但标记 `status=ignored`,默认不送 OCR
+- [x] `src/extract/attachment.ts` / `src/extract/directLink.ts`: OFD 行程单判定收窄到明确 `行程单` / `航空运输电子客票` / `itinerary`;普通“报销凭证”若有 PDF 副本则过滤 OFD,只保留 PDF
+- [x] `src/ocr/runner.ts`: OCR runner 跳过 `ignored/supporting` 队列行,不把业务支撑材料失败混入 OCR 成功率
+- [x] `src/index.ts`: `mfh ocr run --allow-parse-failures`,区分 OCR 程序/接口失败与单行业务解析失败;批量任务可在结果已保存时返回 0
+- [x] `src/ocr/efapiao.ts`: 错误结果的 `documentType` 尊重队列 fallback,避免 OFD 行程单失败被误标为 invoice
+- [x] 一年缓存最终回归:
+  - 输入: `.mfh-cache/year-2025-05-21_2026-05-21/raw/` 577 封 `.eml`
+  - 提取: `mfh run --concurrency 6`,processed=577,failed=0
+  - OCR 队列: 1086 行(PDF 1083,OFD 3);magic bytes 校验 PDF=1083/OFD=3,无 OFD 混入 PDF 队列
+  - 队列分类: invoice=782,supporting=301,itinerary=3;supporting 默认 ignored
+  - OCR: scanned=1086,parsed=784,skipped=301,failed=1,updated=785;实际送 OCR 785 行,成功 784,仅 1 个 PDF `rule_unhandled`
+  - Pending: 12 封;`directLink:no_pdf_links` 3,`directLink:download_failed` 7,`thirdParty:huawei_travel_query_failed:130071003` 1,`no_supported_documents_in_attachments` 1
+- [x] OFD 行程单验证: 3 个飞猪 `电子行程单.ofd` 通过 efapiao `text_layer` 识别,返回 `invoiceType=air_itinerary`,承运人、金额、日期、票号字段满足当前整理需求
+- [x] 上游 efapiao 待反馈: 剩余 1 个真实 PDF `26317000000010839783.pdf` 返回 `rule_unhandled`,可作为新增规则样本;当前本地未配置 OCR vendor,所有成功均为 `text_layer`
