@@ -62,6 +62,23 @@ function binaryPath(cfg: Config): string {
   return bundledBinaryPath() ?? 'efapiao';
 }
 
+function efapiaoEnv(cfg: Config): NodeJS.ProcessEnv {
+  const credentials = cfg.ocr.credentials ?? {};
+  const ocrVendor = credentials.tencentSecretId || credentials.tencentSecretKey
+    ? 'tencent'
+    : (process.env.EFAPIAO_OCR_VENDOR ?? 'none');
+  return {
+    ...process.env,
+    EFAPIAO_OCR_VENDOR: ocrVendor,
+    TENCENTCLOUD_SECRET_ID: credentials.tencentSecretId || credentials.secretId || process.env.TENCENTCLOUD_SECRET_ID,
+    TENCENTCLOUD_SECRET_KEY: credentials.tencentSecretKey || credentials.secretKey || process.env.TENCENTCLOUD_SECRET_KEY,
+    TENCENTCLOUD_REGION: credentials.tencentRegion || credentials.region || process.env.TENCENTCLOUD_REGION,
+    TENCENT_SECRET_ID: credentials.tencentSecretId || credentials.secretId || process.env.TENCENT_SECRET_ID,
+    TENCENT_SECRET_KEY: credentials.tencentSecretKey || credentials.secretKey || process.env.TENCENT_SECRET_KEY,
+    TENCENT_REGION: credentials.tencentRegion || credentials.region || process.env.TENCENT_REGION,
+  };
+}
+
 function stringValue(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
@@ -190,7 +207,7 @@ async function ensureService(cfg: Config): Promise<void> {
     String(cfg.ocr.serviceWorkers),
   ], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, EFAPIAO_OCR_VENDOR: process.env.EFAPIAO_OCR_VENDOR ?? 'none' },
+    env: efapiaoEnv(cfg),
   });
   state.child = child;
   child.unref();
@@ -287,7 +304,7 @@ function runBinary(
       'auto',
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, EFAPIAO_OCR_VENDOR: process.env.EFAPIAO_OCR_VENDOR ?? 'none' },
+      env: efapiaoEnv(cfg),
     });
 
     const timer = setTimeout(() => {

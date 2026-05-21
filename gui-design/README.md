@@ -1,48 +1,60 @@
-# 发票助手 · GUI Design Preview
+# 发票助手 · 桌面界面预览
 
-Static HTML/CSS/JS design preview for the `Mail-Fapiao-Helper` CLI. No build required.
+这里是发票助手的桌面界面。普通浏览器里可以作为静态预览打开；在 Electron 里会通过 `window.mfhBridge` 连接本机配置、邮件缓存、OCR 汇总和 CLI 操作。
 
-## Preview
+## 打开方式
 
-From the repo root:
+桌面应用开发模式：
 
 ```bash
-cd gui-design && python3 -m http.server 5173
+npm run electron
 ```
 
-Then open <http://localhost:5173/> in a browser. The landing page links into all six screens.
+这会先编译 TypeScript，再打开 Electron 窗口。Electron 会读取项目根目录的 `config.json`；邮件缓存、发票原件、识别结果都保存在本机，不会上传。
 
-Alternatively, just double-click `gui-design/index.html` to open it directly in the browser; the relative paths to `styles/` and `scripts/` work either way.
+静态预览：
 
-## Files
+从项目根目录启动本地预览：
+
+```bash
+cd gui-design && python3 -m http.server 5175
+```
+
+然后打开 <http://127.0.0.1:5175/>。静态预览不会调用本机 CLI，主要用于查看界面。
+
+## 页面
 
 ```
 gui-design/
-  index.html                 — landing card, links to all screens
-  styles/main.css            — design system (paper-ledger aesthetic)
-  scripts/shell.js           — shared sidebar nav injector
+  index.html                 — 入口页
+  styles/main.css            — 亮色默认、深色可选的桌面端样式
+  scripts/shell.js           — 侧栏、主题、按钮反馈、Electron 数据绑定
+  tests/e2e.mjs              — Playwright 端到端检查
+  tests/electron-smoke.mjs   — Electron 桥接冒烟检查
   pages/
-    dashboard.html           — 01 Run Console (trigger fetch/run, OCR and pending summary)
-    inbox.html               — 02 Inbox Ledger (INDEX.csv view, filters, grouping by month)
-    library.html             — 03 Invoice Library (OCR result states, supporting documents, actions)
-    pending.html             — 04 Manual Queue (grouped by handling action from mfh pending list)
-    config.html              — 05 Configuration (config.json editor with section index)
-    settings.html            — 06 About & Build (roadmap, principles, build info)
+    dashboard.html           — 开始处理：抓邮件、保存票据、查看进度
+    inbox.html               — 邮件记录：已扫描邮件与来源
+    library.html             — 发票库：识别结果、支撑材料、整理入口
+    pending.html             — 待确认：链接过期、缺文件、需手动处理
+    config.html              — 邮箱与保存：邮箱登录、保存位置、命名方式
+    settings.html            — 关于：隐私说明、版本、后续计划
 ```
 
-## Design notes
+## 设计要求
 
-- **Aesthetic** — editorial ledger / accountant's paper journal. Cream paper background with horizontal ruled lines (subtle, baked into the body bg), deep ink-black text, vermilion (朱砂) as the single hot accent, sage celadon for "successful" states, amber for "pending", indigo for the persistent left nav.
-- **Typography** — Noto Serif SC for display headings (paper-ledger feel), IBM Plex Mono for all numeric / tabular / metadata columns, Noto Sans SC for body, Fraunces italic for English secondary labels.
-- **Spatial system** — 56px content padding, hairline 1px rules, occasional 2px structural rules; tables ("ledgers") use 10px monospace uppercase headers with 0.22em tracking for a stamped/printed feel.
-- **Decorative motif** — the red square "chop" (印章) appears as brand mark, large action affordance, status indicator, and decorative seal — a single visual signature that ties the system together.
-- **Microinteractions** — page-load stagger (60/120/180ms), hard-shadow button press (2px → 3px → 1px), animated progress bar + pulsing dot on the run console, rotating dashed-stamp transform on chops.
+- 默认使用亮色主题，用户可以切换深色主题。
+- 面向非技术用户，页面避免直接暴露内部状态词。
+- 侧栏、按钮和运行日志均已中文化。
+- Electron 中通过 `window.mfhBridge` 读取真实摘要，并调用本地 `fetch/run/ocr/organize/pending` 能力。
+- 所有邮件、附件、识别结果都按“先保存原件，再识别整理”的用户心智呈现。
 
-The preview is still static, but the numbers and action model now mirror the CLI contracts:
+## 测试
+
+从项目根目录运行：
 
 ```bash
-mfh pending list --json
-mfh ocr summary --json
+node gui-design/tests/e2e.mjs
+node gui-design/tests/electron-smoke.mjs
 ```
 
-Those two JSON outputs are intended as the first GUI data source when the static design becomes Electron/Tauri/Web UI.
+测试会检查默认亮色主题、中文导航、开始处理流程、待确认页按钮反馈、设置页文案、主题切换、页面是否横向溢出，以及 Electron preload 桥是否可用。

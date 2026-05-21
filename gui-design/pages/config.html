@@ -19,41 +19,41 @@
             <button class="btn btn--sm" data-theme-toggle>
                 <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"></line><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"></line><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"></line></svg>
             </button>
-            <span class="toolbar__meta">config.json · 0600</span>
+            <span class="toolbar__meta"><span data-summary="config-path">本机配置</span></span>
         </div>
 
         <div class="page stagger">
-            <!-- IMAP 连接 -->
+            <!-- 邮箱连接 -->
             <div class="card">
-                <h3 class="card__title">IMAP 连接</h3>
+                <h3 class="card__title">邮箱连接</h3>
                 <p class="card__sub">仅支持 TLS。建议使用应用专用密码或授权码，而非邮箱主密码</p>
 
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">主机地址</label>
-                        <input class="input" value="imap.exmail.qq.com" placeholder="imap.example.com">
+                        <input class="input" data-config="imap.host" value="imap.exmail.qq.com" placeholder="imap.example.com">
                     </div>
                     <div class="field">
                         <label class="field__label">端口</label>
-                        <input class="input" value="993" placeholder="993">
+                        <input class="input" data-config="imap.port" value="993" placeholder="993">
                     </div>
                 </div>
 
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">账号</label>
-                        <input class="input" value="me@example.com" placeholder="user@example.com">
+                        <input class="input" data-config="imap.user" value="me@example.com" placeholder="user@example.com">
                     </div>
                     <div class="field">
                         <label class="field__label">密码 <span class="field__hint">本地存储 · 不上传</span></label>
-                        <input class="input" type="password" value="••••••••••••••••">
+                        <input class="input" data-config="imap.pass" type="password" value="" placeholder="留空则不修改已有密码">
                     </div>
                 </div>
 
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">邮箱文件夹 <span class="field__hint">不选择则扫描全部</span></label>
-                        <select class="select" multiple size="5">
+                        <select class="select select--mailboxes" multiple size="6">
                             <option>INBOX</option>
                             <option>其他文件夹/已处理 2025发票</option>
                             <option>其他文件夹/已处理 2026发票</option>
@@ -62,9 +62,9 @@
                         </select>
                         <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">imap.mailbox</code>；空数组表示全部 mailbox</div>
                     </div>
-                    <div class="field">
+                    <div class="field field--compact">
                         <label class="field__label">TLS 加密</label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
+                        <label class="check-label">
                             <div class="check is-on"></div>
                             启用（强制）
                         </label>
@@ -72,43 +72,43 @@
                 </div>
 
                 <div class="row gap-8 mt-16">
-                    <button class="btn">测试连接</button>
-                    <span class="pill pill--ok"><span class="pill__dot"></span>已连接 · 14:02</span>
+                    <button class="btn" data-action="test-connection">测试配置</button>
+                    <span class="pill"><span class="pill__dot"></span>保存后即可抓取</span>
                 </div>
             </div>
 
             <!-- 过滤条件 -->
             <div class="card">
                 <h3 class="card__title">过滤条件</h3>
-                <p class="card__sub">用于 IMAP SEARCH。多个关键词以 OR 组合；主题与正文可独立开启</p>
+                <p class="card__sub">用于邮箱搜索。多个关键词会一起匹配；主题与正文可独立开启</p>
 
                 <div class="field">
-                    <label class="field__label">关键词 <span class="field__hint">用逗号分隔，OR 关系</span></label>
-                    <input class="input" value="发票, 票据, invoice, 电子发票">
+                    <label class="field__label">关键词 <span class="field__hint">用逗号分隔</span></label>
+                    <input class="input" data-config="filter.keywords" value="发票, 票据, 电子发票">
                 </div>
 
                 <div class="field">
-                    <label class="field__label">日期范围 <span class="field__hint">since/until 优先于 sinceDays</span></label>
+                    <label class="field__label">自定义日期范围</label>
                     <div class="field-row">
                         <div class="field">
-                            <label class="field__label">开始日期 · since</label>
-                            <input class="input" type="date" value="2026-04-20" placeholder="YYYY-MM-DD">
+                            <label class="field__label">开始日期</label>
+                            <input class="input" data-config="filter.since" type="date" value="2026-04-20" placeholder="YYYY-MM-DD">
                         </div>
                         <div class="field">
-                            <label class="field__label">结束日期 · until</label>
-                            <input class="input" type="date" value="2026-05-20" placeholder="YYYY-MM-DD">
+                            <label class="field__label">结束日期</label>
+                            <input class="input" data-config="filter.until" type="date" value="2026-05-20" placeholder="YYYY-MM-DD">
                         </div>
                     </div>
                     <div class="field__hint" style="margin-top: 8px;">
                         <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                        设置 since/until 后，sinceDays 将被忽略。留空则使用 sinceDays
+                        如果填写了起止日期，将优先使用这个范围。留空则使用下面的最近天数
                     </div>
                 </div>
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">回溯天数 · sinceDays <span class="field__hint">0 表示全部</span></label>
-                        <input class="input" value="30" placeholder="30">
+                        <label class="field__label">最近多少天 <span class="field__hint">0 表示全部</span></label>
+                        <input class="input" data-config="filter.sinceDays" value="30" placeholder="30">
                     </div>
                     <div class="field">
                         <label class="field__label">匹配范围</label>
@@ -129,41 +129,45 @@
             <!-- 输出目录 -->
             <div class="card">
                 <h3 class="card__title">输出目录</h3>
-                <p class="card__sub">首轮先保存所有 PDF/OFD 原件，OCR 和二次整理只在归档后运行。支持相对或绝对路径</p>
+                <p class="card__sub">先保存所有发票或行程单原件，再识别和整理。这样即使识别失败，也不会丢文件</p>
 
                 <div class="field">
                     <label class="field__label">归档目录</label>
-                    <input class="input input--mono" value="./invoices">
+                    <input class="input input--mono" data-config="paths.invoices" value="./invoices">
+                </div>
+                <div class="field">
+                    <label class="field__label">邮件缓存目录</label>
+                    <input class="input input--mono" data-config="paths.samples" value="./samples/raw">
                 </div>
                 <div class="field">
                     <label class="field__label">待人工目录</label>
-                    <input class="input input--mono" value="./pending">
+                    <input class="input input--mono" data-config="paths.pending" value="./pending">
                 </div>
                 <div class="field">
                     <label class="field__label">清册文件 <span class="field__hint">UTF-8 BOM · Excel 友好</span></label>
-                    <input class="input input--mono" value="./invoices.csv">
+                    <input class="input input--mono" data-config="output.csv" value="./invoices.csv">
                 </div>
             </div>
 
             <!-- 命名规则 -->
             <div class="card">
                 <h3 class="card__title">命名规则</h3>
-                <p class="card__sub">首轮归档使用安全文件名与冲突后缀；OCR 后可按占位符 <code class="code-inline">{seller} {amount} {date} {invoiceNo} {documentType}</code> 二次重命名或分文件夹</p>
+                <p class="card__sub">先用不会冲突的文件名保存。识别成功后，可以按开票方、金额、日期等信息自动改名</p>
 
                 <div class="field">
                     <label class="field__label">主规则</label>
-                    <input class="input input--mono" value="{seller}-{amount}.pdf">
+                    <input class="input input--mono" data-config="rename.rule" value="{seller}-{amount}.pdf">
                     <div class="field__hint">示例：阿里云-3418.20.pdf</div>
                 </div>
                 <div class="field">
                     <label class="field__label">回退规则</label>
-                    <input class="input input--mono" value="{date}-{messageId}.pdf">
+                    <input class="input input--mono" data-config="rename.fallback" value="{date}-{messageId}.pdf">
                     <div class="field__hint">示例：2026-05-20-a91f0e2c.pdf</div>
                 </div>
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">OCR 后二次重命名</label>
+                        <label class="field__label">识别后自动改名</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
                             <div class="check"></div>
                             未启用
@@ -171,7 +175,7 @@
                     </div>
                     <div class="field">
                         <label class="field__label">按类型分目录</label>
-                        <input class="input input--mono" value="{documentType}">
+                        <input class="input input--mono" data-config="rename.typeDirRule" value="{documentType}">
                     </div>
                 </div>
 
@@ -181,81 +185,94 @@
                 </div>
             </div>
 
-            <!-- OCR 提供商 -->
+            <!-- 识别服务 -->
             <div class="card">
-                <h3 class="card__title">OCR 提供商</h3>
-                <p class="card__sub">用于从已归档 PDF/OFD 解析销售方、金额、票号、日期和类型。未启用时原文件仍完整保留</p>
+                <h3 class="card__title">识别服务</h3>
+                <p class="card__sub">用于从已归档发票或行程单解析销售方、金额、票号、日期和类型。未启用时原文件仍完整保留</p>
 
-                <div class="field-row">
+                <div class="field-row field-row--3">
                     <div class="field">
-                        <label class="field__label">启用 OCR</label>
+                        <label class="field__label">启用自动识别</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check"></div>
-                            未启用 · 待接入
+                            <div class="check is-on"></div>
+                            已启用
                         </label>
                     </div>
                     <div class="field">
-                        <label class="field__label">提供商</label>
-                        <select class="select">
-                            <option>百度智能云 · 票据 OCR</option>
-                            <option>阿里云 · 印刷文字识别</option>
-                            <option>腾讯云 · 通用印刷体识别</option>
+                        <label class="field__label">上游识别引擎</label>
+                        <select class="select" id="ocr-vendor" data-config="ocr.provider" aria-label="上游识别引擎">
+                            <option value="efapiao" selected>efapiao（内置）</option>
+                            <option value="none">暂不识别，只保存原件</option>
+                            <option value="custom">自定义本地服务</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label class="field__label">运行方式</label>
+                        <select class="select" data-config="ocr.executionMode" aria-label="识别引擎运行方式">
+                            <option value="auto">本机服务，推荐</option>
+                            <option value="cli">单次调用</option>
+                            <option value="serve">只使用本机服务</option>
                         </select>
                     </div>
                 </div>
 
-                <div class="field-row">
+                <div class="field-row field-row--3">
                     <div class="field">
-                        <label class="field__label">API Key</label>
-                        <input class="input input--mono" type="password" value="••••••••••••••••">
+                        <label class="field__label">腾讯云 SecretId</label>
+                        <input class="input input--mono" id="tencent-secret-id" data-config="ocr.credentials.tencentSecretId" type="password" placeholder="只保存在本机">
                     </div>
                     <div class="field">
-                        <label class="field__label">Secret Key</label>
-                        <input class="input input--mono" type="password" value="••••••••••••••••••••">
+                        <label class="field__label">腾讯云 SecretKey</label>
+                        <input class="input input--mono" id="tencent-secret-key" data-config="ocr.credentials.tencentSecretKey" type="password" placeholder="只保存在本机">
+                    </div>
+                    <div class="field">
+                        <label class="field__label">腾讯云区域</label>
+                        <input class="input input--mono" id="tencent-region" data-config="ocr.credentials.tencentRegion" value="ap-shanghai">
                     </div>
                 </div>
 
                 <div class="field">
-                    <label class="field__label">识别结果 CSV</label>
-                    <input class="input input--mono" value="./invoices/ocr/ocr-results.csv">
+                    <label class="field__label">保存位置</label>
+                    <input class="input input--mono" data-config="ocr.resultsCsv" value="./invoices/ocr/ocr-results.csv">
+                    <div class="field__hint">这些鉴权信息只写入本机配置；运行 efapiao 时会作为本地环境变量透传，不会写入发票文件。</div>
                 </div>
             </div>
 
-            <!-- LLM 兜底 -->
+            <!-- 智能查找兜底 -->
             <div class="card">
-                <h3 class="card__title">LLM 兜底</h3>
-                <p class="card__sub">仅当四个标准提取器都未命中时启用。把正文 + 链接列表交给 LLM 判断 "直链 / 跳转 / 都不是"</p>
+                <h3 class="card__title">智能查找兜底</h3>
+                <p class="card__sub">当普通规则找不到发票时，可让智能查找根据邮件正文和链接判断下一步。但默认不启用</p>
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">启用 LLM</label>
+                        <label class="field__label">启用智能查找</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
                             <div class="check"></div>
                             未启用
                         </label>
                     </div>
                     <div class="field">
-                        <label class="field__label">提供商</label>
+                        <label class="field__label">服务来源</label>
                         <select class="select">
-                            <option>Anthropic</option>
-                            <option>OpenAI</option>
+                            <option>本地智能服务</option>
+                            <option>云端智能服务</option>
                         </select>
                     </div>
                     <div class="field">
                         <label class="field__label">模型</label>
-                        <input class="input input--mono" value="claude-haiku-4-5">
+                        <input class="input input--mono" value="默认快速模型">
                     </div>
                 </div>
 
                 <div class="field">
-                    <label class="field__label">API Key</label>
-                    <input class="input input--mono" type="password" placeholder="sk-ant-...">
+                    <label class="field__label">访问密钥</label>
+                    <input class="input input--mono" type="password" placeholder="只保存在本机">
                 </div>
             </div>
 
-            <!-- Playwright -->
+            <!-- 网页自动下载 -->
             <div class="card">
-                <h3 class="card__title">Playwright</h3>
+                <h3 class="card__title">网页自动下载</h3>
                 <p class="card__sub">用于第三方开票站点。首次使用前请运行 <code class="code-inline">npx playwright install chromium</code></p>
 
                 <div class="field-row">
@@ -291,14 +308,18 @@
                 <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">network.retries</code> 与 <code class="code-inline">network.retryDelayMs</code></div>
             </div>
 
-            <!-- 保存按钮 -->
             <div class="row row--between" style="padding: 18px; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-lg);">
-                <div class="small muted">
-                    <span class="pill pill--warn"><span class="pill__dot"></span>有 3 项修改未保存</span>
-                </div>
-                <div class="row gap-8">
-                    <button class="btn">放弃修改</button>
-                    <button class="btn btn--primary">保存并应用</button>
+                <span class="pill pill--ok" id="save-state"><span class="pill__dot"></span>修改后自动保存</span>
+                <button class="btn" data-action="discard-config">重新读取配置</button>
+            </div>
+
+            <div class="card card--danger">
+                <div class="row row--between">
+                    <div>
+                        <h3 class="card__title" style="margin: 0 0 4px;">开发者重置</h3>
+                        <p class="card__sub" style="margin: 0;">删除本机缓存邮件、已归档发票、待确认队列、识别结果和运行记录。配置不会删除。</p>
+                    </div>
+                    <button class="btn btn--danger" data-action="developer-reset">删除本机缓存</button>
                 </div>
             </div>
         </div>
@@ -306,5 +327,103 @@
 </div>
 
 <script src="../scripts/shell.js"></script>
+<script>
+function collectConfigPayload() {
+    const value = (key) => document.querySelector(`[data-config="${key}"]`)?.value;
+    const numberValue = (key) => {
+        const n = Number(value(key));
+        return Number.isFinite(n) ? n : undefined;
+    };
+    const keywords = String(value('filter.keywords') || '')
+        .split(/[，,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    return {
+        imap: {
+            host: value('imap.host'),
+            port: numberValue('imap.port'),
+            user: value('imap.user'),
+            pass: value('imap.pass') || undefined,
+        },
+        filter: {
+            keywords: keywords.length ? keywords : ['发票'],
+            since: value('filter.since') || undefined,
+            until: value('filter.until') || undefined,
+            sinceDays: numberValue('filter.sinceDays'),
+        },
+        paths: {
+            samples: value('paths.samples'),
+            invoices: value('paths.invoices'),
+            pending: value('paths.pending'),
+        },
+        output: {
+            csv: value('output.csv'),
+        },
+        rename: {
+            rule: value('rename.rule'),
+            fallback: value('rename.fallback'),
+            typeDirRule: value('rename.typeDirRule'),
+        },
+        ocr: {
+            enabled: document.getElementById('ocr-vendor')?.value !== 'none',
+            provider: document.getElementById('ocr-vendor')?.value === 'none' ? 'efapiao' : document.getElementById('ocr-vendor')?.value,
+            executionMode: value('ocr.executionMode'),
+            resultsCsv: value('ocr.resultsCsv'),
+            credentials: {
+                tencentSecretId: document.getElementById('tencent-secret-id')?.value,
+                tencentSecretKey: document.getElementById('tencent-secret-key')?.value,
+                tencentRegion: document.getElementById('tencent-region')?.value,
+            },
+        },
+    };
+}
+
+let saveTimer = 0;
+
+async function saveConfigNow() {
+    const payload = collectConfigPayload();
+    if (window.mfhBridge?.saveConfig) {
+        await window.mfhBridge.saveConfig(payload);
+    } else {
+        localStorage.setItem('fph_demo_ocr_config', JSON.stringify({
+            ocrVendor: payload.ocr.provider,
+            hasTencentSecretId: Boolean(payload.ocr.credentials.tencentSecretId),
+            hasTencentSecretKey: Boolean(payload.ocr.credentials.tencentSecretKey),
+            tencentRegion: payload.ocr.credentials.tencentRegion,
+        }));
+    }
+    const state = document.getElementById('save-state');
+    state.className = 'pill pill--ok';
+    state.innerHTML = '<span class="pill__dot"></span>已保存到本机';
+    window.FPH?.showToast('设置已保存', '腾讯云鉴权会在运行 efapiao 时从本机配置透传。');
+}
+
+function scheduleConfigSave() {
+    const state = document.getElementById('save-state');
+    state.className = 'pill pill--warn';
+    state.innerHTML = '<span class="pill__dot"></span>正在保存…';
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+        saveConfigNow().catch((err) => {
+            state.className = 'pill pill--err';
+            state.innerHTML = '<span class="pill__dot"></span>保存失败';
+            window.FPH?.showToast('保存失败', err?.message || '请检查配置。', 'err');
+        });
+    }, 450);
+}
+
+function wireAutoSave() {
+    document.querySelectorAll('[data-config]').forEach((el) => {
+        el.addEventListener('input', scheduleConfigSave);
+        el.addEventListener('change', scheduleConfigSave);
+    });
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wireAutoSave);
+} else {
+    wireAutoSave();
+}
+</script>
 </body>
 </html>

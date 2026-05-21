@@ -16,7 +16,7 @@
             <span class="toolbar__crumb">工作流</span>
             <span class="toolbar__title">运行控制台</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">IMAP 已连接 · 14:02</span>
+            <span class="toolbar__meta">邮箱已连接 · <span data-clock>--:--</span></span>
         </div>
 
         <div class="page stagger">
@@ -24,23 +24,23 @@
             <div class="stats">
                 <div class="stat">
                     <div class="stat__label">一年缓存邮件</div>
-                    <div class="stat__value">577</div>
-                    <div class="stat__delta">2025-05-21 至 2026-05-21</div>
+                    <div class="stat__value" data-dash="cached-mails">0</div>
+                    <div class="stat__delta" data-dash="cached-range">暂无本地缓存</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">OCR 已识别</div>
-                    <div class="stat__value">784</div>
-                    <div class="stat__delta">recognized</div>
+                    <div class="stat__label">已识别</div>
+                    <div class="stat__value" data-dash="recognized">0</div>
+                    <div class="stat__delta">已识别</div>
                 </div>
                 <div class="stat">
-                    <div class="stat__label">OCR 失败</div>
-                    <div class="stat__value" style="color: var(--err);">1</div>
-                    <div class="stat__delta is-down">rule_unhandled</div>
+                    <div class="stat__label">未识别</div>
+                    <div class="stat__value" style="color: var(--err);" data-dash="failed">0</div>
+                    <div class="stat__delta is-down">暂未识别</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">支撑材料</div>
-                    <div class="stat__value">301</div>
-                    <div class="stat__delta is-flat">ignored, 已归档</div>
+                    <div class="stat__value" data-dash="ignored">0</div>
+                    <div class="stat__delta is-flat">已归档</div>
                 </div>
             </div>
 
@@ -48,30 +48,30 @@
                 <div class="card">
                     <div class="row row--between mb-12">
                         <div>
-                            <h3 class="card__title" style="margin: 0 0 4px;">OCR 队列</h3>
-                            <p class="card__sub" style="margin: 0;">来自 <span class="mono">mfh ocr summary</span></p>
+                            <h3 class="card__title" style="margin: 0 0 4px;">待识别文件</h3>
+                            <p class="card__sub" style="margin: 0;">识别完成后的汇总</p>
                         </div>
-                        <span class="pill pill--ok">pending 0</span>
+                        <span class="pill pill--ok">无需处理</span>
                     </div>
                     <div class="grid-3">
                         <div>
                             <div class="small muted">发票</div>
-                            <div class="mono strong" style="font-size: 18px;">782</div>
+                            <div class="mono strong" style="font-size: 18px;" data-dash="invoice-like">0</div>
                         </div>
                         <div>
                             <div class="small muted">行程单</div>
-                            <div class="mono strong" style="font-size: 18px;">3</div>
+                            <div class="mono strong" style="font-size: 18px;" data-dash="itinerary">0</div>
                         </div>
                         <div>
                             <div class="small muted">支撑材料</div>
-                            <div class="mono strong" style="font-size: 18px;">301</div>
+                            <div class="mono strong" style="font-size: 18px;" data-dash="supporting">0</div>
                         </div>
                     </div>
                     <hr class="hairline">
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary">重跑失败项</button>
-                        <button class="btn btn--sm">整理输出</button>
-                        <button class="btn btn--sm">导出结果</button>
+                        <button class="btn btn--sm btn--primary" data-action="run-ocr" data-force="true">开始识别</button>
+                        <button class="btn btn--sm" data-action="organize">整理输出</button>
+                        <button class="btn btn--sm" data-action="export-table">导出结果</button>
                     </div>
                 </div>
 
@@ -79,36 +79,58 @@
                     <div class="row row--between mb-12">
                         <div>
                             <h3 class="card__title" style="margin: 0 0 4px;">待处理邮件</h3>
-                            <p class="card__sub" style="margin: 0;">来自 <span class="mono">mfh pending list</span></p>
+                            <p class="card__sub" style="margin: 0;">需要人工确认的邮件</p>
                         </div>
-                        <span class="pill pill--warn">12 封</span>
+                        <span class="pill pill--warn" data-dash="pending-total">0 封</span>
                     </div>
-                    <div class="row row--between small mono"><span>飞猪/接送机历史链接过期</span><span class="strong">7</span></div>
-                    <div class="row row--between small mono mt-12"><span>无直接 PDF 链接</span><span class="strong">3</span></div>
-                    <div class="row row--between small mono mt-12"><span>慧通差旅链接过期</span><span class="strong">1</span></div>
-                    <div class="row row--between small mono mt-12"><span>附件无支持文档</span><span class="strong">1</span></div>
+                    <div class="row row--between small mono" data-pending-line><span>暂无待确认邮件</span><span class="strong">0</span></div>
+                    <div class="row row--between small mono mt-12" data-pending-line><span>暂无待确认邮件</span><span class="strong">0</span></div>
+                    <div class="row row--between small mono mt-12" data-pending-line><span>暂无待确认邮件</span><span class="strong">0</span></div>
+                    <div class="row row--between small mono mt-12" data-pending-line><span>暂无待确认邮件</span><span class="strong">0</span></div>
                     <hr class="hairline">
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary">打开人工队列</button>
-                        <button class="btn btn--sm">刷新链接</button>
+                        <button class="btn btn--sm btn--primary" data-action="open-pending-page">打开待确认</button>
+                        <button class="btn btn--sm" data-action="reload-summary">刷新列表</button>
                     </div>
                 </div>
             </div>
 
             <div class="grid-2">
-                <!-- Left: Run controls + console -->
+                <!-- 左侧：运行控制与进度 -->
                 <div style="display: flex; flex-direction: column; gap: 16px;">
                     <div class="card">
                         <h3 class="card__title">开始抓取</h3>
-                        <p class="card__sub">连接 IMAP，按当前过滤条件搜索邮件，将命中条目保存为 .eml 文件</p>
+                        <p class="card__sub">连接邮箱，按当前条件搜索邮件，并把命中的原始邮件保存到本地</p>
 
                         <div class="field">
-                            <label class="field__label">回溯天数</label>
-                            <div class="tabs">
-                                <button class="tab">7 天</button>
-                                <button class="tab is-active">30 天</button>
-                                <button class="tab">90 天</button>
-                                <button class="tab">全部</button>
+                            <label class="field__label">处理日期范围</label>
+                            <div class="field-row field-row--3">
+                                <div class="field" style="margin-bottom: 0;">
+                                    <label class="field__label">开始日期</label>
+                                    <input class="input" id="date-from" type="date" value="2026-05-01">
+                                </div>
+                                <div class="field" style="margin-bottom: 0;">
+                                    <label class="field__label">结束日期</label>
+                                    <input class="input" id="date-to" type="date" value="2026-05-21">
+                                </div>
+                                <div class="field" style="margin-bottom: 0;">
+                                    <label class="field__label">快捷选择</label>
+                                    <select class="select" id="range-preset" aria-label="快捷选择日期范围">
+                                        <option value="month" selected>本月以来</option>
+                                        <option value="today">今天</option>
+                                        <option value="week">本周以来</option>
+                                        <option value="quarter">本季以来</option>
+                                        <option value="year">今年以来</option>
+                                        <option value="custom">自定义</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row gap-8 mt-12" id="date-preset-buttons">
+                                <button class="btn btn--sm" data-range="today">今天</button>
+                                <button class="btn btn--sm" data-range="week">本周以来</button>
+                                <button class="btn btn--sm btn--primary" data-range="month">本月以来</button>
+                                <button class="btn btn--sm" data-range="quarter">本季以来</button>
+                                <button class="btn btn--sm" data-range="year">今年以来</button>
                             </div>
                         </div>
 
@@ -123,7 +145,7 @@
                             </label>
                             <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
                                 <div class="check"></div>
-                                仅 dry-run
+                                只预览，不保存
                             </label>
                         </div>
 
@@ -132,12 +154,12 @@
                                 <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
                                 开始抓取
                             </button>
-                            <button class="btn">查看 CLI 命令</button>
+                            <button class="btn" data-action="preview-fetch">查看将要执行的操作</button>
                             <div style="flex: 1;"></div>
-                            <span class="mono small muted">预计 ~9s</span>
+                            <span class="mono small muted" id="range-preview">2026-05-01 至 2026-05-21</span>
                         </div>
 
-                        <div class="progress">
+                        <div class="progress is-idle" id="run-progress">
                             <div class="progress__bar" id="prog-bar" style="--p: 0%"></div>
                         </div>
 
@@ -158,16 +180,7 @@
                             <h3 class="card__title" style="margin: 0;">实时日志</h3>
                         </div>
                         <div class="console" id="console-out" style="height: 280px; border-radius: 0; border: 0;">
-                            <div class="console__line"><span class="console__time">14:02:11</span><span class="console__tag">init</span><span class="console__msg">加载配置 config.json</span></div>
-                            <div class="console__line"><span class="console__time">14:02:11</span><span class="console__tag">imap</span><span class="console__msg">连接 imap.exmail.qq.com:993 (TLS)</span></div>
-                            <div class="console__line"><span class="console__time">14:02:12</span><span class="console__tag ok">imap</span><span class="console__msg">认证成功 me@example.com</span></div>
-                            <div class="console__line"><span class="console__time">14:02:12</span><span class="console__tag">filter</span><span class="console__msg">since=30d keywords=["发票","invoice"]</span></div>
-                            <div class="console__line"><span class="console__time">14:02:13</span><span class="console__tag ok">fetch</span><span class="console__msg">找到 24 封匹配邮件</span></div>
-                            <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/a91f0e2c.eml "国家电网电子发票通知"</span></div>
-                            <div class="console__line"><span class="console__time">14:02:14</span><span class="console__tag">save</span><span class="console__msg">2026-05/77d3aa9b.eml "高德打车发票已开具"</span></div>
-                            <div class="console__line"><span class="console__time">14:02:15</span><span class="console__tag">skip</span><span class="console__msg">已存在 hash 5f0a...</span></div>
-                            <div class="console__line"><span class="console__time">14:02:16</span><span class="console__tag warn">retry</span><span class="console__msg">network retry 1/3 GET https://nnfp.jss.com.cn/...: http_500</span></div>
-                            <div class="console__line"><span class="console__time">14:02:19</span><span class="console__tag warn">manual</span><span class="console__msg">pending 53a93fd33bea reason=thirdParty:network_retry_failed:GET:https://nnfp.jss.com.cn/...:http_500</span></div>
+                            <div class="console__line"><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">选择日期范围后，点击“开始抓取”才会运行。</span></div>
                         </div>
                     </div>
                 </div>
@@ -177,48 +190,17 @@
                     <h3 class="card__title">最近运行</h3>
                     <p class="card__sub">历史记录按时间倒序排列</p>
 
-                    <div style="display: flex; flex-direction: column; gap: 10px;">
-                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--ok);">
-                            <div class="row row--between mb-12">
-                                <span class="mono small strong">今日 14:02</span>
-                                <span class="pill pill--ok"><span class="pill__dot"></span>成功</span>
-                            </div>
-                            <div class="small muted">mfh fetch · sinceDays=30</div>
-                            <div class="mono small muted mt-12">seen 24 · saved 6 · skipped 18 · 5.8s</div>
-                        </div>
-
-                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--ok);">
-                            <div class="row row--between mb-12">
-                                <span class="mono small strong">今日 09:30</span>
-                                <span class="pill pill--ok"><span class="pill__dot"></span>成功</span>
-                            </div>
-                            <div class="small muted">mfh fetch · cron</div>
-                            <div class="mono small muted mt-12">seen 22 · saved 0 · skipped 22 · 4.1s</div>
-                        </div>
-
-                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--warn);">
-                            <div class="row row--between mb-12">
-                                <span class="mono small strong">昨日 18:45</span>
-                                <span class="pill pill--warn"><span class="pill__dot"></span>部分成功</span>
-                            </div>
-                            <div class="small muted">mfh run · phase 3 试运行</div>
-                            <div class="mono small muted mt-12">filed 12 · pending 3 · network failures 2 · 11.2s</div>
-                        </div>
-
-                        <div style="padding: 12px; background: var(--bg-hover); border-radius: var(--radius); border-left: 3px solid var(--err);">
-                            <div class="row row--between mb-12">
-                                <span class="mono small strong">05-18 09:30</span>
-                                <span class="pill pill--err"><span class="pill__dot"></span>失败</span>
-                            </div>
-                            <div class="small muted">mfh fetch</div>
-                            <div class="mono small muted mt-12">IMAP 认证失败 · 检查授权码 · 0.3s</div>
+                    <div style="display: flex; flex-direction: column; gap: 10px;" data-run-history>
+                        <div class="empty empty--compact">
+                            <div class="empty__title">还没有运行记录</div>
+                            <div class="empty__sub">点击“开始抓取”后，这里会显示真实结果。</div>
                         </div>
                     </div>
 
                     <hr class="hairline">
                     <div class="row row--between small mono muted">
-                        <span>累计抓取 <strong class="strong">1,284</strong> 封</span>
-                        <a href="#" style="color: var(--accent); text-decoration: underline;">导出日志</a>
+                        <span data-history-total>0 条记录</span>
+                        <button class="btn btn--sm btn--ghost" data-action="export-log">导出日志</button>
                     </div>
                 </div>
             </div>
@@ -229,11 +211,11 @@
                     <div class="row row--between">
                         <div>
                             <h3 class="card__title" style="margin: 0 0 4px;">本次抓取邮件清单</h3>
-                            <p class="card__sub" style="margin: 0;">由 14:02 运行保存的 .eml 文件</p>
+                            <p class="card__sub" style="margin: 0;">本次运行保存的邮件</p>
                         </div>
                         <div class="row gap-8">
-                            <button class="btn btn--sm">导出 CSV</button>
-                            <button class="btn btn--sm">交付下游 →</button>
+                            <button class="btn btn--sm" data-action="export-table">导出表格</button>
+                            <button class="btn btn--sm" data-action="organize">整理到文件夹</button>
                         </div>
                     </div>
                 </div>
@@ -251,61 +233,8 @@
                                 <th style="width: 100px;">状态</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <tr>
-                                <td class="faint">01</td>
-                                <td class="mono">05-20 13:58</td>
-                                <td>国家电网电子发票通知</td>
-                                <td class="small">国家电网</td>
-                                <td class="mono col-num">1 PDF</td>
-                                <td class="mono col-num">3</td>
-                                <td><span class="pill pill--ok">已保存</span></td>
-                            </tr>
-                            <tr>
-                                <td class="faint">02</td>
-                                <td class="mono">05-20 12:12</td>
-                                <td>高德打车发票已开具</td>
-                                <td class="small">高德地图</td>
-                                <td class="mono col-num">—</td>
-                                <td class="mono col-num">2</td>
-                                <td><span class="pill pill--ok">已保存</span></td>
-                            </tr>
-                            <tr>
-                                <td class="faint">03</td>
-                                <td class="mono">05-20 11:04</td>
-                                <td>携程电子发票 - 行程 7DK33B</td>
-                                <td class="small">携程旅行</td>
-                                <td class="mono col-num">1 PDF</td>
-                                <td class="mono col-num">1</td>
-                                <td><span class="pill pill--ok">已保存</span></td>
-                            </tr>
-                            <tr>
-                                <td class="faint">04</td>
-                                <td class="mono">05-20 10:48</td>
-                                <td>飞猪机票发票 PNR 4G7K2L</td>
-                                <td class="small">飞猪旅行</td>
-                                <td class="mono col-num">—</td>
-                                <td class="mono col-num">4</td>
-                                <td><span class="pill pill--warn">待识别</span></td>
-                            </tr>
-                            <tr>
-                                <td class="faint">05</td>
-                                <td class="mono">05-20 09:31</td>
-                                <td>京东企业购 5 月汇总发票</td>
-                                <td class="small">京东</td>
-                                <td class="mono col-num">2 PDF</td>
-                                <td class="mono col-num">1</td>
-                                <td><span class="pill pill--ok">已保存</span></td>
-                            </tr>
-                            <tr>
-                                <td class="faint">06</td>
-                                <td class="mono">05-20 08:17</td>
-                                <td>阿里云电子发票（合并 04 月）</td>
-                                <td class="small">阿里云</td>
-                                <td class="mono col-num">1 PDF</td>
-                                <td class="mono col-num">2</td>
-                                <td><span class="pill pill--ok">已保存</span></td>
-                            </tr>
+                        <tbody data-current-batch-rows>
+                            <tr><td colspan="7" class="muted">本地暂无缓存邮件。完成抓取后会在这里显示。</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -316,51 +245,133 @@
 
 <script src="../scripts/shell.js"></script>
 <script>
-// Run simulation
 const runBtn = document.getElementById('run-btn');
+const progress = document.getElementById('run-progress');
 const progBar = document.getElementById('prog-bar');
 const matched = document.getElementById('m-matched');
 const saved = document.getElementById('m-saved');
 const skip = document.getElementById('m-skip');
 const status = document.getElementById('run-status');
 const consoleOut = document.getElementById('console-out');
+const dateFrom = document.getElementById('date-from');
+const dateTo = document.getElementById('date-to');
+const rangePreset = document.getElementById('range-preset');
+const rangePreview = document.getElementById('range-preview');
+const presetButtons = document.getElementById('date-preset-buttons');
 
-let running = false;
-runBtn?.addEventListener('click', () => {
-    if (running) return;
-    running = true;
-    runBtn.disabled = true;
+function fmt(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
 
-    let pct = 0;
-    const interval = setInterval(() => {
-        pct += 5 + Math.random() * 10;
-        if (pct > 100) pct = 100;
+function startOfWeek(d) {
+    const out = new Date(d);
+    const day = out.getDay() || 7;
+    out.setDate(out.getDate() - day + 1);
+    return out;
+}
 
-        progBar.style.setProperty('--p', pct + '%');
-        matched.textContent = Math.min(24, Math.floor(pct * 0.24));
-        saved.textContent = Math.min(6, Math.floor(pct * 0.06));
-        skip.textContent = Math.min(18, Math.floor(pct * 0.18));
+function rangeFor(preset) {
+    const today = new Date(2026, 4, 21);
+    const from = new Date(today);
+    if (preset === 'today') return [today, today];
+    if (preset === 'week') return [startOfWeek(today), today];
+    if (preset === 'quarter') {
+        from.setMonth(Math.floor(today.getMonth() / 3) * 3, 1);
+        return [from, today];
+    }
+    if (preset === 'year') {
+        from.setMonth(0, 1);
+        return [from, today];
+    }
+    from.setDate(1);
+    return [from, today];
+}
 
-        if (pct >= 100) {
-            clearInterval(interval);
-            status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
-            progBar.parentElement.classList.add('is-done');
-            running = false;
-            runBtn.disabled = false;
+function setRange(preset) {
+    const [from, to] = rangeFor(preset);
+    dateFrom.value = fmt(from);
+    dateTo.value = fmt(to);
+    rangePreset.value = preset;
+    presetButtons.querySelectorAll('[data-range]').forEach((button) => {
+        button.classList.toggle('btn--primary', button.dataset.range === preset);
+    });
+    updatePreview();
+}
 
-            const line = document.createElement('div');
-            line.className = 'console__line';
-            line.innerHTML = '<span class="console__time">14:02:20</span><span class="console__tag ok">done</span><span class="console__msg">处理完成 · 24 封邮件 · 6 个新文件 · 网络失败 1 封已进 pending · 5.8s</span>';
-            consoleOut.appendChild(line);
-            consoleOut.scrollTop = consoleOut.scrollHeight;
+function updatePreview() {
+    rangePreview.textContent = `${dateFrom.value} 至 ${dateTo.value}`;
+    if (rangePreset.value !== 'custom') {
+        const [from, to] = rangeFor(rangePreset.value);
+        if (dateFrom.value !== fmt(from) || dateTo.value !== fmt(to)) {
+            rangePreset.value = 'custom';
+            presetButtons.querySelectorAll('[data-range]').forEach((button) => button.classList.remove('btn--primary'));
         }
-    }, 200);
-});
+    }
+}
 
-// Auto-scroll console
-if (consoleOut) {
+function appendLog(tag, message, kind = '') {
+    const line = document.createElement('div');
+    line.className = 'console__line';
+    const now = new Date();
+    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    line.innerHTML = `<span class="console__time">${time}</span><span class="console__tag ${kind}">${tag}</span><span class="console__msg">${message}</span>`;
+    consoleOut.appendChild(line);
     consoleOut.scrollTop = consoleOut.scrollHeight;
 }
+
+function applyProgress(data) {
+    const pct = Math.max(0, Math.min(100, data.percent || 0));
+    progBar.style.setProperty('--p', `${pct}%`);
+    matched.textContent = data.matched ?? matched.textContent;
+    saved.textContent = data.saved ?? saved.textContent;
+    skip.textContent = data.skipped ?? skip.textContent;
+    if (data.message) appendLog(data.step || '进度', data.message, data.kind || '');
+    if (pct >= 100 || data.done) {
+        progress.classList.add('is-done');
+        status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+        runBtn.disabled = false;
+    }
+}
+
+async function startRun() {
+    runBtn.disabled = true;
+    progress.classList.remove('is-idle', 'is-done');
+    progBar.style.setProperty('--p', '0%');
+    matched.textContent = '0';
+    saved.textContent = '0';
+    skip.textContent = '0';
+    consoleOut.innerHTML = '';
+    status.innerHTML = '<span class="pill pill--info"><span class="pill__dot"></span>运行中</span>';
+
+    const payload = { from: dateFrom.value, to: dateTo.value };
+    appendLog('开始', `正在处理 ${payload.from} 至 ${payload.to} 的邮件`);
+
+    if (window.mfhBridge?.startFetch) {
+        window.mfhBridge.onFetchProgress?.(applyProgress);
+        const result = await window.mfhBridge.startFetch(payload);
+        if (result?.summary) window.FPH?.applySummary?.(result.summary);
+        return;
+    }
+
+    appendLog('未运行', '请在桌面版中使用“开始抓取”，静态预览不会连接邮箱。', 'warn');
+    status.innerHTML = '<span class="pill pill--warn"><span class="pill__dot"></span>未运行</span>';
+    runBtn.disabled = false;
+}
+
+rangePreset.addEventListener('change', () => {
+    if (rangePreset.value !== 'custom') setRange(rangePreset.value);
+});
+presetButtons.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-range]');
+    if (button) setRange(button.dataset.range);
+});
+dateFrom.addEventListener('input', updatePreview);
+dateTo.addEventListener('input', updatePreview);
+runBtn?.addEventListener('click', startRun);
+updatePreview();
 </script>
 </body>
 </html>

@@ -3,64 +3,64 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>发票助手 · Mail Fapiao Helper</title>
+    <title>发票助手</title>
     <link rel="stylesheet" href="styles/main.css">
 </head>
 <body>
     <div class="landing">
         <main class="landing__card stagger">
             <div>
-                <div class="landing__eyebrow">GUI 预览 · 静态设计稿</div>
+                <div class="landing__eyebrow">桌面端预览</div>
                 <h1 class="landing__title">发票助手</h1>
                 <p class="landing__sub">
-                    Mail-Fapiao-Helper 的桌面界面。专注于通过 IMAP 抓取发票邮件、解析附件并整理到可审计的档案库。为 Electron 设计，默认深色主题。
+                    按顺序完成三步：先填邮箱和保存位置，再抓取邮件保存原件，最后查看识别结果和需要你确认的邮件。
                 </p>
             </div>
 
             <div class="row gap-8 mt-16">
-                <a href="pages/dashboard.html" class="btn btn--primary">打开应用
+                <a href="pages/config.html" class="btn btn--primary">先去设置
                     <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
                 </a>
+                <a href="pages/dashboard.html" class="btn">已有配置，开始处理</a>
                 <button class="btn" data-theme-toggle>切换主题</button>
-                <span class="muted small" style="margin-left:8px">无需构建 · 纯静态 HTML/CSS/JS</span>
+            </div>
+
+            <div class="landing__flow" aria-label="推荐使用流程">
+                <a class="landing__step" href="pages/config.html">
+                    <span class="landing__link__idx">01</span>
+                    <span class="landing__link__title">设置邮箱与保存位置</span>
+                    <span class="landing__link__sub">填写邮箱授权码，确认发票原件保存到哪里。</span>
+                </a>
+                <a class="landing__step" href="pages/dashboard.html">
+                    <span class="landing__link__idx">02</span>
+                    <span class="landing__link__title">开始抓取邮件</span>
+                    <span class="landing__link__sub">选择日期范围，先把可能的发票和行程单原件保存下来。</span>
+                </a>
+                <a class="landing__step" href="pages/library.html">
+                    <span class="landing__link__idx">03</span>
+                    <span class="landing__link__title">查看发票库和待确认</span>
+                    <span class="landing__link__sub">识别成功的进发票库，下载失败或不确定的进待确认。</span>
+                </a>
             </div>
 
             <div class="landing__grid">
-                <a class="landing__link" href="pages/dashboard.html">
-                    <span class="landing__link__idx">01</span>
-                    <span class="landing__link__title">运行控制台</span>
-                    <span class="landing__link__sub">触发抓取 · 实时日志 · 历史记录</span>
+                <a class="landing__link" href="pages/pending.html">
+                    <span class="landing__link__title">待确认</span>
+                    <span class="landing__link__sub">链接过期、缺文件、需手动处理</span>
                 </a>
                 <a class="landing__link" href="pages/inbox.html">
-                    <span class="landing__link__idx">02</span>
-                    <span class="landing__link__title">收件箱账本</span>
-                    <span class="landing__link__sub">INDEX.csv · 可排序 · 过滤器</span>
-                </a>
-                <a class="landing__link" href="pages/library.html">
-                    <span class="landing__link__idx">03</span>
-                    <span class="landing__link__title">发票库</span>
-                    <span class="landing__link__sub">已处理发票 · 销售方 · 金额</span>
-                </a>
-                <a class="landing__link" href="pages/pending.html">
-                    <span class="landing__link__idx">04</span>
-                    <span class="landing__link__title">待处理队列</span>
-                    <span class="landing__link__sub">人工队列 · 按原因分组</span>
-                </a>
-                <a class="landing__link" href="pages/config.html">
-                    <span class="landing__link__idx">05</span>
-                    <span class="landing__link__title">配置</span>
-                    <span class="landing__link__sub">IMAP · filter.since/until · 路径</span>
+                    <span class="landing__link__title">邮件记录</span>
+                    <span class="landing__link__sub">查看已扫描邮件和来源</span>
                 </a>
                 <a class="landing__link" href="pages/settings.html">
-                    <span class="landing__link__idx">06</span>
                     <span class="landing__link__title">关于</span>
-                    <span class="landing__link__sub">偏好设置 · 快捷键 · 构建信息</span>
+                    <span class="landing__link__sub">隐私说明、数据保存位置</span>
                 </a>
             </div>
 
             <div class="landing__foot">
-                <span>静态预览 · 任意浏览器打开</span>
-                <span>2026 · Electron 就绪</span>
+                <span>本地预览 · 不上传邮件</span>
+                <span>为 Electron 桌面端准备</span>
             </div>
         </main>
     </div>

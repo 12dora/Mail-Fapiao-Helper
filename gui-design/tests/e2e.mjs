@@ -1,0 +1,401 @@
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const mime = new Map([
+  ['.html', 'text/html; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+]);
+
+function startServer() {
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url || '/', 'http://127.0.0.1');
+    const requested = url.pathname === '/' ? '/index.html' : decodeURIComponent(url.pathname);
+    const fullPath = normalize(join(root, requested));
+
+    if (!fullPath.startsWith(root)) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    try {
+      const body = await readFile(fullPath);
+      res.writeHead(200, { 'content-type': mime.get(extname(fullPath)) || 'application/octet-stream' });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end('Not found');
+    }
+  });
+
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      resolve({ server, baseUrl: `http://127.0.0.1:${address.port}` });
+    });
+  });
+}
+
+function fail(message) {
+  throw new Error(message);
+}
+
+async function expectText(page, text) {
+  const count = await page.getByText(text, { exact: false }).count();
+  if (count < 1) fail(`页面缺少文字：${text}`);
+}
+
+async function main() {
+  const { server, baseUrl } = await startServer();
+  const browser = await chromium.launch();
+
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.addInitScript(() => {
+      window.__savedConfigPayload = null;
+      window.__afterFetchDone = false;
+      window.__bridgeCalls = [];
+      const record = (name, payload) => {
+        window.__bridgeCalls.push({ name, payload });
+      };
+      window.mfhBridge = {
+        async getSummary() {
+          return {
+            configExists: true,
+            history: [],
+            inbox: {
+              total: 2,
+              withAttachment: 1,
+              withLinks: 2,
+              earliestMonth: '2026-05',
+              latestMonth: '2026-05',
+              rows: [
+                {
+                  date: '2026-05-21T08:30:00.000Z',
+                  from: '国家电网 <noreply@example.com>',
+                  subject: '国家电网电子发票通知',
+                  mailbox: 'INBOX',
+                  hasAttachment: true,
+                  bodyLinkCount: 3,
+                },
+                {
+                  date: '2026-05-20T08:30:00.000Z',
+                  from: '服务商 <vendor@example.com>',
+                  subject: '普通通知',
+                  mailbox: 'INBOX',
+                  hasAttachment: false,
+                  bodyLinkCount: 0,
+                },
+              ],
+            },
+            library: {
+              total: 3,
+              recognized: 2,
+              failed: 1,
+              ignored: 1,
+                pending: window.__afterFetchDone ? 3 : 0,
+                invoiceLike: window.__afterFetchDone ? 2 : 0,
+                itinerary: window.__afterFetchDone ? 1 : 0,
+                supporting: window.__afterFetchDone ? 1 : 0,
+                ocr: {
+                byDocumentType: window.__afterFetchDone ? [
+                  { key: 'invoice', count: 2 },
+                  { key: 'itinerary', count: 1 },
+                  { key: 'supporting', count: 1 },
+                ] : [],
+              },
+              rows: [
+                {
+                  date: '2026-05-21',
+                  seller: '国家电网有限公司',
+                  invoiceNo: '123456',
+                  amount: '¥ 318.42',
+                  source: '本机识别',
+                  filename: '国家电网-318.42.pdf',
+                  status: '完整',
+                },
+                {
+                  date: '2026-05-20',
+                  seller: '未识别销售方',
+                  invoiceNo: '',
+                  amount: '',
+                  source: '本机识别',
+                  filename: 'bad.pdf',
+                  status: '识别失败',
+                  error: '暂未识别',
+                },
+              ],
+            },
+            pending: {
+              total: 1,
+              groups: [
+                {
+                  title: '下载失败或链接过期',
+                  count: 1,
+                  action: 'refresh_link',
+                  description: '需要重新打开平台或手动保存。',
+                  rows: [
+                    {
+                      hash: 'abc123',
+                      date: '2026-05-21',
+                      from: 'vendor@example.com',
+                      subject: '发票下载链接已过期',
+                      reason: 'http_403',
+                    },
+                  ],
+                },
+              ],
+            },
+          };
+        },
+        async getConfig() {
+          return {
+            configExists: true,
+            config: {
+              imap: { host: 'imap.test.local', port: 993, user: 'user@test.local' },
+              filter: { keywords: ['发票', '行程单'], since: '2026-05-01', until: '2026-05-21', sinceDays: 30 },
+              paths: { samples: './samples/raw', invoices: './invoices', pending: './pending' },
+              output: { csv: './invoices.csv' },
+              rename: { rule: '{seller}-{amount}.pdf', fallback: '{date}-{messageId}.pdf', typeDirRule: '{documentType}' },
+              ocr: {
+                enabled: true,
+                provider: 'efapiao',
+                executionMode: 'auto',
+                resultsCsv: './invoices/ocr/ocr-results.csv',
+                credentials: { tencentRegion: 'ap-shanghai' },
+              },
+            },
+          };
+        },
+        async startFetch() {
+          record('startFetch');
+          window.__afterFetchDone = true;
+          return { ok: true, summary: await window.mfhBridge.getSummary() };
+        },
+        async runOcr(payload) {
+          record('runOcr', payload);
+          return { ok: true };
+        },
+        async organize(payload) {
+          record('organize', payload);
+          return { ok: true };
+        },
+        async runPipeline(payload) {
+          record('runPipeline', payload);
+          return { ok: true };
+        },
+        async openPath(payload) {
+          record('openPath', payload);
+          return { ok: true };
+        },
+        async copyText(payload) {
+          record('copyText', payload);
+          return { ok: true };
+        },
+        async testConnection() {
+          record('testConnection');
+          return { ok: true, message: '配置文件可以读取。' };
+        },
+        async developerReset() {
+          record('developerReset');
+          return { ok: true, removed: ['samples/raw'], summary: await window.mfhBridge.getSummary() };
+        },
+        async saveConfig(payload) {
+          record('saveConfig', payload);
+          window.__savedConfigPayload = payload;
+          return { ok: true };
+        },
+        onFetchProgress(callback) {
+          setTimeout(() => callback({ percent: 100, matched: 2, saved: 1, skipped: 1, step: '完成', message: '测试完成', done: true }), 20);
+        },
+      };
+    });
+    await page.goto(`${baseUrl}/`);
+
+    await expectText(page, '按顺序完成三步');
+    await expectText(page, '设置邮箱与保存位置');
+    await expectText(page, '开始抓取邮件');
+    await expectText(page, '查看发票库和待确认');
+    await page.getByRole('link', { name: '已有配置，开始处理' }).click();
+    await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
+
+    const theme = await page.evaluate(() => document.documentElement.dataset.theme || 'light');
+    if (theme !== 'light') fail(`默认主题应为亮色，实际为 ${theme}`);
+
+    await expectText(page, '开始处理');
+    await expectText(page, '返回首页');
+    await expectText(page, '邮件记录');
+    await expectText(page, '发票库');
+    await expectText(page, '待确认');
+    await expectText(page, '邮箱已连接');
+    await expectText(page, '识别完成后的汇总');
+    await expectText(page, '2026-05 至 2026-05');
+    await expectText(page, '选择日期范围后，点击“开始抓取”才会运行');
+
+    const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (initialProgress !== '0%') fail(`页面打开时进度条不应启动，实际为 ${initialProgress}`);
+
+    await page.getByRole('button', { name: '本周以来' }).click();
+    const weekRange = await page.evaluate(() => ({
+      from: document.querySelector('#date-from')?.value,
+      to: document.querySelector('#date-to')?.value,
+      preview: document.querySelector('#range-preview')?.textContent,
+    }));
+    if (weekRange.from !== '2026-05-18' || weekRange.to !== '2026-05-21') {
+      fail(`本周以来日期填充错误：${JSON.stringify(weekRange)}`);
+    }
+    if (!weekRange.preview?.includes('2026-05-18 至 2026-05-21')) {
+      fail(`日期范围预览错误：${weekRange.preview}`);
+    }
+
+    const englishLeak = await page.locator('body').evaluate((body) => {
+      const text = body.innerText;
+      return /(WORKFLOW|SYSTEM|Quick find|Run|Inbox|Library|Pending|Config|About|Completed|recognized|rule_unhandled|action=|manual_archive|travel_detail|order_detail|statement|meal_detail)/.exec(text)?.[0] || '';
+    });
+    if (englishLeak) fail(`页面仍暴露英文/内部状态：${englishLeak}`);
+
+    await page.getByRole('button', { name: '开始抓取' }).click();
+    await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
+    const afterFetchOcrCounts = await page.evaluate(() => ({
+      invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
+      itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
+      supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
+    }));
+    if (afterFetchOcrCounts.invoice !== '2' || afterFetchOcrCounts.itinerary !== '1' || afterFetchOcrCounts.supporting !== '1') {
+      fail(`抓取完成后待识别文件没有随真实汇总更新：${JSON.stringify(afterFetchOcrCounts)}`);
+    }
+    await page.getByRole('button', { name: '整理输出' }).first().click();
+    await page.getByRole('button', { name: '开始识别' }).click();
+    await page.getByRole('button', { name: '查看将要执行的操作' }).click();
+    const dashboardCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
+    for (const expected of ['startFetch', 'organize', 'runOcr']) {
+      if (!dashboardCalls.includes(expected)) fail(`控制台按钮没有调用 ${expected}: ${dashboardCalls.join(',')}`);
+    }
+
+    await page.getByRole('link', { name: '待确认 1' }).click();
+    await page.waitForURL(`${baseUrl}/pages/pending.html`);
+    await expectText(page, '这些邮件大多是历史链接过期');
+    await expectText(page, '发票下载链接已过期');
+    await page.locator('[data-action="pending-primary"]').click();
+    await page.getByRole('button', { name: '打开待确认文件夹' }).first().click();
+    await page.getByRole('button', { name: '复制原因' }).click();
+    const genericToast = await page.getByText('桌面版中会调用本地程序完成这一步', { exact: false }).count();
+    if (genericToast > 0) fail('普通按钮不应再弹出泛化的桌面版提示');
+    const pendingCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
+    if (!pendingCalls.includes('openPath') || !pendingCalls.includes('copyText')) {
+      fail(`待确认按钮没有调用文件夹/复制动作：${pendingCalls.join(',')}`);
+    }
+
+    await page.getByRole('link', { name: '发票库 2' }).click();
+    await page.waitForURL(`${baseUrl}/pages/library.html`);
+    await page.locator('[data-search="library"]').fill('国家电网');
+    await expectText(page, '国家电网有限公司');
+    const badVisibleAfterSearch = await page.getByText('bad.pdf', { exact: false }).count();
+    if (badVisibleAfterSearch !== 0) fail('发票库搜索没有过滤不匹配结果');
+    await page.locator('[data-search="library"]').fill('');
+    await page.getByRole('button', { name: '失败' }).click();
+    await expectText(page, 'bad.pdf');
+    const startOcrClass = await page.getByRole('button', { name: '开始识别' }).evaluate((el) => el.className);
+    if (!String(startOcrClass).includes('btn--primary')) fail(`发票库开始识别按钮不是蓝色主按钮：${startOcrClass}`);
+    await page.getByRole('button', { name: '开始识别' }).click();
+    await page.getByRole('button', { name: '整理输出' }).click();
+
+    await page.getByRole('link', { name: '邮件记录 2' }).click();
+    await page.waitForURL(`${baseUrl}/pages/inbox.html`);
+    await page.locator('[data-search="inbox"]').fill('国家电网');
+    await expectText(page, '国家电网电子发票通知');
+    const normalVisible = await page.getByText('普通通知', { exact: false }).count();
+    if (normalVisible !== 0) fail('邮件搜索没有过滤不匹配结果');
+
+    await page.getByRole('link', { name: '邮箱与保存' }).click();
+    await page.waitForURL(`${baseUrl}/pages/config.html`);
+    await expectText(page, '先保存所有发票或行程单原件');
+    await expectText(page, 'efapiao（内置）');
+    await expectText(page, '腾讯云 SecretId');
+    await expectText(page, '运行 efapiao 时会作为本地环境变量透传');
+    await expectText(page, '修改后自动保存');
+    const saveButtonCount = await page.getByRole('button', { name: '保存并应用' }).count();
+    if (saveButtonCount !== 0) fail('设置页不应再显示“保存并应用”按钮');
+    const defaultVendor = await page.getByLabel('上游识别引擎').inputValue();
+    if (defaultVendor !== 'efapiao') fail(`默认识别后端应为 efapiao，实际为 ${defaultVendor}`);
+    const mailboxSize = await page.locator('.select--mailboxes').evaluate((el) => ({
+      height: el.getBoundingClientRect().height,
+      size: el.getAttribute('size'),
+    }));
+    if (mailboxSize.height < 150 || mailboxSize.size !== '6') {
+      fail(`邮箱文件夹选择框过小：${JSON.stringify(mailboxSize)}`);
+    }
+    const tlsAlignment = await page.locator('.field--compact').evaluate((el) => {
+      const label = el.querySelector('.field__label')?.getBoundingClientRect();
+      const check = el.querySelector('.check')?.getBoundingClientRect();
+      return label && check ? Math.abs(label.left - check.left) : 999;
+    });
+    if (tlsAlignment > 4) fail(`TLS 勾选框没有在标签下方对齐：${tlsAlignment}`);
+    await page.getByRole('button', { name: '测试配置' }).click();
+    await page.getByLabel('上游识别引擎').selectOption('efapiao');
+    await page.locator('#tencent-secret-id').fill('demo-secret-id');
+    await page.locator('#tencent-secret-key').fill('demo-secret-key');
+    await page.locator('#tencent-region').fill('ap-guangzhou');
+    await page.getByText('已保存到本机', { exact: false }).waitFor({ state: 'visible', timeout: 5000 });
+    await page.waitForFunction(() => window.__savedConfigPayload?.ocr?.credentials?.tencentRegion === 'ap-guangzhou');
+    const savedPayload = await page.evaluate(() => window.__savedConfigPayload);
+    if (savedPayload?.ocr?.credentials?.tencentRegion !== 'ap-guangzhou') {
+      fail(`配置保存没有携带腾讯 OCR 区域：${JSON.stringify(savedPayload)}`);
+    }
+    page.on('dialog', async (dialog) => {
+      await dialog.accept();
+    });
+    await page.getByRole('button', { name: '删除本机缓存' }).click();
+    const configCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
+    for (const expected of ['testConnection', 'saveConfig', 'developerReset']) {
+      if (!configCalls.includes(expected)) fail(`设置页按钮没有调用 ${expected}: ${configCalls.join(',')}`);
+    }
+
+    await page.getByRole('link', { name: '关于' }).click();
+    await page.waitForURL(`${baseUrl}/pages/settings.html`);
+    await expectText(page, '数据保存');
+    await expectText(page, '识别与隐私');
+    const aboutLeak = await page.locator('body').evaluate((body) => /实施进度|设计原则|构建信息|扩展点/.exec(body.innerText)?.[0] || '');
+    if (aboutLeak) fail(`关于页仍暴露开发内容：${aboutLeak}`);
+
+    await page.getByTitle('切换到深色主题').click();
+    const dark = await page.evaluate(() => document.documentElement.dataset.theme || 'light');
+    if (dark !== 'dark') fail(`主题切换失败，实际为 ${dark}`);
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+    if (overflow) fail('页面存在横向溢出');
+
+    await page.getByRole('link', { name: '邮箱与保存' }).click();
+    await page.waitForURL(`${baseUrl}/pages/config.html`);
+    const scrollCheck = await page.evaluate(() => {
+      const scroller = document.querySelector('.page');
+      if (!scroller) return { ok: false, before: 0, after: 0, max: 0 };
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = max;
+      return { ok: max > 100 && scroller.scrollTop > 0, before: 0, after: scroller.scrollTop, max };
+    });
+    if (!scrollCheck.ok) fail(`配置页不能纵向滚动：${JSON.stringify(scrollCheck)}`);
+
+    const small = await browser.newPage({ viewport: { width: 900, height: 640 } });
+    await small.goto(`${baseUrl}/pages/config.html`);
+    const smallOverflow = await small.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+    if (smallOverflow) fail('小窗口下页面存在横向溢出');
+    await small.close();
+  } finally {
+    await browser.close();
+    server.close();
+  }
+}
+
+main().then(
+  () => console.log('GUI E2E passed'),
+  (err) => {
+    console.error(err);
+    process.exitCode = 1;
+  },
+);

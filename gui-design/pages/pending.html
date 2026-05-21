@@ -16,30 +16,30 @@
             <span class="toolbar__crumb">工作流</span>
             <span class="toolbar__title">待处理队列</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">12 封待处理 · pending/pending.csv</span>
+            <span class="toolbar__meta"><span data-pending="total">0</span> 封待处理 · 待确认清单</span>
         </div>
 
         <div class="page stagger">
             <div class="stats">
-                <div class="stat">
+                <div class="stat" data-pending-stat>
                     <div class="stat__label">飞猪链接过期</div>
                     <div class="stat__value" style="color: var(--warn);">7</div>
-                    <div class="stat__delta is-flat">refresh_link</div>
+                    <div class="stat__delta is-flat">刷新链接</div>
                 </div>
-                <div class="stat">
-                    <div class="stat__label">无 PDF 链接</div>
+                <div class="stat" data-pending-stat>
+                    <div class="stat__label">无下载文件</div>
                     <div class="stat__value">3</div>
-                    <div class="stat__delta is-flat">manual_archive</div>
+                    <div class="stat__delta is-flat">手动保存</div>
                 </div>
-                <div class="stat">
+                <div class="stat" data-pending-stat>
                     <div class="stat__label">慧通过期</div>
                     <div class="stat__value" style="color: var(--warn);">1</div>
-                    <div class="stat__delta is-flat">refresh_link</div>
+                    <div class="stat__delta is-flat">刷新链接</div>
                 </div>
-                <div class="stat">
+                <div class="stat" data-pending-stat>
                     <div class="stat__label">非支持附件</div>
                     <div class="stat__value">1</div>
-                    <div class="stat__delta is-flat">ignore</div>
+                    <div class="stat__delta is-flat">可忽略</div>
                 </div>
             </div>
 
@@ -47,149 +47,31 @@
                 <div class="row gap-12">
                     <svg class="ic ic--lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" style="color: var(--warn); flex-shrink: 0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                     <div style="flex: 1;">
-                        <div class="strong">当前 pending 样本主要是历史链接过期，不适合继续自动重试</div>
-                        <div class="small muted" style="margin-top: 4px;">GUI 需要提供打开原始邮件、重新授权/刷新链接、手动上传归档文件、确认忽略四类入口。</div>
+                        <div class="strong">这些邮件大多是历史链接过期，继续自动重试通常也无法下载</div>
+                        <div class="small muted" style="margin-top: 4px;">你可以打开原邮件、重新授权、手动添加文件，或确认这封邮件不用处理。</div>
                     </div>
                     <div class="row gap-8" style="align-self: flex-start;">
-                        <button class="btn btn--sm">导出清单</button>
-                        <button class="btn btn--sm btn--primary">批量刷新</button>
+                        <button class="btn btn--sm" data-action="export-table">导出清单</button>
+                        <button class="btn btn--sm btn--primary" data-action="reload-summary">刷新列表</button>
                     </div>
                 </div>
             </div>
 
             <div class="filterbar">
                 <div class="tabs">
-                    <button class="tab is-active">全部 · 12</button>
-                    <button class="tab">刷新链接 · 8</button>
-                    <button class="tab">手动归档 · 3</button>
-                    <button class="tab">可忽略 · 1</button>
+                    <button class="tab is-active">全部</button>
+                    <button class="tab">刷新链接</button>
+                    <button class="tab">手动归档</button>
+                    <button class="tab">可忽略</button>
                 </div>
 
                 <div class="spacer"></div>
-                <button class="btn btn--sm">打开 pending/</button>
-                <button class="btn btn--sm">刷新列表</button>
+                <button class="btn btn--sm" data-action="open-pending-folder">打开待确认文件夹</button>
+                <button class="btn btn--sm" data-action="reload-summary">刷新列表</button>
             </div>
 
-            <div class="group is-open">
-                <div class="group__head">
-                    <svg class="ic group__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    <div class="group__title">飞猪/接送机历史链接过期</div>
-                    <span class="group__count">7</span>
-                </div>
-                <div class="group__body">
-                    <div class="group__inner">
-                        <div class="card card--tight">
-                            <div class="row gap-8 mb-12">
-                                <span class="pill pill--warn">directLink:download_failed</span>
-                                <span class="pill">action=refresh_link</span>
-                                <span class="mono small muted">7 封 · eml=yes</span>
-                            </div>
-                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">飞猪接送机电子行程报销单</div>
-                            <div class="mono small muted">2025-07 至 2025-10 · alitrip@news.mail.alitrip.com · 历史 OSS/PDF 签名链接已 403</div>
-                            <div style="margin-top: 10px; padding: 10px 12px; background: var(--warn-soft); border-left: 2px solid var(--warn); border-radius: var(--radius-sm);">
-                                <div class="mono small">建议 GUI：打开 .eml、在飞猪重新授权或刷新链接、手动上传 PDF；不要默认反复自动下载。</div>
-                            </div>
-                            <div class="row gap-8 mt-12">
-                                <button class="btn btn--sm btn--primary">刷新链接</button>
-                                <button class="btn btn--sm">手动归档</button>
-                                <button class="btn btn--sm btn--ghost">复制 reason</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="group is-open">
-                <div class="group__head">
-                    <svg class="ic group__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    <div class="group__title">邮件无直接 PDF 链接</div>
-                    <span class="group__count">3</span>
-                </div>
-                <div class="group__body">
-                    <div class="group__inner">
-                        <div class="card card--tight" style="margin-bottom: 12px;">
-                            <div class="row gap-8 mb-12">
-                                <span class="pill">directLink:no_pdf_links</span>
-                                <span class="pill">通行费授权入口</span>
-                                <span class="mono small muted">2 封</span>
-                            </div>
-                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">授权自动开票</div>
-                            <div class="mono small muted">service@invoice.txffp.com · 只含授权入口/二维码，无可直接下载 PDF</div>
-                            <div class="row gap-8 mt-12">
-                                <button class="btn btn--sm btn--primary">打开邮件</button>
-                                <button class="btn btn--sm">手动上传</button>
-                                <button class="btn btn--sm btn--ghost">忽略</button>
-                            </div>
-                        </div>
-
-                        <div class="card card--tight">
-                            <div class="row gap-8 mb-12">
-                                <span class="pill">directLink:no_pdf_links</span>
-                                <span class="pill">淘宝闪购</span>
-                                <span class="mono small muted">1 封</span>
-                            </div>
-                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">淘宝闪购平台订单发票开具完成通知</div>
-                            <div class="mono small muted">仅识别到非 PDF 资源，保留 manual 入口。</div>
-                            <div class="row gap-8 mt-12">
-                                <button class="btn btn--sm btn--primary">打开邮件</button>
-                                <button class="btn btn--sm">手动上传</button>
-                                <button class="btn btn--sm btn--ghost">忽略</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="group is-open">
-                <div class="group__head">
-                    <svg class="ic group__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    <div class="group__title">慧通差旅链接过期</div>
-                    <span class="group__count">1</span>
-                </div>
-                <div class="group__body">
-                    <div class="group__inner">
-                        <div class="card card--tight">
-                            <div class="row gap-8 mb-12">
-                                <span class="pill pill--warn">huawei_travel_query_failed:130071003</span>
-                                <span class="pill">action=refresh_link</span>
-                                <span class="mono small muted">d4b053b1e670</span>
-                            </div>
-                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">慧通差旅国内酒店电子发票[发票号码: 25957000000105490135]</div>
-                            <div class="mono small muted">itravel@huawei.com · 平台返回发票链接超过有效期</div>
-                            <div class="row gap-8 mt-12">
-                                <button class="btn btn--sm btn--primary">重新授权</button>
-                                <button class="btn btn--sm">手动归档</button>
-                                <button class="btn btn--sm btn--ghost">复制 reason</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="group is-open">
-                <div class="group__head">
-                    <svg class="ic group__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    <div class="group__title">附件里没有支持文档</div>
-                    <span class="group__count">1</span>
-                </div>
-                <div class="group__body">
-                    <div class="group__inner">
-                        <div class="card card--tight">
-                            <div class="row gap-8 mb-12">
-                                <span class="pill">no_supported_documents_in_attachments</span>
-                                <span class="pill">action=ignore</span>
-                                <span class="mono small muted">9f27345e65c1</span>
-                            </div>
-                            <div class="strong" style="font-size: 14px; margin-bottom: 6px;">发票</div>
-                            <div class="mono small muted">附件不是 PDF/OFD/ZIP 中的支持文档，默认保持 manual，等待用户确认。</div>
-                            <div class="row gap-8 mt-12">
-                                <button class="btn btn--sm btn--primary">确认忽略</button>
-                                <button class="btn btn--sm">打开邮件</button>
-                                <button class="btn btn--sm">手动归档</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            <div data-pending-groups>
+                <div class="card"><div class="strong">暂无待确认邮件</div><div class="small muted mt-12">当前本地队列为空。</div></div>
             </div>
         </div>
     </main>
