@@ -343,3 +343,10 @@
 - [x] `mfh ocr run`: 识别成功后将 `ocr-pending.csv` 对应行标记为 `recognized`,失败标记为 `failed`,但保留原始队列行
 - [x] 复跑幂等: 已存在 `ocr-results.csv` 结果时跳过重复识别,不追加重复结果行,并保持队列状态可读
 - [x] 本地回归: 模拟 `efapiao` 二进制验证 `pending -> recognized`,复跑 `skipped=1`
+
+## Phase 6.2 — 内置 E-Fapiao-OCR Release 二进制  [完成 2026-05-21]
+
+- [x] 下载 `12dora/E-Fapiao-OCR v0.1.2` 的 `efapiao-0.1.2-darwin-arm64.tar.gz`
+- [x] 放置到 `vendor/efapiao/0.1.2/darwin-arm64/efapiao`,并验证 `efapiao --version`
+- [x] `ocr.binaryPath="auto"`: 当前平台优先使用 `vendor/efapiao/0.1.2/<platform-arch>/efapiao`,缺失时回退 PATH 中的 `efapiao`
+- [x] 多架构目录约定: `darwin-arm64`, `darwin-x86_64`, `linux-x86_64`, `linux-arm64`, `windows-x86_64`

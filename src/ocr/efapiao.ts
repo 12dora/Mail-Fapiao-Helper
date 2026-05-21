@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { OcrProvider, OcrResult } from './types.js';
@@ -11,6 +14,33 @@ interface EfapiaoPayload {
   engine?: Record<string, unknown>;
   document_type?: string | null;
   invoice_type?: string | null;
+}
+
+const EFAPIAO_VERSION = '0.1.2';
+
+function platformArch(): string {
+  if (process.platform === 'darwin' && process.arch === 'arm64') return 'darwin-arm64';
+  if (process.platform === 'darwin' && process.arch === 'x64') return 'darwin-x86_64';
+  if (process.platform === 'linux' && process.arch === 'x64') return 'linux-x86_64';
+  if (process.platform === 'linux' && process.arch === 'arm64') return 'linux-arm64';
+  if (process.platform === 'win32' && process.arch === 'x64') return 'windows-x86_64';
+  return `${process.platform}-${process.arch}`;
+}
+
+function repoRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, '..', '..');
+}
+
+function bundledBinaryPath(): string | undefined {
+  const exe = process.platform === 'win32' ? 'efapiao.exe' : 'efapiao';
+  const candidate = path.join(repoRoot(), 'vendor', 'efapiao', EFAPIAO_VERSION, platformArch(), exe);
+  return fs.existsSync(candidate) ? candidate : undefined;
+}
+
+function binaryPath(cfg: Config): string {
+  if (cfg.ocr.binaryPath !== 'auto') return cfg.ocr.binaryPath;
+  return bundledBinaryPath() ?? 'efapiao';
 }
 
 function stringValue(v: unknown): string {
@@ -40,13 +70,17 @@ function parseEfapiaoJson(text: string): EfapiaoPayload {
   return JSON.parse(trimmed) as EfapiaoPayload;
 }
 
+function compactError(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
 function runBinary(
   cfg: Config,
   data: Buffer,
   meta: { format: DocumentFormat; documentType: DocumentType; filename: string },
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cfg.ocr.binaryPath, [
+    const child = spawn(binaryPath(cfg), [
       'parse',
       '-',
       '--hint',
@@ -132,7 +166,7 @@ export function createEfapiaoProvider(cfg: Config): OcrProvider {
         return {
           status: 'error',
           fields: {},
-          error: `efapiao_invalid_json:exit_${result.code}:${rawJson.slice(0, 500)}`,
+          error: `efapiao_invalid_json:exit_${result.code}:${compactError(rawJson)}`,
           raw: rawJson,
         };
       }
