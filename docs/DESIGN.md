@@ -95,7 +95,7 @@ disconnect
 
 | 情况 | Extractor | 实现要点 |
 |---|---|---|
-| 1. 附件含 PDF | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf 或文件名 .pdf |
+| 1. 附件含 PDF/OFD | `attachment.ts` | 遍历 mail.attachments，contentType 含 pdf/ofd 或文件名 .pdf/.ofd；OFD 行程单归档后进入 OCR 待识别队列 |
 | 2. 正文直链 | `directLink.ts` | 提取 `<a href>`，HEAD 探测 Content-Type=application/pdf 或 .pdf 后缀，命中即下载 |
 | 3. 第三方站点 | `thirdParty.ts` + `sites/*` | 遍历正文链接，按 SiteHandler.match 命中后用 Playwright 跑脚本 |
 | 4. 未识别 | `manual.ts` | 把 .eml 原文写入 `pending/<messageId>.eml`，写一行索引到 `pending.csv` |
@@ -149,6 +149,7 @@ disconnect
 
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
+- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，OFD 另写 `invoices/ocr/ocr-pending.csv` 等待后续 OCR 识别引擎
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
 - 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 messageId 查重，避免 FINALIZED→COMMIT 窗口产生重复行
 - 并发：单封邮件串行处理，无并发池（详见 `ARCHITECTURE.md §6`）

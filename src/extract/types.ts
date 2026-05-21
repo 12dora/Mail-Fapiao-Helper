@@ -10,11 +10,19 @@ export interface Ctx {
   http: typeof fetch;
 }
 
-export interface PdfArtifact {
+export type DocumentFormat = 'pdf' | 'ofd';
+export type DocumentType = 'invoice' | 'itinerary';
+
+export interface DocumentArtifact {
   data: Buffer;
   source: string;
   suggestedName?: string;
+  format?: DocumentFormat;
+  documentType?: DocumentType;
+  requiresOcr?: boolean;
 }
+
+export type PdfArtifact = DocumentArtifact;
 
 export type ExtractResult =
   | { kind: 'pdf'; pdfs: PdfArtifact[] }

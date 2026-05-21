@@ -72,6 +72,8 @@
 
 ## Phase 7（可选）：OCR + 智能重命名
 
+- OFD 行程单已先接入前置链路：附件或 ZIP 内 `.ofd` 会随同 PDF 归档，并写入 `invoices/ocr/ocr-pending.csv`
+- 后续接 OCR 引擎时，从 `ocr-pending.csv` 读取 `format=documentType=itinerary` 的文档，按用户给定规则识别行程单字段
 - 实现一个 Provider（建议百度智能云票据 OCR，文档清晰、有免费额度）
 - `ocr/baidu.ts` 返回 `{ seller, amount, date, invoiceNo }`
 - `rename/rename.ts`：按 `config.rename.rule` 模板渲染；字段缺失走 fallback

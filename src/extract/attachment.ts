@@ -8,6 +8,13 @@ function isPdfAttachment(att: { contentType?: string; filename?: string }): bool
   return false;
 }
 
+function isOfdAttachment(att: { contentType?: string; filename?: string }): boolean {
+  if (att.contentType === 'application/ofd') return true;
+  if (att.contentType === 'application/vnd.ofd') return true;
+  if (att.filename && att.filename.toLowerCase().endsWith('.ofd')) return true;
+  return false;
+}
+
 function isZipAttachment(att: { contentType?: string; filename?: string }): boolean {
   if (att.contentType === 'application/zip') return true;
   if (att.contentType === 'application/x-zip-compressed') return true;
@@ -35,20 +42,37 @@ const attachmentExtractor: Extractor = {
           data: att.content,
           source: att.filename || 'unnamed.pdf',
           suggestedName: att.filename,
+          format: 'pdf',
+          documentType: 'invoice',
+        });
+      } else if (isOfdAttachment(att)) {
+        pdfs.push({
+          data: att.content,
+          source: att.filename || 'unnamed.ofd',
+          suggestedName: att.filename,
+          format: 'ofd',
+          documentType: 'itinerary',
+          requiresOcr: true,
         });
       } else if (isZipAttachment(att)) {
         try {
           const zip = new AdmZip(att.content);
           const entries = zip.getEntries();
           for (const entry of entries) {
-            if (!entry.isDirectory && entry.name.toLowerCase().endsWith('.pdf')) {
-              const content = entry.getData();
-              pdfs.push({
-                data: content,
-                source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
-                suggestedName: entry.name,
-              });
-            }
+            if (entry.isDirectory) continue;
+            const entryName = entry.name.toLowerCase();
+            if (!entryName.endsWith('.pdf') && !entryName.endsWith('.ofd')) continue;
+
+            const content = entry.getData();
+            const isOfd = entryName.endsWith('.ofd');
+            pdfs.push({
+              data: content,
+              source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
+              suggestedName: entry.name,
+              format: isOfd ? 'ofd' : 'pdf',
+              documentType: isOfd ? 'itinerary' : 'invoice',
+              requiresOcr: isOfd,
+            });
           }
         } catch (err) {
           ctx.log.warn(`Failed to extract ZIP ${att.filename}: ${err}`);
@@ -57,7 +81,7 @@ const attachmentExtractor: Extractor = {
     }
 
     if (pdfs.length === 0) {
-      return { kind: 'manual', reason: 'no_pdf_in_attachments' };
+      return { kind: 'manual', reason: 'no_supported_documents_in_attachments' };
     }
 
     return { kind: 'pdf', pdfs };
