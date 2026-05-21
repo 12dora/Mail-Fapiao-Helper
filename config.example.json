@@ -3,7 +3,7 @@
     "host": "imap.example.com",
     "port": 993,
     "user": "me@example.com",
-    "pass": "",
+    "pass": "***",
     "tls": true,
     "mailbox": []
   },
@@ -15,6 +15,11 @@
     "since": null,
     "until": null
   },
+  "paths": {
+    "samples": "./samples/raw",
+    "invoices": "./invoices",
+    "pending": "./pending"
+  },
   "output": {
     "dir": "./invoices",
     "pendingDir": "./pending",
@@ -22,11 +27,16 @@
   },
   "rename": {
     "rule": "{seller}-{amount}.pdf",
-    "fallback": "{date}-{messageId}.pdf"
+    "fallback": "{date}-{messageId}.pdf",
+    "applyAfterOcr": false,
+    "organizeByType": false,
+    "typeDirRule": "{documentType}",
+    "organizedDir": "./invoices/organized"
   },
   "ocr": {
     "enabled": false,
     "provider": "baidu",
+    "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
   },
   "llm": {

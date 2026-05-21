@@ -15,6 +15,15 @@ function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
   return 'pdf';
 }
 
+function safeFilename(name: string, fallback: string, ext: 'pdf' | 'ofd'): string {
+  const base = path.basename(name)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const cleaned = base.length > 0 ? base : fallback;
+  return path.extname(cleaned).length > 0 ? cleaned : `${cleaned}.${ext}`;
+}
+
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -57,7 +66,11 @@ export async function downloadPdfs(
     fs.writeFileSync(stagingPath, pdf.data);
     log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
 
-    const suggestedName = pdf.suggestedName || `${msgIdHash}-${i}.${ext}`;
+    const suggestedName = safeFilename(
+      pdf.suggestedName || `${msgIdHash}-${i}.${ext}`,
+      `${msgIdHash}-${i}.${ext}`,
+      ext,
+    );
     const targetPath = path.join(invoicesDir, suggestedName);
     const finalPath = resolveConflict(targetPath);
 

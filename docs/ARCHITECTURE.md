@@ -19,9 +19,11 @@ flowchart LR
   T --> SR["sites/registry (数组)"]
   SR --> SH[SiteHandler*]
   Pipe -->|DocumentArtifact[]| DL[download/downloader\n.staging→final]
-  DL --> Ocr[ocr queue\nOFD itinerary pending]
-  Ocr --> Rn[rename]
-  Rn --> Out[(invoices/ + invoices.csv)]
+  DL --> Out[(invoices/ + invoices.csv)]
+  DL --> OcrQ[ocr queue\nall documents pending]
+  OcrQ --> Ocr[ocr provider?]
+  Ocr --> OcrOut[(ocr-results.csv)]
+  Ocr --> Post[mfh organize\ncopy to rename / type folders]
   M --> Pend[(pending/*.eml + pending.csv)]
   Pipe --> S[(state.json)]
 ```
@@ -30,8 +32,9 @@ flowchart LR
 - `mail/` 只负责 IMAP I/O 与产出 `ParsedMail`，不感知发票语义。
 - `mail/` 按用户选择的 mailbox 顺序抓取；`config.imap.mailbox=[]` 表示 IMAP `LIST` 返回的全部 mailbox，旧字符串格式仅兼容读取。
 - `extract/` 决策 + 产出 `DocumentArtifact` 或 `manual`，不写盘。
-- `download/` 唯一落盘者（含 .staging→final、冲突重命名）。
-- `rename/` + CSV 写入唯一发生点。
+- `download/` 是原始文档唯一落盘者（含 .staging→final、安全文件名、冲突重命名）。
+- 首轮归档必须先保存全部已找到文档；OCR、二次重命名、按类型分目录只能在归档后运行，不能阻塞下载。
+- `rename/` 只负责 OCR 后的可选二次整理；`mfh organize` 复制原始归档文件到整理目录，不移动/覆盖首轮归档。
 - `state.ts` 唯一 state.json 读写者，其他模块不直接 fs。
 
 ## 2. 核心抽象（最终接口）
@@ -64,7 +67,7 @@ interface DocumentArtifact {
   suggestedName?: string;  // 提取器若已知则给,否则 rename 阶段决定
   format?: DocumentFormat; // 默认 pdf; OFD 行程单必须显式 ofd
   documentType?: DocumentType;
-  requiresOcr?: boolean;   // OFD 行程单先落盘并进入 OCR 待识别队列
+  requiresOcr?: boolean;   // 提取器可显式标记；pipeline 会把所有归档文档写入 OCR 队列
 }
 type PdfArtifact = DocumentArtifact; // 兼容旧命名,后续逐步收敛
 
@@ -78,13 +81,15 @@ interface SiteHandler {
 // ocr/types.ts
 interface OcrProvider {
   name: string;
-  parse(pdf: Buffer): Promise<Partial<InvoiceFields>>;
+  parse(data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<Partial<InvoiceFields>>;
 }
 interface InvoiceFields {
   seller: string;
   amount: string;
   date: string;        // YYYY-MM-DD
   invoiceNo: string;
+  documentType: DocumentType;
+  invoiceType: string;
 }
 ```
 
@@ -104,9 +109,9 @@ DISCOVERED                  // 来自 fetcher
   └─> MATCHED(extractorName) // registry 顺序首个 canHandle
         ├─> DOCUMENT_READY   // ExtractResult.kind=='pdf'，可含 PDF 发票 + OFD 行程单
         │     └─> STAGED     // 写入 .staging/<msgIdHash>/<i>.<pdf|ofd>
-        │           └─> FINALIZED   // 移到 invoices/ + 渲染名 + 冲突后缀
-        │                 └─> OCR_PENDING? // OFD 行程单写 invoices/ocr/ocr-pending.csv
-        │                       └─> CSV_APPENDED
+        │           └─> FINALIZED   // 移到 invoices/ + 安全文件名 + 冲突后缀
+        │                 └─> CSV_APPENDED
+        │                       └─> OCR_PENDING // 全部归档文档写 invoices/ocr/ocr-pending.csv
         │                             └─> COMMITTED  // state.json processedIds += msgId
         ├─> MANUAL           // kind=='manual' 或任意上游抛错
         │     └─> PENDING_WRITTEN   // pending/<msgIdHash>.eml + pending.csv 行
@@ -116,7 +121,7 @@ DISCOVERED                  // 来自 fetcher
 
 **幂等点（必须能安全重跑）**：
 - `STAGED`：staging 文件以 `<msgIdHash>/<index>.<pdf|ofd>` 命名，重写覆盖即可。
-- `FINALIZED`：原子 `rename`；目标存在则追加 `-1/-2`。
+- `FINALIZED`：原子 `rename`；目标存在则追加 `-1/-2`；建议文件名会先做 basename 与非法字符清理。
 - `CSV_APPENDED`：以 `messageId + source` 为去重键，允许同一封邮件登记 PDF 发票与 OFD 行程单。
 - `COMMITTED`：state.json 走 "tmp + rename" 原子写。
 
@@ -132,8 +137,8 @@ DISCOVERED                  // 来自 fetcher
 | `SiteHandler.handle` 抛错或超时 | 视同 thirdParty Extractor 失败 → manual |
 | 下载 HTTP / SiteHandler 网络抖动 / Playwright 超时 | 按 `config.network.retries` 自动重试；仍失败 → manual(reason 含 `network_retry_failed`) |
 | OFD 行程单 | 照常归档 `.ofd`，并写 `invoices/ocr/ocr-pending.csv`；后续 OCR 引擎负责识别，不阻塞同封邮件中的 PDF 发票 |
-| OCR 失败或字段缺失 | **不阻塞**：走 rename.fallback 模板，照常归档；CSV 字段留空 |
-| rename 模板渲染失败 | 用 fallback 模板；再失败用 `<msgIdHash>.pdf` |
+| OCR 失败或字段缺失 | **不影响首轮归档**：识别结果留空或标记失败，原文件与 `invoices.csv` 不回滚 |
+| 二次 rename 模板渲染失败 | 保留首轮归档文件名；记录失败原因，不影响原文件 |
 | CSV 追加失败 | 整封回滚（不 COMMIT），下次重跑 |
 | state.json 写失败 | fatal，进程退出；本封下次会被重新处理（幂等保证不重复） |
 
@@ -149,7 +154,8 @@ DISCOVERED                  // 来自 fetcher
 | CSV 追加 | 写之前检查 `messageId + source`；追加用 `fs.appendFileSync`,单行原子 |
 | state.json | `state.json.tmp` → `rename`,POSIX 原子 |
 | pending 写入 | `pending/<msgIdHash>.eml` 覆盖式写；pending.csv 同样以 messageId 查重 |
-| OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/filename/source 记录待识别文档，OFD 行程单先进入此队列 |
+| OCR 待识别队列 | `invoices/ocr/ocr-pending.csv` 以 hash/source 记录全部已归档文档，状态初始为 `pending` |
+| OCR 结果 | `config.ocr.resultsCsv` 保存识别字段、状态、错误；`mfh organize` 以结果 CSV 为输入，复制到 `rename.organizedDir` 并写 `organize-results.csv` 审计 |
 
 **启动时自愈**：读 state.json 后，扫一遍 `invoices.csv` 的 messageId 列做 union，弥补"FINALIZED 后未 COMMIT"的小窗口。CSV 即真实归档证据。
 

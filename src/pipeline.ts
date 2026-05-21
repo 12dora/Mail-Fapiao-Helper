@@ -24,6 +24,7 @@ interface OcrPendingRow extends CsvRow {
   format: string;
   documentType: string;
   reason: string;
+  status: string;
 }
 
 type FetchInput = Parameters<typeof fetch>[0];
@@ -117,9 +118,24 @@ function appendCsv(csvPath: string, row: CsvRow): void {
   }
 }
 
+function ocrPendingContainsDocument(csvPath: string, row: OcrPendingRow): boolean {
+  if (!fs.existsSync(csvPath)) return false;
+  const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+  const lines = content.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+    if ((cols[0] ?? '') === row.hash && (cols[6] ?? '') === row.source) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
   const exists = fs.existsSync(csvPath);
-  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,reason\n';
+  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason\n';
   const line = [
     row.hash,
     row.messageId,
@@ -130,6 +146,7 @@ function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
     row.source,
     row.format,
     row.documentType,
+    row.status,
     row.reason,
   ].map(csvCell).join(',') + '\n';
 
@@ -137,8 +154,7 @@ function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
   if (!exists) {
     fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
   } else {
-    const content = fs.readFileSync(csvPath, 'utf8');
-    if (content.includes(`${row.hash},`) && content.includes(row.filename)) {
+    if (ocrPendingContainsDocument(csvPath, row)) {
       return;
     }
     fs.appendFileSync(csvPath, line, 'utf8');
@@ -336,20 +352,19 @@ export async function processMail(
       source: pdf.source,
     });
 
-    if (pdf.requiresOcr || pdf.format === 'ofd') {
-      appendOcrPendingCsv(ocrPendingCsvPath, {
-        hash,
-        messageId,
-        date: mail.date?.toISOString() || '',
-        from: mail.from?.text || '',
-        subject: mail.subject || '',
-        filename: dl.filename,
-        source: pdf.source,
-        format: pdf.format ?? 'pdf',
-        documentType: pdf.documentType ?? 'invoice',
-        reason: pdf.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'requires_ocr',
-      });
-    }
+    appendOcrPendingCsv(ocrPendingCsvPath, {
+      hash,
+      messageId,
+      date: mail.date?.toISOString() || '',
+      from: mail.from?.text || '',
+      subject: mail.subject || '',
+      filename: dl.filename,
+      source: pdf.source,
+      format: pdf.format ?? 'pdf',
+      documentType: pdf.documentType ?? 'invoice',
+      status: 'pending',
+      reason: pdf.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr',
+    });
   }
 
   log.info(`Processed ${hash}: ${downloads.length} documents`);

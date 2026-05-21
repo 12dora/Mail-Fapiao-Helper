@@ -4,7 +4,7 @@
 
 ## 1. 目标
 
-从用户邮箱中抓取含"发票"关键词的邮件，自动识别并下载 PDF 发票，按规则重命名归档；对无法自动处理的邮件留给用户手工处理。Windows / macOS 通用。
+从用户邮箱中抓取含"发票"关键词的邮件，先最大化下载并归档 PDF/OFD 文档（安全命名、冲突重命名），再可选送 OCR 识别、保存识别结果，并按用户规则二次重命名或按发票类型整理。对无法自动处理的邮件留给用户手工处理。Windows / macOS 通用。
 
 ## 2. 非目标（明确不做）
 
@@ -54,7 +54,7 @@ src/
     registry.ts         # Provider 注册
     <vendor>.ts         # 每家 OCR 一个文件（按需新增）
   rename/
-    rename.ts           # 按 config.renameRule 渲染文件名
+    rename.ts           # 消费 ocr-results.csv，复制到二次命名/类型目录
   log.ts                # 简单分级日志
 ```
 
@@ -85,7 +85,8 @@ for each mail not in state.processed:
   for each Extractor in registry (按优先级: attachment > directLink > thirdParty > llm > manual):
     if canHandle: result = extract(mail); break
   if result.kind == 'pdf':
-    for each pdf: save → (optional ocr) → rename → append csv
+    for each document: save → conflict-safe filename → append invoices.csv → append ocr-pending.csv
+  optional later: OCR pending documents → ocr-results.csv → mfh organize copies into user-selected names/type folders
   if result.kind == 'manual': enqueue to state.pending with raw .eml
   mark message-id processed
 disconnect
@@ -125,11 +126,16 @@ disconnect
   },
   "rename": {
     "rule": "{seller}-{amount}.pdf",
-    "fallback": "{date}-{messageId}.pdf"
+    "fallback": "{date}-{messageId}.pdf",
+    "applyAfterOcr": false,
+    "organizeByType": false,
+    "typeDirRule": "{documentType}",
+    "organizedDir": "./invoices/organized"
   },
   "ocr": {
     "enabled": false,
     "provider": "baidu",
+    "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
   },
   "llm": {
@@ -155,11 +161,12 @@ disconnect
 
 - `state.json`：`{ processedHashes: string[] }`，键为 `msgIdHash = sha1(messageId || from+date+subject).slice(0,12)`（Message-Id 可能缺失）
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
-- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，OFD 另写 `invoices/ocr/ocr-pending.csv` 等待后续 OCR 识别引擎
+- 同一封邮件可包含 PDF 发票和 OFD 行程单；`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv` 等待后续 OCR 识别引擎
+- OCR 识别结果写入 `ocr.resultsCsv`；`mfh organize` 只消费该 CSV，把原始归档文件复制到 `rename.organizedDir`，可按 `rename.rule` 二次命名或按 `rename.typeDirRule` 分目录，不允许移动/覆盖首轮归档
 - `pending.csv`：未识别邮件清单（messageId, subject, from, date, reason）
 - 网络抖动：直链与第三方站点 HTTP 请求按 `network.retries` 重试；仍失败会写入 `pending.csv`，reason 含 `network_retry_failed`，并在 `mfh run` 结束时列出失败邮件
 - GUI 待处理队列按 `network_retry_failed` 单独分组，运行控制台展示重试日志与最终失败汇总
-- 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 messageId 查重，避免 FINALIZED→COMMIT 窗口产生重复行
+- 命名冲突：`name-1.pdf`、`name-2.pdf` 递增；CSV 追加前以 `messageId + source` 查重，避免 FINALIZED→COMMIT 窗口产生重复行
 - 并发：单封邮件串行处理，无并发池（详见 `ARCHITECTURE.md §6`）
 
 ## 8. 可扩展性（仅这两个扩展点）

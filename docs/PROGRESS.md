@@ -313,3 +313,19 @@
 - [x] `src/pipeline.ts`: OFD 与 PDF 可在同一封邮件中共同归档;`invoices.csv` 去重粒度改为 `messageId + source`
 - [x] `src/pipeline.ts`: OFD 行程单写入 `invoices/ocr/ocr-pending.csv`,等待后续 OCR 识别引擎集成
 - [x] 代表样本验证: `84bda1cccdc2` 同时输出 `.ofd` 与 `.pdf`,并生成 1 行 `ocr-pending.csv`
+
+## Phase 5.8 — 下载优先与 OCR 后处理契约  [完成 2026-05-21]
+
+- [x] 明确主流程先最大化下载并安全归档 PDF/OFD,OCR 与二次整理不得阻塞首轮归档
+- [x] `src/download/downloader.ts`: 对提取器建议文件名做 basename/非法字符清理,并继续用 `-1/-2` 防冲突
+- [x] `src/pipeline.ts`: 所有已归档文档都写入 `invoices/ocr/ocr-pending.csv`,不仅限 OFD
+- [x] `src/config.ts` / `config.example.json`: 增加 `ocr.resultsCsv` 与 OCR 后二次重命名/按类型分目录配置契约
+- [x] `src/ocr/types.ts`: OCR Provider 接口扩展为带文档格式/类型 meta,识别结果可返回 `documentType` 与 `invoiceType`
+- [x] 文档同步: `ARCHITECTURE.md` / `DESIGN.md` / `NEXT_STEPS.md` 明确 `invoices.csv` 是原始归档事实,`ocr-results.csv` 是识别事实
+
+## Phase 5.9 — 非 OCR/LLM 的离线整理闭环  [完成 2026-05-21]
+
+- [x] `src/rename/rename.ts`: 实现纯 CSV 驱动后处理,读取 `ocr-results.csv`,按模板二次命名或按类型分目录
+- [x] `mfh organize`: 新增 CLI 子命令,只复制原始归档文件到 `rename.organizedDir`,不移动/覆盖 `invoices/` 原件
+- [x] `organize-results.csv`: 写入复制/跳过/失败审计记录,便于后续 GUI 展示
+- [x] `src/config.ts` / `config.example.json`: 增加 `rename.organizedDir`

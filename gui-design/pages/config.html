@@ -129,7 +129,7 @@
             <!-- 输出目录 -->
             <div class="card">
                 <h3 class="card__title">输出目录</h3>
-                <p class="card__sub">已归档的 PDF、未识别的 .eml、清册 CSV 各自的落地路径。支持相对或绝对路径</p>
+                <p class="card__sub">首轮先保存所有 PDF/OFD 原件，OCR 和二次整理只在归档后运行。支持相对或绝对路径</p>
 
                 <div class="field">
                     <label class="field__label">归档目录</label>
@@ -148,7 +148,7 @@
             <!-- 命名规则 -->
             <div class="card">
                 <h3 class="card__title">命名规则</h3>
-                <p class="card__sub">支持占位符 <code class="code-inline">{seller} {amount} {date} {invoiceNo} {messageId}</code>。字段缺失会自动回退到 fallback 模板</p>
+                <p class="card__sub">首轮归档使用安全文件名与冲突后缀；OCR 后可按占位符 <code class="code-inline">{seller} {amount} {date} {invoiceNo} {documentType}</code> 二次重命名或分文件夹</p>
 
                 <div class="field">
                     <label class="field__label">主规则</label>
@@ -161,6 +161,20 @@
                     <div class="field__hint">示例：2026-05-20-a91f0e2c.pdf</div>
                 </div>
 
+                <div class="field-row">
+                    <div class="field">
+                        <label class="field__label">OCR 后二次重命名</label>
+                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
+                            <div class="check"></div>
+                            未启用
+                        </label>
+                    </div>
+                    <div class="field">
+                        <label class="field__label">按类型分目录</label>
+                        <input class="input input--mono" value="{documentType}">
+                    </div>
+                </div>
+
                 <div style="background: var(--ok-soft); border: 1px solid var(--ok); border-radius: var(--radius); padding: 12px 14px; margin-top: 12px;">
                     <div class="small muted" style="margin-bottom: 4px;">实时预览</div>
                     <div class="mono strong">国家电网-318.42.pdf</div>
@@ -170,14 +184,14 @@
             <!-- OCR 提供商 -->
             <div class="card">
                 <h3 class="card__title">OCR 提供商</h3>
-                <p class="card__sub">用于从 PDF 解析销售方、金额、票号、日期。未启用时所有发票走 fallback 命名</p>
+                <p class="card__sub">用于从已归档 PDF/OFD 解析销售方、金额、票号、日期和类型。未启用时原文件仍完整保留</p>
 
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">启用 OCR</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check is-on"></div>
-                            已启用
+                            <div class="check"></div>
+                            未启用 · 待接入
                         </label>
                     </div>
                     <div class="field">
@@ -199,6 +213,11 @@
                         <label class="field__label">Secret Key</label>
                         <input class="input input--mono" type="password" value="••••••••••••••••••••">
                     </div>
+                </div>
+
+                <div class="field">
+                    <label class="field__label">识别结果 CSV</label>
+                    <input class="input input--mono" value="./invoices/ocr/ocr-results.csv">
                 </div>
             </div>
 
