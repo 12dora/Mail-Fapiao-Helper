@@ -199,10 +199,10 @@ DISCOVERED                  // 来自 fetcher
 **当前默认 OCR Provider**：
 - `provider="efapiao"`，通过 `config.ocr.binaryPath` 寻找 `12dora/E-Fapiao-OCR` 发布的 `efapiao` 二进制。
 - `binaryPath="auto"` 时按 `process.platform/process.arch` 优先寻找 `vendor/efapiao/0.1.2/<platform-arch>/efapiao`；当前已内置 `darwin-arm64`，其他平台按同样目录补 release 资产即可。
-- `ocr.executionMode="auto"` 默认优先探活/启动本地 HTTP 服务：`efapiao serve --host <serviceHost> --port <servicePort> --workers <serviceWorkers>`，健康检查通过后对 `/v1/invoices/parse` 发送 multipart(`file`,`hint_type`,`ocr_mode`)；服务不可用时回退 CLI。
+- `ocr.executionMode="auto"` 默认优先探活/启动本地 HTTP 服务：`efapiao serve --host <serviceHost> --port <servicePort> --workers <serviceWorkers>`，健康检查通过后按 `ocr.batchSize` 对 `/v1/invoices/parse-batch` 发送 multipart(`files[]`,`hint_type=auto`,`ocr_mode=auto`)；服务不可用时回退 CLI。
 - `ocr.executionMode="serve"` 强制 HTTP 服务模式，不回退 CLI；`ocr.executionMode="cli"` 强制逐张 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`。
 - `ocr-results.csv` 保存 `transport/extractedBy/parserVersion/ocrVendor`，用于判断识别是否走了 `text_layer`、`qrcode` 或 OCR 兜底；旧版结果 CSV 会自动补空列后继续追加。
-- 当前已验证的 `efapiao v0.1.2 darwin-arm64` release 存在 `serve` 打包缺依赖问题：`ModuleNotFoundError: No module named 'uvicorn.middleware.wsgi'`。本项目会在 `auto` 模式下回退 CLI；上游修复 release 后无需改本项目配置。
+- 当前重新下载的 `efapiao v0.1.2 darwin-arm64` release 已验证 `serve`、`/v1/health`、`/v1/capabilities` 与 `/v1/invoices/parse-batch` 可用。
 
 **禁止**：写"自动发现/插件加载/装饰器注册"。一律手动 import + push。
 

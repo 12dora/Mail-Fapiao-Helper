@@ -28,4 +28,5 @@ export interface OcrResult {
 export interface OcrProvider {
   name: string;
   parse(data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<OcrResult>;
+  parseBatch?(items: Array<{ data: Buffer; meta: { format: DocumentFormat; documentType: DocumentType; filename: string } }>): Promise<OcrResult[]>;
 }

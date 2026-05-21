@@ -43,6 +43,7 @@
     "servicePort": 8000,
     "serviceWorkers": 1,
     "serviceStartupMs": 30000,
+    "batchSize": 16,
     "timeoutMs": 120000,
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": { "apiKey": "", "secretKey": "" }
