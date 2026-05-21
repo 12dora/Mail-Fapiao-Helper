@@ -73,12 +73,13 @@
 
 ## Phase 7（可选）：OCR + 智能重命名
 
-- OFD 行程单已先接入前置链路：附件或 ZIP 内 `.ofd` 会随同 PDF 归档，并写入 `invoices/ocr/ocr-pending.csv`
+- PDF/OFD 已先接入前置链路：附件或 ZIP 内文档会先归档，并写入 `invoices/ocr/ocr-pending.csv`
 - 后续接 OCR 引擎时，从 `ocr-pending.csv` 读取 `format=documentType=itinerary` 的文档，按用户给定规则识别行程单字段
 - 实现一个 Provider（建议百度智能云票据 OCR，文档清晰、有免费额度）
-- `ocr/baidu.ts` 返回 `{ seller, amount, date, invoiceNo }`
-- `rename/rename.ts`：按 `config.rename.rule` 模板渲染；字段缺失走 fallback
-- CSV 补字段
+- `ocr/<vendor>.ts` 返回 `{ seller, amount, date, invoiceNo, documentType, invoiceType }`
+- OCR 结果写入 `config.ocr.resultsCsv`
+- `mfh organize` / `rename/rename.ts` 已提供纯离线后处理：按 `config.rename.rule` 模板做可选二次重命名；字段缺失走 fallback；如果 `rename.organizeByType=true`，再按 `rename.typeDirRule` 复制聚类到不同文件夹
+- 原始归档文件与 `invoices.csv` 永不因 OCR/二次重命名失败而回滚
 
 ## Phase 8：打包
 

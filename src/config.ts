@@ -30,10 +30,15 @@ export interface Config {
   rename: {
     rule: string;
     fallback: string;
+    applyAfterOcr: boolean;
+    organizeByType: boolean;
+    typeDirRule: string;
+    organizedDir: string;
   };
   ocr: {
     enabled: boolean;
     provider: string;
+    resultsCsv: string;
     credentials: Record<string, string>;
   };
   llm: {
@@ -176,10 +181,25 @@ export function loadConfig(path: string): Config {
     rename: {
       rule: asString(requireField(raw, 'rename.rule'), 'rename.rule'),
       fallback: asString(requireField(raw, 'rename.fallback'), 'rename.fallback'),
+      applyAfterOcr: typeof (raw as { rename?: { applyAfterOcr?: unknown } }).rename?.applyAfterOcr === 'boolean'
+        ? ((raw as { rename: { applyAfterOcr: boolean } }).rename.applyAfterOcr)
+        : false,
+      organizeByType: typeof (raw as { rename?: { organizeByType?: unknown } }).rename?.organizeByType === 'boolean'
+        ? ((raw as { rename: { organizeByType: boolean } }).rename.organizeByType)
+        : false,
+      typeDirRule: typeof (raw as { rename?: { typeDirRule?: unknown } }).rename?.typeDirRule === 'string'
+        ? ((raw as { rename: { typeDirRule: string } }).rename.typeDirRule)
+        : '{documentType}',
+      organizedDir: typeof (raw as { rename?: { organizedDir?: unknown } }).rename?.organizedDir === 'string'
+        ? ((raw as { rename: { organizedDir: string } }).rename.organizedDir)
+        : './invoices/organized',
     },
     ocr: {
       enabled: asBool(requireField(raw, 'ocr.enabled'), 'ocr.enabled'),
       provider: asString(requireField(raw, 'ocr.provider'), 'ocr.provider'),
+      resultsCsv: typeof (raw as { ocr?: { resultsCsv?: unknown } }).ocr?.resultsCsv === 'string'
+        ? ((raw as { ocr: { resultsCsv: string } }).ocr.resultsCsv)
+        : './invoices/ocr/ocr-results.csv',
       credentials: (requireField(raw, 'ocr.credentials') as Record<string, string>),
     },
     llm: {

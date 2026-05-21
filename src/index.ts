@@ -11,6 +11,7 @@ import { loadState, saveState, type State } from './state.js';
 import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
+import { organizeFromOcrResults } from './rename/rename.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -21,6 +22,7 @@ Commands:
   fetch    Fetch matching mails as .eml into samples/raw/
   run      Process emails and extract invoices
   pending  Inspect manual processing queue
+  organize Copy archived invoices into optional OCR-based names/folders
 
 Options:
   -h, --help    Show this help
@@ -39,6 +41,22 @@ Commands:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   -h, --help           Show this help
+`;
+
+const ORGANIZE_USAGE = `mfh organize — copy archived invoices into optional OCR-based names/folders
+
+Usage:
+  mfh organize [options]
+
+Options:
+  --config <path>       Path to config.json                 (default: ./config.json)
+  --results-csv <path>  OCR result CSV to consume           (default: config.ocr.resultsCsv)
+  --out <dir>           Organized output directory          (default: config.rename.organizedDir)
+  -h, --help            Show this help
+
+Notes:
+  * This command does not call OCR or LLM providers.
+  * It never moves or overwrites the original files in config.paths.invoices.
 `;
 
 const FETCH_USAGE = `mfh fetch — fetch matching mails as .eml
@@ -70,6 +88,12 @@ interface FetchOpts {
   sinceOverride: string | undefined;
   untilOverride: string | undefined;
   dryRun: boolean;
+}
+
+interface OrganizeOpts {
+  configPath: string;
+  resultsCsv: string | undefined;
+  outDir: string | undefined;
 }
 
 function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
@@ -112,6 +136,23 @@ function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
   if (opts.sinceOverride && opts.untilOverride
       && Date.parse(opts.sinceOverride) > Date.parse(opts.untilOverride)) {
     throw new Error(`--since must be <= --until`);
+  }
+  return opts;
+}
+
+function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
+  const opts: OrganizeOpts = {
+    configPath: './config.json',
+    resultsCsv: undefined,
+    outDir: undefined,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
+    if (a === '--results-csv') { opts.resultsCsv = requireValue(argv, ++i, a); continue; }
+    if (a === '--out') { opts.outDir = requireValue(argv, ++i, a); continue; }
+    throw new Error(`unknown option: ${a}`);
   }
   return opts;
 }
@@ -533,6 +574,33 @@ async function cmdPending(argv: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdOrganize(argv: string[]): Promise<number> {
+  let parsed: OrganizeOpts | 'help';
+  try {
+    parsed = parseOrganizeArgs(argv);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n`);
+    process.stderr.write(ORGANIZE_USAGE);
+    return 2;
+  }
+  if (parsed === 'help') { process.stdout.write(ORGANIZE_USAGE); return 0; }
+
+  let cfg: Config;
+  try {
+    cfg = loadConfig(resolve(parsed.configPath));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 2;
+  }
+
+  const summary = organizeFromOcrResults(cfg, log, {
+    resultsCsv: parsed.resultsCsv,
+    outDir: parsed.outDir,
+  });
+  log.info(`Organize complete: scanned=${summary.scanned}, copied=${summary.copied}, skipped=${summary.skipped}, failed=${summary.failed}`);
+  return summary.failed > 0 ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '-h' || argv[0] === '--help') {
@@ -547,6 +615,8 @@ async function main(): Promise<number> {
       return cmdRun(rest);
     case 'pending':
       return cmdPending(rest);
+    case 'organize':
+      return cmdOrganize(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n`);
       process.stderr.write(ROOT_USAGE);
