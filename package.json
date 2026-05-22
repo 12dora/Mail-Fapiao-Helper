@@ -1,6 +1,6 @@
 {
   "name": "mail-fapiao-helper",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "从邮箱抓取发票邮件、自动下载并归档 PDF",
   "private": true,
   "type": "module",
