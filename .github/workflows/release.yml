@@ -24,10 +24,10 @@ jobs:
         include:
           - name: macOS arm64
             os: macos-15
-            command: npm run dist:mac
+            command: npm run dist:mac -- --publish never
           - name: Windows x64
             os: windows-2025
-            command: npm run dist:win
+            command: npm run dist:win -- --publish never
 
     steps:
       - name: Checkout
