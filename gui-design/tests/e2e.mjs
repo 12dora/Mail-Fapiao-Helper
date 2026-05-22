@@ -382,7 +382,7 @@ async function main() {
     if (afterFiles.invoice !== '2' || afterFiles.itinerary !== '1' || afterFiles.supporting !== '1') {
       fail(`获取发票文件后统计不正确：${JSON.stringify(afterFiles)}`);
     }
-    await page.getByRole('button', { name: '整理识别结果' }).click();
+    await page.getByRole('button', { name: '一键改名' }).first().click();
     await page.getByRole('button', { name: '开始识别发票文件' }).click();
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
     const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
@@ -449,7 +449,7 @@ async function main() {
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
     const rerunPayload = await page.evaluate(() => window.__bridgeCalls.filter((item) => item.name === 'runOcr').at(-1)?.payload);
     if (rerunPayload?.resetResults !== true || rerunPayload?.force !== true) fail(`重新识别没有通过 runOcr 原子重置：${JSON.stringify(rerunPayload)}`);
-    await page.getByRole('button', { name: '整理输出' }).click();
+    await page.getByRole('button', { name: '一键改名' }).click();
 
     await page.getByRole('link', { name: '邮件记录 2' }).click();
     await page.waitForURL(`${baseUrl}/pages/inbox.html`);

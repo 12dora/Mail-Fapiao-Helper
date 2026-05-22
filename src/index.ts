@@ -76,6 +76,8 @@ Options:
   --config <path>       Path to config.json                 (default: ./config.json)
   --results-csv <path>  OCR result CSV to consume           (default: config.ocr.resultsCsv)
   --out <dir>           Organized output directory          (default: config.rename.organizedDir)
+  --apply-rename        Force OCR-based renaming for this run (overrides config.rename.applyAfterOcr)
+  --no-apply-rename     Disable OCR-based renaming for this run
   -h, --help            Show this help
 
 Notes:
@@ -138,6 +140,7 @@ interface OrganizeOpts {
   configPath: string;
   resultsCsv: string | undefined;
   outDir: string | undefined;
+  applyRename: boolean | undefined;
 }
 
 interface OcrOpts {
@@ -199,6 +202,7 @@ function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
     configPath: './config.json',
     resultsCsv: undefined,
     outDir: undefined,
+    applyRename: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -206,6 +210,8 @@ function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--results-csv') { opts.resultsCsv = requireValue(argv, ++i, a); continue; }
     if (a === '--out') { opts.outDir = requireValue(argv, ++i, a); continue; }
+    if (a === '--apply-rename') { opts.applyRename = true; continue; }
+    if (a === '--no-apply-rename') { opts.applyRename = false; continue; }
     throw new Error(`unknown option: ${a}`);
   }
   return opts;
@@ -718,6 +724,7 @@ async function cmdOrganize(argv: string[]): Promise<number> {
   const summary = organizeFromOcrResults(cfg, log, {
     resultsCsv: parsed.resultsCsv,
     outDir: parsed.outDir,
+    applyRename: parsed.applyRename,
   });
   log.info(`Organize complete: scanned=${summary.scanned}, copied=${summary.copied}, skipped=${summary.skipped}, failed=${summary.failed}`);
   return summary.failed > 0 ? 1 : 0;

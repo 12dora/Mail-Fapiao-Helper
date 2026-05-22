@@ -1061,6 +1061,7 @@
         'developer-reset',
         'clear-secret',
         'organize',
+        'rename-organize',
         'run-pipeline',
         'rerun-pipeline',
         'pending-primary',
@@ -1073,6 +1074,7 @@
         'developer-reset': '正在删除…',
         'clear-secret': '正在清除…',
         'organize': '正在整理…',
+        'rename-organize': '正在改名…',
         'run-pipeline': '正在获取…',
         'rerun-pipeline': '正在重新获取…',
         'pending-primary': '处理中…',
@@ -1130,15 +1132,19 @@
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
         if (name === 'open-row-file') { await openRowFile(action); return; }
         if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
-        if (name === 'organize') {
+        if (name === 'organize' || name === 'rename-organize') {
             const fn = window.mfhBridge?.organize;
             if (!fn) { bridgeUnavailable(); return; }
-            const result = await fn({});
+            const applyRename = name === 'rename-organize';
+            const result = await fn({ applyRename });
             if (result?.summary) applySummary(result.summary);
             const empty = typeof result?.message === 'string' && result.message.includes('目前没有可整理');
             const kind = result?.ok ? (empty ? 'warn' : 'ok') : 'err';
-            const title = result?.ok ? (empty ? '没有可整理的识别结果' : '整理完成') : '运行失败';
-            showToast(title, result?.message || (result?.ok ? '已按当前规则整理输出。' : '请查看最近运行记录。'), kind);
+            const successTitle = applyRename ? '改名完成' : '整理完成';
+            const emptyTitle = '没有可整理的识别结果';
+            const title = result?.ok ? (empty ? emptyTitle : successTitle) : '运行失败';
+            const okFallback = applyRename ? '已按当前规则改名并整理输出。' : '已按当前规则整理输出。';
+            showToast(title, result?.message || (result?.ok ? okFallback : '请查看最近运行记录。'), kind);
             return;
         }
         if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: false }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
