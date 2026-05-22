@@ -66,18 +66,33 @@ interface SaveConfigPayload {
 }
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const dataDir = process.env.MFH_DATA_DIR
+  ? path.resolve(process.env.MFH_DATA_DIR)
+  : app.getPath('userData');
+const bundledConfigPath = path.join(rootDir, 'config.example.json');
 const configPath = process.env.MFH_CONFIG_PATH
   ? path.resolve(process.env.MFH_CONFIG_PATH)
-  : defaultConfigPath(rootDir);
+  : defaultConfigPath(dataDir);
 const statePath = process.env.MFH_STATE_PATH
   ? path.resolve(process.env.MFH_STATE_PATH)
-  : path.join(rootDir, 'state.json');
+  : path.join(dataDir, 'state.json');
 let mainWindow: BrowserWindow | undefined;
 let activeOcrProcess: ChildProcess | undefined;
 let activeOcrStopRequested = false;
 
 function uiPath(...parts: string[]): string {
   return path.join(rootDir, 'gui-design', ...parts);
+}
+
+function ensureUserDataConfig(): void {
+  fs.mkdirSync(dataDir, { recursive: true });
+  if (fs.existsSync(configPath)) return;
+  fs.copyFileSync(bundledConfigPath, configPath);
+  try {
+    fs.chmodSync(configPath, 0o600);
+  } catch {
+    // Best-effort on platforms that do not preserve POSIX file modes.
+  }
 }
 
 function createWindow(): void {
@@ -114,7 +129,7 @@ function asDateRange(value: unknown): DateRangePayload {
 function readMutableConfig(): Record<string, unknown> {
   const source = fs.existsSync(configPath)
     ? configPath
-    : path.join(rootDir, 'config.example.json');
+    : bundledConfigPath;
   return JSON.parse(fs.readFileSync(source, 'utf8')) as Record<string, unknown>;
 }
 
@@ -122,7 +137,7 @@ function readConfigForPaths(): Record<string, unknown> {
   try {
     return readMutableConfig();
   } catch {
-    return JSON.parse(fs.readFileSync(path.join(rootDir, 'config.example.json'), 'utf8')) as Record<string, unknown>;
+    return JSON.parse(fs.readFileSync(bundledConfigPath, 'utf8')) as Record<string, unknown>;
   }
 }
 
@@ -199,7 +214,7 @@ function writeOcrRunConfig(concurrency: number): string {
     servicePort: port,
     serviceUrl: `http://${host}:${port}`,
   };
-  const tmpPath = path.join(rootDir, '.mfh-cache', 'ocr-run-config.json');
+  const tmpPath = path.join(dataDir, '.mfh-cache', 'ocr-run-config.json');
   fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
   fs.writeFileSync(tmpPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
   return tmpPath;
@@ -228,11 +243,11 @@ function readFakeConfigPaths(): { samples: string; invoices: string; pending: st
   const ocr = asObject(cfg.ocr);
   const rename = asObject(cfg.rename);
   return {
-    samples: path.resolve(rootDir, typeof paths.samples === 'string' ? paths.samples : './samples/raw'),
-    invoices: path.resolve(rootDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices'),
-    pending: path.resolve(rootDir, typeof paths.pending === 'string' ? paths.pending : './pending'),
-    resultsCsv: path.resolve(rootDir, typeof ocr.resultsCsv === 'string' ? ocr.resultsCsv : './invoices/ocr/ocr-results.csv'),
-    organizedDir: path.resolve(rootDir, typeof rename.organizedDir === 'string' ? rename.organizedDir : './invoices/organized'),
+    samples: path.resolve(dataDir, typeof paths.samples === 'string' ? paths.samples : './samples/raw'),
+    invoices: path.resolve(dataDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices'),
+    pending: path.resolve(dataDir, typeof paths.pending === 'string' ? paths.pending : './pending'),
+    resultsCsv: path.resolve(dataDir, typeof ocr.resultsCsv === 'string' ? ocr.resultsCsv : './invoices/ocr/ocr-results.csv'),
+    organizedDir: path.resolve(dataDir, typeof rename.organizedDir === 'string' ? rename.organizedDir : './invoices/organized'),
   };
 }
 
@@ -275,9 +290,9 @@ function clearOcrResultsAndResetQueue(): void {
   const cfg = readConfigForPaths();
   const ocr = asObject(cfg.ocr);
   const paths = asObject(cfg.paths);
-  const target = path.resolve(rootDir, typeof ocr.resultsCsv === 'string' ? ocr.resultsCsv : './invoices/ocr/ocr-results.csv');
+  const target = path.resolve(dataDir, typeof ocr.resultsCsv === 'string' ? ocr.resultsCsv : './invoices/ocr/ocr-results.csv');
   const pendingCsv = path.resolve(
-    rootDir,
+    dataDir,
     typeof paths.invoices === 'string' ? paths.invoices : './invoices',
     'ocr',
     'ocr-pending.csv',
@@ -644,10 +659,12 @@ function runCli(command: string, args: string[], opts: { progress?: boolean; ope
     }
     const env = {
       ...process.env,
+      MFH_APP_ROOT: rootDir,
+      MFH_RESOURCE_ROOT: process.resourcesPath,
       ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
     };
     const child = spawn(process.execPath, [path.join(rootDir, 'dist', 'index.js'), command, ...args], {
-      cwd: rootDir,
+      cwd: dataDir,
       env,
     });
     const stdout: Buffer[] = [];
@@ -765,14 +782,14 @@ function ocrRunMessage(result: { stdout: string; stderr: string }): string {
 }
 
 function appendHistory(entry: Omit<RunHistoryEntry, 'id' | 'time'>): RunHistoryEntry {
-  const file = historyPath(rootDir);
+  const file = historyPath(dataDir);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const next: RunHistoryEntry = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     time: new Date().toISOString(),
     ...entry,
   };
-  const history = [next, ...readRunHistory(rootDir)].slice(0, 30);
+  const history = [next, ...readRunHistory(dataDir)].slice(0, 30);
   fs.writeFileSync(file, `${JSON.stringify(history, null, 2)}\n`, { mode: 0o600 });
   return next;
 }
@@ -796,18 +813,18 @@ function fetchArgs(payload: DateRangePayload): string[] {
   const cfg = readConfigForPaths();
   const paths = asObject(cfg.paths);
   const samples = typeof paths.samples === 'string' && paths.samples.length > 0 ? paths.samples : './samples/raw';
-  args.push('--out', path.resolve(rootDir, samples));
+  args.push('--out', path.resolve(dataDir, samples));
   if (payload.from) args.push('--since', payload.from);
   if (payload.to) args.push('--until', payload.to);
   if (payload.dryRun) args.push('--dry-run');
   return args;
 }
 
-ipcMain.handle('mfh:get-summary', () => loadAppSummary(configPath, rootDir));
+ipcMain.handle('mfh:get-summary', () => loadAppSummary(configPath, dataDir, bundledConfigPath));
 
 ipcMain.handle('mfh:get-config', () => {
-  const { cfg, error } = loadGuiConfig(configPath);
-  return { configPath, configExists: fs.existsSync(configPath), configError: error, config: cfg };
+  const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
+  return { configPath, configExists: fs.existsSync(configPath), configError: error, config: cfg, dataDir };
 });
 
 ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
@@ -821,7 +838,7 @@ ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
   mainWindow?.webContents.executeJavaScript(`window.__mfhLastFetchArgs = ${JSON.stringify(args)}`).catch(() => {});
   const result = await runCli('fetch', args, { progress: true });
   historyEntry('fetch', '获取邮件', startedAt, result);
-  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, rootDir) };
+  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
 ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
@@ -836,13 +853,13 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
   const startedAt = Date.now();
   const result = await runCli('run', args, { operation: 'files' });
   historyEntry('pipeline', raw.onlyMail ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
-  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, rootDir) };
+  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
-function pendingOcrWorkCount(summary = loadAppSummary(configPath, rootDir)): number {
+function pendingOcrWorkCount(summary = loadAppSummary(configPath, dataDir, bundledConfigPath)): number {
   const cfg = readConfigForPaths();
   const paths = asObject(cfg.paths);
-  const invoicesDir = path.resolve(rootDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices');
+  const invoicesDir = path.resolve(dataDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices');
   const pendingCsv = path.join(invoicesDir, 'ocr', 'ocr-pending.csv');
   const rows = readCsvRows(pendingCsv);
   if (rows.length === 0) return 0;
@@ -852,7 +869,7 @@ function pendingOcrWorkCount(summary = loadAppSummary(configPath, rootDir)): num
 
 ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   const raw = asObject(payload);
-  const summary = loadAppSummary(configPath, rootDir);
+  const summary = loadAppSummary(configPath, dataDir, bundledConfigPath);
   const pendingTotal = pendingOcrWorkCount(summary);
   if (pendingTotal === 0) {
     sendOperationProgress({
@@ -908,17 +925,17 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   const stopped = activeOcrStopRequested || result.code === 130;
   if (stopped) {
     activeOcrStopRequested = false;
-    return { ok: false, stopped: true, ...result, message: '识别已停止。', summary: loadAppSummary(configPath, rootDir) };
+    return { ok: false, stopped: true, ...result, message: '识别已停止。', summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
   }
   activeOcrStopRequested = false;
-  return { ok: result.code === 0, ...result, message: ocrRunMessage(result), summary: loadAppSummary(configPath, rootDir) };
+  return { ok: result.code === 0, ...result, message: ocrRunMessage(result), summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
 ipcMain.handle('mfh:organize', async () => {
   const startedAt = Date.now();
   const result = await runCli('organize', ['--config', configPath]);
   historyEntry('organize', '整理输出文件', startedAt, result);
-  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, rootDir) };
+  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
 ipcMain.handle('mfh:stop-ocr', () => {
@@ -930,8 +947,8 @@ ipcMain.handle('mfh:stop-ocr', () => {
 
 ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
-  const target = typeof raw.path === 'string' ? raw.path : rootDir;
-  const resolved = path.resolve(rootDir, target);
+  const target = typeof raw.path === 'string' ? raw.path : dataDir;
+  const resolved = path.resolve(dataDir, target);
   if (raw.reveal === true) {
     shell.showItemInFolder(resolved);
     return { ok: true, error: '' };
@@ -1005,22 +1022,25 @@ ipcMain.handle('mfh:developer-reset', () => {
     ocr.resultsCsv,
     rename.organizedDir,
     statePath,
-    historyPath(rootDir),
+    historyPath(dataDir),
   ];
   const removed: string[] = [];
   for (const value of candidates) {
     if (typeof value !== 'string' || value.length === 0) continue;
-    const target = path.resolve(rootDir, value);
-    if (!target.startsWith(rootDir)) continue;
+    const target = path.resolve(dataDir, value);
+    if (!target.startsWith(dataDir)) continue;
     if (target === configPath) continue;
     fs.rmSync(target, { recursive: true, force: true });
-    removed.push(path.relative(rootDir, target) || target);
+    removed.push(path.relative(dataDir, target) || target);
   }
-  fs.mkdirSync(path.join(rootDir, '.mfh-cache'), { recursive: true });
-  return { ok: true, removed: Array.from(new Set(removed)), summary: loadAppSummary(configPath, rootDir) };
+  fs.mkdirSync(path.join(dataDir, '.mfh-cache'), { recursive: true });
+  return { ok: true, removed: Array.from(new Set(removed)), summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  ensureUserDataConfig();
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

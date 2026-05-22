@@ -30,3 +30,12 @@ node dist/index.js ocr summary \
 ```
 
 预期：`OCR 失败` 从 1 降到 0，或错误原因从 `rule_unhandled` 收敛为更明确的 OCR vendor/渲染失败。
+
+## 2026-05-22: v0.1.3 API 复核结论
+
+- 最新稳定 release: `v0.1.3`，发布时间 `2026-05-22T04:36:16Z`。
+- 新 API 能力: `hint_type=image`，支持 JPEG / PNG / GIF / WEBP / BMP；图片发票和图片航空行程单需要配置 OCR vendor。
+- 新分流字段: 错误和成功响应都可能携带 `engine.ocr_required`、`engine.ocr_enabled`、`engine.ocr_vendor`，下游可据此区分“需要 OCR”、“未配置 OCR”与“规则无法覆盖”。
+- 批量接口语义: `/v1/invoices/parse-batch` 对单个文件失败仍返回 HTTP 200，由 `items[].status/code/message` 判断逐项结果；本项目现有批量适配保持兼容。
+- Release 资产: 上游发布 `darwin-arm64`、`linux-arm64`、`linux-x86_64`、`windows-x86_64` 的 `lite` 与 `with-model` 包；没有 `darwin-x86_64` release 资产。
+- 本项目策略: 桌面版默认内置 macOS arm64 和 Windows x64 的 `lite` 包；用户可替换为同架构 `with-model` 包，程序自动探测二进制旁 `models/` 并启用 `cnocr`。Linux 暂不作为桌面安装包目标。

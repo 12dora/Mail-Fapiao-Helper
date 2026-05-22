@@ -33,6 +33,11 @@ export function classifyDocument(artifact: PdfArtifact, format: DocumentFormat):
       ? { documentType: 'itinerary' }
       : { documentType: 'invoice' };
   }
+  if (format === 'image') {
+    return looksLikeItineraryText(text)
+      ? { documentType: 'itinerary' }
+      : { documentType: 'invoice' };
+  }
 
   const supportType = supportingTypeForPdf(text);
   if (supportType) return { documentType: 'supporting', supportType };

@@ -24,6 +24,12 @@ function isZipAttachment(att: { contentType?: string; filename?: string }): bool
   return false;
 }
 
+function isImageAttachment(att: { contentType?: string; filename?: string }): boolean {
+  if (att.contentType?.startsWith('image/')) return true;
+  if (att.filename && /\.(png|jpe?g|gif|webp|bmp)$/i.test(att.filename)) return true;
+  return false;
+}
+
 function basename(value: string): string {
   try {
     const parsed = new URL(value);
@@ -150,7 +156,8 @@ const attachmentExtractor: Extractor = {
           for (const entry of entries) {
             if (entry.isDirectory) continue;
             const entryName = entry.name.toLowerCase();
-            if (!entryName.endsWith('.pdf') && !entryName.endsWith('.ofd')) continue;
+            const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(entryName);
+            if (!entryName.endsWith('.pdf') && !entryName.endsWith('.ofd') && !isImage) continue;
 
             const content = entry.getData();
             const isOfd = entryName.endsWith('.ofd');
@@ -158,19 +165,30 @@ const attachmentExtractor: Extractor = {
               data: content,
               source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
               suggestedName: entry.name,
-              format: isOfd ? 'ofd' : 'pdf',
+              format: isImage ? 'image' : (isOfd ? 'ofd' : 'pdf'),
               documentType: isOfd && looksLikeOfdItinerary({
                 data: content,
                 source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
                 suggestedName: entry.name,
                 format: 'ofd',
               }) ? 'itinerary' : 'invoice',
-              requiresOcr: isOfd,
+              requiresOcr: true,
             });
           }
         } catch (err) {
           ctx.log.warn(`Failed to extract ZIP ${att.filename}: ${err}`);
         }
+      } else if (isImageAttachment(att)) {
+        pdfs.push({
+          data: att.content,
+          source: att.filename || 'unnamed-image',
+          suggestedName: att.filename,
+          format: 'image',
+          documentType: looksLikeItinerary({ data: att.content, source: att.filename || 'unnamed-image', suggestedName: att.filename, format: 'image' })
+            ? 'itinerary'
+            : 'invoice',
+          requiresOcr: true,
+        });
       }
     }
 

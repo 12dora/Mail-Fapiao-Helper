@@ -59,13 +59,13 @@ type ExtractResult =
   | { kind: 'manual'; reason: string }
   | { kind: 'skip' };
 
-type DocumentFormat = 'pdf' | 'ofd';
+type DocumentFormat = 'pdf' | 'ofd' | 'image';
 type DocumentType = 'invoice' | 'itinerary' | 'supporting';
 interface DocumentArtifact {
   data: Buffer;
   source: string;          // 附件名或来源 URL,排错用
   suggestedName?: string;  // 提取器若已知则给,否则 rename 阶段决定
-  format?: DocumentFormat; // 默认 pdf; OFD 行程单必须显式 ofd
+  format?: DocumentFormat; // 默认 pdf; OFD/图片必须显式标注
   documentType?: DocumentType; // supporting = 已归档但默认不送 OCR 的支撑材料
   requiresOcr?: boolean;   // 提取器可显式标记；pipeline 会把所有归档文档写入 OCR 队列
 }
@@ -199,11 +199,12 @@ DISCOVERED                  // 来自 fetcher
 
 **当前默认 OCR Provider**：
 - `provider="efapiao"`，通过 `config.ocr.binaryPath` 寻找 `12dora/E-Fapiao-OCR` 发布的 `efapiao` 二进制。
-- `binaryPath="auto"` 时按 `process.platform/process.arch` 优先寻找 `vendor/efapiao/0.1.2/<platform-arch>/efapiao`；当前已内置 `darwin-arm64`，其他平台按同样目录补 release 资产即可。
-- `ocr.executionMode="auto"` 默认优先探活/启动本地 HTTP 服务：`efapiao serve --host <serviceHost> --port <servicePort> --workers <serviceWorkers>`，健康检查通过后按 `ocr.batchSize` 对 `/v1/invoices/parse-batch` 发送 multipart(`files[]`,`hint_type=auto`,`ocr_mode=auto`)；服务不可用时回退 CLI。
+- `binaryPath="auto"` 时按 `process.platform/process.arch` 优先寻找 `vendor/efapiao/0.1.3/<platform-arch>/efapiao`；桌面版当前只内置 macOS arm64 和 Windows x64 的 upstream `lite` 包。上游未发布 `darwin-x86_64` 资产，Intel Mac 走 PATH 或自行构建；Linux 暂不作为桌面安装包目标。
+- 默认集成 `lite` 包，不附带 CnOCR 模型；用户可将同架构目录替换为 upstream `with-model` 包，或把 `models/` 放到二进制旁。程序会自动探测 `models/` 并设置 `EFAPIAO_OCR_VENDOR=cnocr`；显式 `EFAPIAO_OCR_VENDOR` 或 `ocr.credentials.ocrVendor` 优先级更高。
+- `ocr.executionMode="auto"` 默认优先探活/启动本地 HTTP 服务：`efapiao serve --host <serviceHost> --port <servicePort> --workers <serviceWorkers>`，健康检查通过后按 `ocr.batchSize` 对 `/v1/invoices/parse-batch` 发送 multipart(`files[]`,`hint_type=auto`,`ocr_mode=auto`)；服务不可用时回退 CLI。若 `ocr.credentials.apiKey` 或 `EFAPIAO_API_KEY` 存在，会对解析请求发送 `X-API-Key`。
 - `ocr.executionMode="serve"` 强制 HTTP 服务模式，不回退 CLI；`ocr.executionMode="cli"` 强制逐张 `efapiao parse - --hint <pdf|ofd> --ocr-mode auto`。
 - `ocr-results.csv` 保存 `transport/extractedBy/parserVersion/ocrVendor`，用于判断识别是否走了 `text_layer`、`qrcode` 或 OCR 兜底；旧版结果 CSV 会自动补空列后继续追加。
-- 当前重新下载的 `efapiao v0.1.2 darwin-arm64` release 已验证 `serve`、`/v1/health`、`/v1/capabilities` 与 `/v1/invoices/parse-batch` 可用。
+- `efapiao v0.1.3` 新增图片输入（JPEG/PNG/GIF/WEBP/BMP）和 `engine.ocr_required/ocr_enabled/ocr_vendor` 分流信息；本项目会把图片附件/ZIP 内图片写入 OCR 队列，并在结果 CSV 中保留 `ocrVendor`、`extractedBy`、`parserVersion`。
 - `mfh ocr run --allow-parse-failures` 会在 OCR 服务/程序完成且单行失败已写入结果时返回 0；默认仍在存在单行业务失败时返回 1，便于交互式发现问题。
 - `mfh ocr summary [--json]` 是 GUI 和人工排障入口：读取 `ocr-pending.csv` 与 `ocr-results.csv`，输出 `recognized / failed / ignored / pending`、文档类型、支撑材料原因和失败原因示例。
 - `mfh pending list [--json]` 是 GUI 手工队列入口：读取 `pending.csv`，把原始 reason 归并为 `retry / refresh_link / manual_archive / ignore`，并保留每封邮件的 hash、主题、发件人和日期。

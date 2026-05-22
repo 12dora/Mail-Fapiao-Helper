@@ -10,7 +10,7 @@ export interface Ctx {
   http: typeof fetch;
 }
 
-export type DocumentFormat = 'pdf' | 'ofd';
+export type DocumentFormat = 'pdf' | 'ofd' | 'image';
 export type DocumentType = 'invoice' | 'itinerary' | 'supporting';
 
 export interface DocumentArtifact {

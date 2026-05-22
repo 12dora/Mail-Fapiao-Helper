@@ -12,17 +12,25 @@ vendor/efapiao/<version>/<platform-arch>/efapiao.exe
 Supported platform directory names used by `ocr.binaryPath = "auto"`:
 
 - `darwin-arm64`
-- `darwin-x86_64`
-- `linux-x86_64`
-- `linux-arm64`
 - `windows-x86_64`
 
 Currently bundled:
 
-- `0.1.2/darwin-arm64/efapiao`
+- `0.1.3/darwin-arm64/efapiao`
+- `0.1.3/windows-x86_64/efapiao.exe`
 
-The bundled `darwin-arm64` binary was refreshed from the upstream `v0.1.2`
-release after the `efapiao serve` packaging fix. It has been verified with
-`--version`, `capabilities`, `/v1/health`, and `/v1/invoices/parse-batch`.
+These are the upstream `v0.1.3` `lite` release assets. `lite` intentionally
+does not include CnOCR models, keeping the default bundle smaller and suitable
+for rule-engine parsing, Tencent OCR, or HTTP OCR.
 
-For missing platforms, place the matching upstream release asset in the same layout. If no bundled binary exists for the current platform, the app falls back to `efapiao` from `PATH`.
+To use upstream `with-model` packages, replace the matching platform directory
+with the extracted `with-model` contents or place its `models/` directory beside
+the `efapiao` binary. The app auto-detects that directory and sets
+`EFAPIAO_OCR_VENDOR=cnocr` unless the user explicitly configured another OCR
+vendor.
+
+Upstream `v0.1.3` does not publish a `darwin-x86_64` release asset. Intel Mac
+users should build it upstream or put an `efapiao` binary on `PATH`.
+
+Linux binaries are intentionally not bundled because the desktop app currently
+targets macOS and Windows only.

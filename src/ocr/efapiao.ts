@@ -16,6 +16,7 @@ interface EfapiaoPayload {
   engine?: Record<string, unknown>;
   document_type?: string | null;
   invoice_type?: string | null;
+  format?: string | null;
 }
 
 interface EfapiaoBatchPayload {
@@ -34,7 +35,7 @@ interface ServiceState {
   failureReason?: string;
 }
 
-const EFAPIAO_VERSION = '0.1.2';
+const EFAPIAO_VERSION = '0.1.3';
 const serviceStates = new Map<string, ServiceState>();
 
 function platformArch(): string {
@@ -51,10 +52,33 @@ function repoRoot(): string {
   return path.resolve(here, '..', '..');
 }
 
+function resourceRoots(): string[] {
+  return [
+    process.env.MFH_RESOURCE_ROOT,
+    process.env.MFH_APP_ROOT,
+    repoRoot(),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function findBinaryInDir(dir: string, exe: string): string | undefined {
+  const candidate = path.join(dir, exe);
+  if (fs.existsSync(candidate)) return candidate;
+  if (!fs.existsSync(dir)) return undefined;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const nested = path.join(dir, entry.name, exe);
+    if (fs.existsSync(nested)) return nested;
+  }
+  return undefined;
+}
+
 function bundledBinaryPath(): string | undefined {
   const exe = process.platform === 'win32' ? 'efapiao.exe' : 'efapiao';
-  const candidate = path.join(repoRoot(), 'vendor', 'efapiao', EFAPIAO_VERSION, platformArch(), exe);
-  return fs.existsSync(candidate) ? candidate : undefined;
+  for (const root of resourceRoots()) {
+    const found = findBinaryInDir(path.join(root, 'vendor', 'efapiao', EFAPIAO_VERSION, platformArch()), exe);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function binaryPath(cfg: Config): string {
@@ -62,14 +86,30 @@ function binaryPath(cfg: Config): string {
   return bundledBinaryPath() ?? 'efapiao';
 }
 
+function binaryDir(cfg: Config): string | undefined {
+  const bin = binaryPath(cfg);
+  if (bin === 'efapiao') return undefined;
+  return path.dirname(bin);
+}
+
+function hasBundledModels(cfg: Config): boolean {
+  const dir = binaryDir(cfg);
+  return dir ? fs.existsSync(path.join(dir, 'models')) : false;
+}
+
 function efapiaoEnv(cfg: Config): NodeJS.ProcessEnv {
   const credentials = cfg.ocr.credentials ?? {};
-  const ocrVendor = credentials.tencentSecretId || credentials.tencentSecretKey
-    ? 'tencent'
-    : (process.env.EFAPIAO_OCR_VENDOR ?? 'none');
+  const configuredVendor = process.env.EFAPIAO_OCR_VENDOR || credentials.ocrVendor;
+  const ocrVendor = configuredVendor
+    || (credentials.tencentSecretId || credentials.tencentSecretKey ? 'tencent' : '')
+    || (hasBundledModels(cfg) ? 'cnocr' : 'none');
   return {
     ...process.env,
     EFAPIAO_OCR_VENDOR: ocrVendor,
+    EFAPIAO_API_KEY: credentials.apiKey || process.env.EFAPIAO_API_KEY,
+    EFAPIAO_CNOCR_MODEL_PROFILE: credentials.cnocrModelProfile || process.env.EFAPIAO_CNOCR_MODEL_PROFILE,
+    EFAPIAO_CNOCR_DET_MODEL: credentials.cnocrDetModel || process.env.EFAPIAO_CNOCR_DET_MODEL,
+    EFAPIAO_CNOCR_REC_MODEL: credentials.cnocrRecModel || process.env.EFAPIAO_CNOCR_REC_MODEL,
     TENCENTCLOUD_SECRET_ID: credentials.tencentSecretId || credentials.secretId || process.env.TENCENTCLOUD_SECRET_ID,
     TENCENTCLOUD_SECRET_KEY: credentials.tencentSecretKey || credentials.secretKey || process.env.TENCENTCLOUD_SECRET_KEY,
     TENCENTCLOUD_REGION: credentials.tencentRegion || credentials.region || process.env.TENCENTCLOUD_REGION,
@@ -99,6 +139,7 @@ function nestedRecord(v: unknown, key: string): Record<string, unknown> {
 }
 
 function hintFor(format: DocumentFormat): string {
+  if (format === 'image') return 'image';
   return format === 'ofd' ? 'ofd' : 'pdf';
 }
 
@@ -156,6 +197,11 @@ async function healthOk(cfg: Config): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function serviceHeaders(cfg: Config): Record<string, string> | undefined {
+  const apiKey = cfg.ocr.credentials?.apiKey || process.env.EFAPIAO_API_KEY;
+  return apiKey ? { 'X-API-Key': apiKey } : undefined;
 }
 
 async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceState): Promise<void> {
@@ -231,6 +277,7 @@ async function runService(
 
   const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse`, {
     method: 'POST',
+    headers: serviceHeaders(cfg),
     body: form,
     signal: timeoutSignal(cfg.ocr.timeoutMs),
   });
@@ -263,6 +310,7 @@ async function runServiceBatch(
 
   const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse-batch`, {
     method: 'POST',
+    headers: serviceHeaders(cfg),
     body: form,
     signal: timeoutSignal(cfg.ocr.timeoutMs),
   });
@@ -342,7 +390,7 @@ function okResult(payload: EfapiaoPayload, fallbackDocumentType: DocumentType, t
   const source = nestedRecord(data, 'source');
   const documentTypeRaw = stringValue(data.document_type) || stringValue(payload.document_type);
   const invoiceType = stringValue(data.invoice_type) || stringValue(payload.invoice_type);
-  const sourceFormat = stringValue(source.format);
+  const sourceFormat = stringValue(source.format) || stringValue(payload.format);
   return {
     status: 'success',
     fields: {
@@ -355,7 +403,7 @@ function okResult(payload: EfapiaoPayload, fallbackDocumentType: DocumentType, t
     },
     error: '',
     source: {
-      format: sourceFormat === 'ofd' ? 'ofd' : 'pdf',
+      format: sourceFormat === 'ofd' || sourceFormat === 'image' ? sourceFormat : 'pdf',
       parserVersion: stringValue(source.parser_version),
       extractedBy: stringValue(source.extracted_by),
       ocrVendor: stringValue(source.ocr_vendor) || null,

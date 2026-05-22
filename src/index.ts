@@ -35,6 +35,24 @@ Options:
 Run 'mfh <command> --help' for command-specific options.
 `;
 
+async function launchBrowser(cfg: Config): Promise<Browser> {
+  const launchOptions = {
+    headless: cfg.playwright.headless,
+    timeout: cfg.playwright.timeoutMs,
+  };
+  const desktopApp = process.env.MFH_APP_ROOT || process.env.MFH_RESOURCE_ROOT;
+  if (desktopApp) {
+    for (const channel of ['chrome', 'msedge'] as const) {
+      try {
+        return await chromium.launch({ ...launchOptions, channel });
+      } catch {
+        // Try the next installed system browser before falling back.
+      }
+    }
+  }
+  return chromium.launch(launchOptions);
+}
+
 const PENDING_USAGE = `mfh pending — inspect manual processing queue
 
 Usage:
@@ -490,13 +508,10 @@ async function cmdRun(argv: string[]): Promise<number> {
   let browserPromise: Promise<Browser> | undefined;
   const getBrowser = async (): Promise<Browser> => {
     if (!browserInstance) {
-      browserPromise ??= chromium.launch({
-        headless: cfg.playwright.headless,
-        timeout: cfg.playwright.timeoutMs,
-      }).catch((err) => {
+      browserPromise ??= launchBrowser(cfg).catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(
-          `网页自动下载浏览器启动失败。桌面版会随应用准备浏览器；请重新安装或更新应用后再试。原始错误：${message}`,
+          `网页自动下载浏览器启动失败。请安装最新版 Chrome 或 Microsoft Edge 后重试。原始错误：${message}`,
         );
       });
       browserInstance = await browserPromise;

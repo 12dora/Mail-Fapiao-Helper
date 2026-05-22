@@ -3,6 +3,7 @@ node_modules/
 
 # build
 dist/
+release/
 *.tsbuildinfo
 
 # 用户态运行产物（含真实邮件内容、凭证、密码）

@@ -50,6 +50,8 @@
     "resultsCsv": "./invoices/ocr/ocr-results.csv",
     "credentials": {
       "apiKey": "",
+      "ocrVendor": "",
+      "cnocrModelProfile": "invoice-lite",
       "secretKey": "",
       "tencentSecretId": "",
       "tencentSecretKey": "",
