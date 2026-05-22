@@ -185,6 +185,7 @@
                 tab.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('is-active'));
                 tab.classList.add('is-active');
                 renderLibraryRows();
+                if (tab.dataset.pendingTab) renderPendingGroups();
             }
 
             // Filter chip toggle
@@ -730,7 +731,7 @@
         const query = String(scope.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
         const activeTab = scope.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
         const seller = scope.querySelector('[data-library-seller]')?.value || '';
-        const failedOnly = scope.querySelector('[data-filter="library-failed"]')?.classList.contains('is-active');
+        const failedOnly = scope.querySelector('[data-filter="library-failed"]')?.classList.contains('is-on');
         const rows = sortRows((window.FPH.libraryRows || []).filter((row) => {
             const haystack = `${row.seller || ''} ${row.invoiceNo || ''} ${row.amount || ''} ${row.filename || ''} ${row.error || ''}`.toLowerCase();
             if (query && !haystack.includes(query)) return false;
@@ -777,6 +778,7 @@
     }
 
     function applyPendingSummary(pending) {
+        window.FPH.pending = pending;
         text('[data-pending="total"]', fmtInt(pending.total));
         const groups = pending.groups || [];
         document.querySelectorAll('[data-pending-stat]').forEach((el, index) => {
@@ -795,8 +797,21 @@
             if (value) value.textContent = fmtInt(group.count);
             if (delta) delta.textContent = action;
         });
-        const mount = document.querySelector('[data-pending-groups]');
+        renderPendingGroups();
+    }
+
+    function renderPendingGroups() {
+        const mount = activeMain().querySelector('[data-pending-groups]');
         if (!mount) return;
+        const pending = window.FPH.pending || {};
+        const activeTab = activeMain().querySelector('[data-pending-tab].is-active')?.dataset.pendingTab || 'all';
+        const groups = (pending.groups || []).filter((group) => {
+            if (activeTab === 'all') return true;
+            if (activeTab === 'manual_archive') {
+                return !['refresh_link', 'retry', 'ignore'].includes(group.action);
+            }
+            return group.action === activeTab;
+        });
         mount.innerHTML = groups.map((group) => {
             const [primary, note] = actionText(group.action);
             const rows = (group.rows || []).slice(0, 6).map((row) => `
@@ -841,10 +856,28 @@
         set('[data-config="imap.host"]', cfg.imap?.host);
         set('[data-config="imap.port"]', cfg.imap?.port);
         set('[data-config="imap.user"]', cfg.imap?.user);
+        const mailboxSelect = document.querySelector('[data-config="imap.mailbox"]');
+        if (mailboxSelect && Array.isArray(cfg.imap?.mailbox)) {
+            const selected = new Set(cfg.imap.mailbox);
+            Array.from(mailboxSelect.options).forEach((opt) => {
+                opt.selected = selected.has(opt.value);
+            });
+        }
+        document.querySelectorAll('[data-config-check="imap.tls"]').forEach((el) => {
+            el.classList.toggle('is-on', cfg.imap?.tls !== false);
+        });
         set('[data-config="filter.keywords"]', Array.isArray(cfg.filter?.keywords) ? cfg.filter.keywords.join(', ') : '');
         set('[data-config="paths.samples"]', cfg.paths?.samples);
         set('[data-config="paths.invoices"]', cfg.paths?.invoices);
         set('[data-config="paths.pending"]', cfg.paths?.pending);
+        const setText = (selector, value) => {
+            document.querySelectorAll(selector).forEach((el) => {
+                if (value) el.textContent = value;
+            });
+        };
+        setText('[data-settings-path="samples"]', cfg.paths?.samples);
+        setText('[data-settings-path="invoices"]', cfg.paths?.invoices);
+        setText('[data-settings-path="pending"]', cfg.paths?.pending);
         set('[data-config="output.csv"]', cfg.output?.csv);
         set('[data-config="rename.rule"]', cfg.rename?.rule);
         set('[data-config="rename.fallback"]', cfg.rename?.fallback);
@@ -852,6 +885,14 @@
         document.querySelectorAll('[data-config-check="rename.avoidConflictBeforeOcr"]').forEach((el) => {
             el.classList.toggle('is-on', cfg.rename?.avoidConflictBeforeOcr !== false);
         });
+        document.querySelectorAll('[data-config-check="rename.applyAfterOcr"]').forEach((el) => {
+            el.classList.toggle('is-on', cfg.rename?.applyAfterOcr === true);
+        });
+        document.querySelectorAll('[data-config-check="rename.organizeByType"]').forEach((el) => {
+            el.classList.toggle('is-on', cfg.rename?.organizeByType === true);
+        });
+        set('[data-config="network.retries"]', cfg.network?.retries);
+        set('[data-config="network.retryDelayMs"]', cfg.network?.retryDelayMs);
         set('[data-config="ocr.provider"]', cfg.ocr?.enabled === false ? 'none' : (cfg.ocr?.provider || 'efapiao'));
         set('[data-config="ocr.ocrMode"]', cfg.ocr?.ocrMode || 'auto');
         set('[data-config="ocr.executionMode"]', cfg.ocr?.executionMode);
@@ -869,6 +910,15 @@
             const q = encodeURIComponent(event.currentTarget.value.trim());
             if (!q) return;
             showPage('library', `library.html?q=${q}`);
+        });
+        document.addEventListener('keydown', (event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+                const input = document.querySelector('[data-global-search]');
+                if (!input) return;
+                event.preventDefault();
+                input.focus();
+                input.select?.();
+            }
         });
         const params = new URLSearchParams(window.location.search);
         const q = params.get('q');
@@ -898,8 +948,24 @@
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
         if (name === 'open-row-file') { await openRowFile(action); return; }
         if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
-        if (name === 'organize') { await runBridgeAction('organize', {}, '整理完成', '已按当前规则整理输出。'); return; }
-        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: true }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
+        if (name === 'organize') {
+            const fn = window.mfhBridge?.organize;
+            if (!fn) { bridgeUnavailable(); return; }
+            const result = await fn({});
+            if (result?.summary) applySummary(result.summary);
+            const empty = typeof result?.message === 'string' && result.message.includes('目前没有可整理');
+            const kind = result?.ok ? (empty ? 'warn' : 'ok') : 'err';
+            const title = result?.ok ? (empty ? '没有可整理的识别结果' : '整理完成') : '运行失败';
+            showToast(title, result?.message || (result?.ok ? '已按当前规则整理输出。' : '请查看最近运行记录。'), kind);
+            return;
+        }
+        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: false }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
+        if (name === 'rerun-pipeline') {
+            const confirmed = window.confirm('重新获取会忽略已处理标记，重新跑一遍所有邮件。确认继续吗？');
+            if (!confirmed) return;
+            await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: true }, '重新获取完成', '已重新获取本地邮件中的发票文件。');
+            return;
+        }
         if (name === 'test-connection') { await testConnection(); return; }
         if (name === 'discard-config') { window.location.reload(); return; }
         if (name === 'developer-reset') { await developerReset(); return; }
@@ -1025,14 +1091,14 @@
         showToast(result?.ok ? '已打开文件位置' : '打开失败', result?.ok ? '已定位到对应文件。' : (result?.error || value), result?.ok ? 'ok' : 'err');
     }
 
-    async function copyText(value) {
+    async function copyText(value, label) {
         if (window.mfhBridge?.copyText) await window.mfhBridge.copyText({ text: value });
         else await navigator.clipboard?.writeText(value);
-        showToast('已复制', '内容已复制到剪贴板。');
+        showToast('已复制', label ? `${label}已复制到剪贴板。` : '内容已复制到剪贴板。');
     }
 
     async function testConnection() {
-        const fn = window.mfhBridge?.testMailConnection || window.mfhBridge?.testConnection;
+        const fn = window.mfhBridge?.testMailConnection;
         if (!fn) { bridgeUnavailable(); return; }
         const payload = typeof window.collectConfigPayload === 'function' ? window.collectConfigPayload() : undefined;
         if (payload && window.mfhBridge?.saveConfig) {
@@ -1076,16 +1142,16 @@
 
     function exportVisibleLog() {
         const text = Array.from(document.querySelectorAll('#console-out .console__line')).map((line) => line.textContent.trim()).join('\n');
-        copyText(text || '暂无实时日志');
+        copyText(text || '暂无实时日志', '日志');
     }
 
     function exportVisibleTable(action) {
         const table = action.closest('.card')?.querySelector('table') || document.querySelector('table');
-        if (!table) { showToast('没有可导出的表格', '当前页面没有表格内容。', 'warn'); return; }
+        if (!table) { showToast('没有可复制的表格', '当前页面没有表格内容。', 'warn'); return; }
         const csv = Array.from(table.querySelectorAll('tr')).map((tr) => (
             Array.from(tr.children).map((cell) => `"${cell.textContent.trim().replace(/"/g, '""')}"`).join(',')
         )).join('\n');
-        copyText(csv);
+        copyText(csv, 'CSV');
     }
 
     function shortSender(value) {

@@ -56,6 +56,7 @@ async function main() {
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.clock.install({ time: new Date('2026-05-21T10:00:00') });
     await page.addInitScript(() => {
       window.__savedConfigPayload = null;
       window.__afterMailDone = false;
@@ -190,8 +191,8 @@ async function main() {
             },
           };
         },
-        async startFetch() {
-          record('startFetch');
+        async startFetch(payload) {
+          record('startFetch', payload);
           window.__afterMailDone = true;
           return { ok: true, summary: await window.mfhBridge.getSummary() };
         },
@@ -210,7 +211,7 @@ async function main() {
         },
         async runPipeline(payload) {
           record('runPipeline', payload);
-          if (payload?.avoidConflictBeforeOcr !== true || payload?.force !== true) throw new Error(`runPipeline should receive rename and force settings, got ${JSON.stringify(payload)}`);
+          if (payload?.avoidConflictBeforeOcr !== true || payload?.force !== false) throw new Error(`runPipeline should default to force=false, got ${JSON.stringify(payload)}`);
           window.__fileProgress?.({ operation: 'files', phase: '开始获取', percent: 10, processed: 0, skipped: 0, failed: 0, message: '正在从本地邮件中获取发票文件。' });
           window.__fileProgress?.({ operation: 'files', phase: '正在获取', percent: 60, processed: 1, skipped: 0, failed: 0, message: '已获取：国家电网电子发票通知', kind: 'ok' });
           window.__fileProgress?.({ operation: 'files', phase: '获取完成', percent: 100, processed: 2, skipped: 0, failed: 0, message: '获取完成：处理 2 封，跳过 0 封，失败 0 封。', kind: 'ok', done: true });
@@ -287,6 +288,13 @@ async function main() {
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (initialProgress !== '0%') fail(`页面打开时进度条不应启动，实际为 ${initialProgress}`);
 
+    // P2-16: ⌘K/Ctrl+K 应聚焦侧边搜索框
+    await page.evaluate(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }));
+    });
+    const cmdKFocused = await page.evaluate(() => document.activeElement?.matches('[data-global-search]'));
+    if (!cmdKFocused) fail('⌘K 应聚焦全局搜索框');
+
     await page.getByRole('button', { name: '本周以来' }).click();
     const weekRange = await page.evaluate(() => ({
       from: document.querySelector('#date-from')?.value,
@@ -306,8 +314,22 @@ async function main() {
     });
     if (englishLeak) fail(`页面仍暴露英文/内部状态：${englishLeak}`);
 
+    // P0-6: 默认勾选状态下 startFetch payload 应带 matchSubject/matchBody=true 且 dryRun=false
     await page.getByRole('button', { name: '开始获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
+    const startFetchPayload = await page.evaluate(() => window.__bridgeCalls.find((item) => item.name === 'startFetch')?.payload);
+    if (!startFetchPayload || startFetchPayload.matchSubject !== true || startFetchPayload.matchBody !== true || startFetchPayload.dryRun !== false) {
+      fail(`startFetch 默认 payload 应带 matchSubject/matchBody=true 且 dryRun=false：${JSON.stringify(startFetchPayload)}`);
+    }
+    // P0-6: 勾选「只预览，不保存」后 dryRun 必须为 true
+    await page.locator('[data-fetch-check="dryRun"]').click();
+    await page.getByRole('button', { name: '开始获取邮件' }).click();
+    await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
+    const dryRunPayload = await page.evaluate(() => window.__bridgeCalls.filter((item) => item.name === 'startFetch').at(-1)?.payload);
+    if (!dryRunPayload || dryRunPayload.dryRun !== true) {
+      fail(`勾选「只预览，不保存」后 dryRun 应为 true：${JSON.stringify(dryRunPayload)}`);
+    }
+    await page.locator('[data-fetch-check="dryRun"]').click(); // restore
     const afterFetchMail = await page.evaluate(() => ({
       cached: document.querySelector('[data-dash="cached-mails"]')?.textContent?.trim(),
       navInbox: document.querySelector('[data-nav-badge="inbox"]')?.textContent?.trim(),
@@ -377,6 +399,14 @@ async function main() {
     await page.waitForURL(`${baseUrl}/pages/pending.html`);
     await expectText(page, '这些邮件大多是历史链接过期');
     await expectText(page, '发票下载链接已过期');
+    // P0-8: pending Tab 切换应该真的过滤分组
+    await page.getByRole('button', { name: '可忽略' }).click();
+    const ignorableGroups = await page.locator('[data-pending-groups] .group').count();
+    if (ignorableGroups !== 0) fail(`pending 「可忽略」Tab 应过滤掉 refresh_link 分组，实际剩 ${ignorableGroups} 组`);
+    await page.getByRole('button', { name: '刷新链接' }).click();
+    const refreshGroups = await page.locator('[data-pending-groups] .group').count();
+    if (refreshGroups !== 1) fail(`pending 「刷新链接」Tab 应保留 refresh_link 分组，实际 ${refreshGroups}`);
+    await page.getByRole('button', { name: '全部' }).click();
     await page.locator('[data-action="pending-primary"]').click();
     await page.getByRole('button', { name: '打开待确认文件夹' }).first().click();
     await page.getByRole('button', { name: '复制原因' }).click();
@@ -396,6 +426,15 @@ async function main() {
     await page.locator('[data-search="library"]').fill('');
     await page.getByRole('button', { name: '失败' }).click();
     await expectText(page, 'bad.pdf');
+    // P0-7: 「仅失败项」复选过滤要真的生效
+    await page.getByRole('button', { name: '全部' }).click();
+    const beforeFailedOnly = await page.locator('[data-library-rows] tr').count();
+    await page.locator('[data-filter="library-failed"]').click();
+    const afterFailedOnly = await page.locator('[data-library-rows] tr').count();
+    if (afterFailedOnly === beforeFailedOnly || afterFailedOnly !== 1) {
+      fail(`「仅失败项」过滤不生效：before=${beforeFailedOnly} after=${afterFailedOnly}`);
+    }
+    await page.locator('[data-filter="library-failed"]').click(); // restore
     await page.locator('[data-library-rows]').getByRole('button', { name: '打开' }).first().click();
     const rerunClass = await page.getByRole('button', { name: '重新识别' }).evaluate((el) => el.className);
     if (!String(rerunClass).includes('btn--primary')) fail(`发票库重新识别按钮不是蓝色主按钮：${rerunClass}`);
@@ -455,9 +494,34 @@ async function main() {
     await page.locator('#tencent-secret-id').fill('demo-secret-id');
     await page.locator('#tencent-secret-key').fill('demo-secret-key');
     await page.locator('#tencent-region').fill('ap-guangzhou');
+    // P0-1: 邮箱文件夹多选要保存进 imap.mailbox
+    await page.locator('.select--mailboxes').selectOption(['INBOX', 'Sent Messages']);
+    // P0-2: TLS 勾选框要保存到 imap.tls
+    await page.locator('[data-config-check="imap.tls"]').click(); // 关闭一次
+    // P0-3 / P0-4: applyAfterOcr / organizeByType 勾选要保存
+    await page.locator('[data-config-check="rename.applyAfterOcr"]').click();
+    await page.locator('[data-config-check="rename.organizeByType"]').click();
+    // P0-5: 网络重试两个输入框要绑定 network.*
+    await page.locator('[data-config="network.retries"]').fill('5');
+    await page.locator('[data-config="network.retryDelayMs"]').fill('2500');
     await page.getByText('已保存到本机', { exact: false }).waitFor({ state: 'visible', timeout: 5000 });
-    await page.waitForFunction(() => window.__savedConfigPayload?.ocr?.credentials?.tencentRegion === 'ap-guangzhou');
+    await page.waitForFunction(() => window.__savedConfigPayload?.network?.retryDelayMs === 2500);
     const savedPayload = await page.evaluate(() => window.__savedConfigPayload);
+    if (!Array.isArray(savedPayload?.imap?.mailbox) || savedPayload.imap.mailbox.length !== 2 || !savedPayload.imap.mailbox.includes('INBOX') || !savedPayload.imap.mailbox.includes('Sent Messages')) {
+      fail(`邮箱文件夹多选未保存进 imap.mailbox：${JSON.stringify(savedPayload?.imap)}`);
+    }
+    if (savedPayload?.imap?.tls !== false) {
+      fail(`TLS 勾选状态未保存到 imap.tls：${JSON.stringify(savedPayload?.imap)}`);
+    }
+    if (savedPayload?.rename?.applyAfterOcr !== true) {
+      fail(`「识别后自动改名」未保存到 rename.applyAfterOcr：${JSON.stringify(savedPayload?.rename)}`);
+    }
+    if (savedPayload?.rename?.organizeByType !== true) {
+      fail(`「按类型分目录」未保存到 rename.organizeByType：${JSON.stringify(savedPayload?.rename)}`);
+    }
+    if (savedPayload?.network?.retries !== 5 || savedPayload?.network?.retryDelayMs !== 2500) {
+      fail(`网络重试设置未保存到 network.*：${JSON.stringify(savedPayload?.network)}`);
+    }
     if (savedPayload?.ocr?.credentials?.tencentRegion !== 'ap-guangzhou') {
       fail(`配置保存没有携带腾讯 OCR 区域：${JSON.stringify(savedPayload)}`);
     }
