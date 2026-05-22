@@ -190,7 +190,7 @@ async function main() {
         },
         async runOcr(payload) {
           record('runOcr', payload);
-          if (payload?.concurrency !== 4) throw new Error(`runOcr should receive selected concurrency=4, got ${JSON.stringify(payload)}`);
+          if (payload?.concurrency !== 1) throw new Error(`runOcr should default to concurrency=1, got ${JSON.stringify(payload)}`);
           window.__ocrProgress?.({ operation: 'ocr', phase: '开始识别', percent: 10, total: 3, processed: 0, parsed: 0, skipped: 0, failed: 0, message: '发现 3 个待识别文件，正在启动识别。' });
           window.__ocrProgress?.({ operation: 'ocr', phase: '正在识别', percent: 50, total: 3, processed: 1, parsed: 1, skipped: 0, failed: 0, message: '识别成功：国家电网-318.42.pdf', kind: 'ok' });
           window.__ocrProgress?.({ operation: 'ocr', phase: '识别完成', percent: 100, total: 3, processed: 3, parsed: 2, skipped: 1, failed: 0, message: '识别完成：成功 2 个，跳过 1 个，失败 0 个。', kind: 'ok', done: true });
@@ -216,11 +216,6 @@ async function main() {
         async copyText(payload) {
           record('copyText', payload);
           return { ok: true };
-        },
-        async clearOcrResults() {
-          record('clearOcrResults');
-          window.__afterFetchDone = true;
-          return { ok: true, summary: await window.mfhBridge.getSummary() };
         },
         async stopOcr() {
           record('stopOcr');
@@ -381,15 +376,13 @@ async function main() {
     await page.locator('[data-search="library"]').fill('');
     await page.getByRole('button', { name: '失败' }).click();
     await expectText(page, 'bad.pdf');
-    const startOcrClass = await page.getByRole('button', { name: '开始识别' }).evaluate((el) => el.className);
-    if (!String(startOcrClass).includes('btn--primary')) fail(`发票库开始识别按钮不是蓝色主按钮：${startOcrClass}`);
-    await page.getByRole('button', { name: '开始识别' }).click();
-    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    const rerunClass = await page.getByRole('button', { name: '重新识别' }).evaluate((el) => el.className);
+    if (!String(rerunClass).includes('btn--primary')) fail(`发票库重新识别按钮不是蓝色主按钮：${rerunClass}`);
     page.once('dialog', (dialog) => dialog.accept());
     await page.getByRole('button', { name: '重新识别' }).click();
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
-    const rerunCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
-    if (!rerunCalls.includes('clearOcrResults')) fail(`重新识别没有先清空结果：${rerunCalls.join(',')}`);
+    const rerunPayload = await page.evaluate(() => window.__bridgeCalls.filter((item) => item.name === 'runOcr').at(-1)?.payload);
+    if (rerunPayload?.resetResults !== true || rerunPayload?.force !== true) fail(`重新识别没有通过 runOcr 原子重置：${JSON.stringify(rerunPayload)}`);
     await page.getByRole('button', { name: '整理输出' }).click();
 
     await page.getByRole('link', { name: '邮件记录 2' }).click();

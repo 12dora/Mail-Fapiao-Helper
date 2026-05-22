@@ -25,17 +25,25 @@ function mockResult(meta: Parameters<OcrProvider['parse']>[1]) {
   };
 }
 
+async function mockDelay(): Promise<void> {
+  const ms = Number(process.env.MFH_MOCK_OCR_DELAY_MS || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function getOcrProvider(cfg: Config): OcrProvider {
   if (cfg.ocr.provider === 'mock') {
     return {
       name: 'mock',
       async parse(_data, meta) {
+        await mockDelay();
         return mockResult(meta);
       },
       async parseBatch(items) {
         if (process.env.MFH_MOCK_OCR_FAIL_BATCH === '1') {
           throw new Error('mock batch parser should not be used');
         }
+        await mockDelay();
         return items.map((item) => mockResult(item.meta));
       },
     };

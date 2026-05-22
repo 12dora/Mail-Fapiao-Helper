@@ -67,13 +67,11 @@
 
                 <div class="spacer"></div>
                 <button class="btn btn--sm" data-action="open-invoices-folder">打开归档目录</button>
-                <button class="btn btn--sm btn--primary" data-action="run-ocr">开始识别</button>
-                <button class="btn btn--sm" data-action="rerun-ocr">重新识别</button>
-                <button class="btn btn--sm" data-action="stop-ocr" disabled>停止识别</button>
+                <button class="btn btn--sm btn--primary" data-action="ocr-toggle" data-ocr-mode="start">开始识别</button>
                 <select class="select" data-ocr-parallel style="width: 120px;">
-                    <option value="1">1 个并行</option>
+                    <option value="1" selected>1 个并行</option>
                     <option value="2">2 个并行</option>
-                    <option value="4" selected>4 个并行</option>
+                    <option value="4">4 个并行</option>
                     <option value="8">8 个并行</option>
                 </select>
                 <button class="btn btn--sm" data-action="organize">整理输出</button>

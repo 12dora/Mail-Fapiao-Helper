@@ -357,8 +357,7 @@
         text('[data-ocr-parsed]', '0');
         text('[data-ocr-skipped]', '0');
         text('[data-ocr-failed]', '0');
-        document.querySelectorAll('[data-action="run-ocr"], [data-action="rerun-ocr"]').forEach((el) => { el.disabled = true; });
-        document.querySelectorAll('[data-action="stop-ocr"]').forEach((el) => { el.disabled = false; });
+        setOcrControlState('running');
         document.querySelectorAll('[data-ocr-parallel]').forEach((el) => { el.disabled = true; });
         document.querySelectorAll('[data-ocr-log]').forEach((el) => {
             el.innerHTML = consoleLine('准备', message);
@@ -395,10 +394,35 @@
         text('[data-ocr-parsed]', fmtInt(parsed));
         text('[data-ocr-skipped]', fmtInt(skipped));
         text('[data-ocr-failed]', fmtInt(failed));
-        document.querySelectorAll('[data-action="run-ocr"], [data-action="rerun-ocr"]').forEach((el) => { el.disabled = !data.done; });
-        document.querySelectorAll('[data-action="stop-ocr"]').forEach((el) => { el.disabled = Boolean(data.done); });
+        setOcrControlState(data.done ? 'idle' : 'running');
         document.querySelectorAll('[data-ocr-parallel]').forEach((el) => { el.disabled = !data.done; });
         appendOcrLog(data.message, data.kind || '');
+    }
+
+    function hasRecognizedResults() {
+        const summary = window.FPH.summary || {};
+        const library = summary.library || {};
+        const pending = Number(library.pending || 0);
+        return pending <= 0 && (Number(library.recognized || 0) > 0 || (window.FPH.libraryRows || []).length > 0);
+    }
+
+    function setOcrControlState(state) {
+        const running = state === 'running';
+        document.querySelectorAll('[data-action="ocr-toggle"]').forEach((el) => {
+            el.disabled = false;
+            el.classList.toggle('btn--danger', running);
+            el.classList.toggle('btn--primary', !running);
+            if (running) {
+                el.dataset.ocrMode = 'stop';
+                el.textContent = '停止识别';
+            } else if (hasRecognizedResults()) {
+                el.dataset.ocrMode = 'rerun';
+                el.textContent = document.body.dataset.page === 'dashboard' ? '重新识别发票文件' : '重新识别';
+            } else {
+                el.dataset.ocrMode = 'start';
+                el.textContent = document.body.dataset.page === 'dashboard' ? '开始识别发票文件' : '开始识别';
+            }
+        });
     }
 
     function resetFileProgress(message = '正在准备获取发票文件。') {
@@ -450,6 +474,7 @@
     }
 
     function applySummary(summary) {
+        window.FPH.summary = summary;
         const inbox = summary.inbox || {};
         const library = summary.library || {};
         const pending = summary.pending || {};
@@ -464,6 +489,7 @@
         applyPendingSummary(pending);
         applyHistory(summary.history || []);
         applyCurrentBatch(inbox.rows || []);
+        setOcrControlState('idle');
     }
 
     function applyDashboardSummary(summary) {
@@ -763,9 +789,7 @@
         if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
         if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
-        if (name === 'run-ocr') { await runOcr(false); return; }
-        if (name === 'rerun-ocr') { await rerunOcr(); return; }
-        if (name === 'stop-ocr') { await stopOcr(); return; }
+        if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
         if (name === 'organize') { await runBridgeAction('organize', {}, '整理完成', '已按当前规则整理输出。'); return; }
         if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled() }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
         if (name === 'test-connection') { await testConnection(); return; }
@@ -775,36 +799,35 @@
     }
 
     function selectedOcrConcurrency() {
-        const value = Number(document.querySelector('[data-ocr-parallel]')?.value || 4);
-        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
+        const value = Number(document.querySelector('[data-ocr-parallel]')?.value || 1);
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
     }
 
     function downloadRenameEnabled() {
         return document.querySelector('[data-download-rename-toggle]')?.classList.contains('is-on') !== false;
     }
 
+    async function handleOcrToggle(action) {
+        const mode = action.dataset.ocrMode || 'start';
+        if (mode === 'stop') {
+            await stopOcr();
+            return;
+        }
+        if (mode === 'rerun') {
+            const confirmed = window.confirm('重新识别会删除已有识别结果，并把发票队列重置为待识别。确认继续吗？');
+            if (!confirmed) return;
+            await runOcr(true);
+            return;
+        }
+        await runOcr(false);
+    }
+
     async function runOcr(force) {
         await runBridgeAction('runOcr', {
             force: Boolean(force),
+            resetResults: Boolean(force),
             concurrency: selectedOcrConcurrency(),
         }, '识别完成', '已尝试识别本地文件。');
-    }
-
-    async function rerunOcr() {
-        const confirmed = window.confirm('重新识别会删除已有识别结果，并把发票队列重置为待识别。确认继续吗？');
-        if (!confirmed) return;
-        const clear = window.mfhBridge?.clearOcrResults;
-        if (!clear) { bridgeUnavailable(); return; }
-        let result;
-        try {
-            result = await clear();
-        } catch (err) {
-            showToast('清空失败', err?.message || '请查看最近运行记录。', 'err');
-            return;
-        }
-        if (result?.summary) applySummary(result.summary);
-        showToast(result?.ok ? '已清空识别结果' : '清空失败', result?.ok ? '正在重新识别发票文件。' : (result?.message || result?.error || '请查看最近运行记录。'), result?.ok ? 'ok' : 'err');
-        if (result?.ok) await runOcr(true);
     }
 
     async function stopOcr() {

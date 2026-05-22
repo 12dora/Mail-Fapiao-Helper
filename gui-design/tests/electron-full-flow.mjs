@@ -141,8 +141,8 @@ async function main() {
     const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (ocrProgress !== '100%') fail(`识别后进度应为 100%，实际为 ${ocrProgress}`);
     const ocrArgs = await page.evaluate(() => window.__mfhLastOcrArgs || []);
-    if (!ocrArgs.includes('--concurrency') || !ocrArgs.includes('4') || ocrArgs.includes('--force')) {
-      fail(`Electron OCR 应按选择的并行数运行，实际：${JSON.stringify(ocrArgs)}`);
+    if (!ocrArgs.includes('--single-item') || ocrArgs.includes('--concurrency') || ocrArgs.includes('--force')) {
+      fail(`Electron OCR 默认应使用 1 并行逐张续跑，实际：${JSON.stringify(ocrArgs)}`);
     }
     const afterOcr = await page.evaluate(() => ({
       recognized: document.querySelector('[data-dash="recognized"]')?.textContent?.trim(),
@@ -186,7 +186,8 @@ async function main() {
     await page.locator('[data-library-rows]').getByText('0002.pdf', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
     await page.getByRole('button', { name: '打开归档目录' }).click();
     await expectToast(page, '已打开文件夹');
-    await page.getByRole('button', { name: '开始识别' }).click();
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: '重新识别' }).click();
     await expectToast(page, '识别完成');
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
     await page.getByRole('button', { name: '整理输出' }).click();

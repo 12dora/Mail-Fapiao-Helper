@@ -268,10 +268,50 @@ async function testOcrDedupeFallsBackToFilename() {
   }
 }
 
+async function testOcrConcurrencyRunsInParallel() {
+  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-concurrency-'));
+  const { cfg, path: configPath } = await writeConfig(tmp, {
+    ocr: {
+      enabled: true,
+      provider: 'mock',
+      binaryPath: 'auto',
+      executionMode: 'cli',
+      serviceUrl: 'http://127.0.0.1:8000',
+      serviceHost: '127.0.0.1',
+      servicePort: 8000,
+      serviceWorkers: 1,
+      serviceStartupMs: 30000,
+      batchSize: 16,
+      timeoutMs: 120000,
+      resultsCsv: join(tmp, 'ocr-results.csv'),
+      credentials: { tencentRegion: 'ap-shanghai' },
+    },
+  });
+  const ocrDir = join(cfg.paths.invoices, 'ocr');
+  await mkdir(ocrDir, { recursive: true });
+  const rows = ['﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason'];
+  for (let i = 1; i <= 4; i++) {
+    const file = `${i}.pdf`;
+    await writeFile(join(cfg.paths.invoices, file), '%PDF-1.4\n%EOF\n');
+    rows.push(`hash-${i},<${i}@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,${file},${file},pdf,invoice,pending,`);
+  }
+  rows.push('');
+  await writeFile(join(ocrDir, 'ocr-pending.csv'), rows.join('\n'));
+
+  const started = Date.now();
+  await runMfh(['ocr', 'run', '--config', configPath, '--concurrency', '4', '--allow-parse-failures'], {
+    MFH_MOCK_OCR_FAIL_BATCH: '1',
+    MFH_MOCK_OCR_DELAY_MS: '300',
+  });
+  const elapsed = Date.now() - started;
+  if (elapsed > 900) fail(`OCR concurrency did not run in parallel; elapsed=${elapsed}ms`);
+}
+
 await testOutputCsvAndPendingRaw();
 await testPendingWithoutMessageId();
 await testCsvStateRecovery();
 await testOcrSingleItemResume();
 await testOcrSuccessBeatsLaterFailure();
 await testOcrDedupeFallsBackToFilename();
+await testOcrConcurrencyRunsInParallel();
 console.log('CLI regression tests passed');
