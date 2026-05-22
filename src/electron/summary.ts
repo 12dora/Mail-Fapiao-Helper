@@ -40,7 +40,7 @@ export interface InvoiceRow {
 }
 
 function isArchivedDocument(name: string): boolean {
-  return /\.(pdf|ofd)$/i.test(name);
+  return /\.(pdf|ofd|png|jpe?g|gif|webp|bmp)$/i.test(name);
 }
 
 export interface LibrarySummary {
@@ -87,12 +87,14 @@ export function historyPath(cwd = process.cwd()): string {
   return path.resolve(cwd, '.mfh-cache', 'gui-history.json');
 }
 
-export function loadGuiConfig(configPath = defaultConfigPath()): { cfg: Config; error: string } {
+export function loadGuiConfig(
+  configPath = defaultConfigPath(),
+  fallbackConfigPath = path.resolve(process.cwd(), 'config.example.json'),
+): { cfg: Config; error: string } {
   try {
     return { cfg: loadConfig(configPath), error: '' };
   } catch (err) {
-    const examplePath = path.resolve(process.cwd(), 'config.example.json');
-    const fallback = fs.existsSync(examplePath) ? examplePath : configPath;
+    const fallback = fs.existsSync(fallbackConfigPath) ? fallbackConfigPath : configPath;
     return {
       cfg: loadConfig(fallback),
       error: err instanceof Error ? err.message : String(err),
@@ -112,8 +114,12 @@ function monthLabel(value: string): string {
   return year && month ? `${year}-${month}` : value;
 }
 
-export function summarizeInbox(cfg: Config): InboxSummary {
-  const indexCsv = path.resolve(cfg.paths.samples, 'INDEX.csv');
+function resolveIn(cwd: string, value: string): string {
+  return path.resolve(cwd, value);
+}
+
+export function summarizeInbox(cfg: Config, cwd = process.cwd()): InboxSummary {
+  const indexCsv = resolveIn(cwd, path.join(cfg.paths.samples, 'INDEX.csv'));
   const rawRows = readCsvRows(indexCsv);
   const rows = rawRows.map((row): InboxRow => ({
     messageId: row.messageId ?? '',
@@ -164,7 +170,7 @@ function currentResultRows(rows: Record<string, string>[]): Record<string, strin
   return Array.from(index.values());
 }
 
-export function summarizeLibrary(cfg: Config): LibrarySummary {
+export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySummary {
   const ocr = summarizeOcr(cfg);
   const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
   const rows = resultRows
@@ -175,7 +181,7 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
       amount: money(row.amount || ''),
       source: row.transport === 'http' ? '本机识别' : row.transport || '归档文件',
       filename: row.filename || '',
-      filePath: row.filename ? path.resolve(cfg.paths.invoices, row.filename) : '',
+      filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
       status: (row.status ?? '').toLowerCase() === 'error'
         ? '识别失败'
         : (row.invoiceNo || row.seller || row.amount) ? '完整' : '待补充',
@@ -196,7 +202,7 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
       amount: '',
       source: '归档文件',
       filename,
-      filePath: path.resolve(cfg.paths.invoices, filename),
+      filePath: resolveIn(cwd, path.join(cfg.paths.invoices, filename)),
       status: row.status === 'ignored' ? '已归档' : '待补充',
       documentType: row.documentType || '',
       invoiceType: '',
@@ -204,7 +210,7 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
     });
   }
   try {
-    for (const entry of fs.readdirSync(path.resolve(cfg.paths.invoices), { withFileTypes: true })) {
+    for (const entry of fs.readdirSync(resolveIn(cwd, cfg.paths.invoices), { withFileTypes: true })) {
       if (!entry.isFile() || !isArchivedDocument(entry.name) || seenFiles.has(entry.name)) continue;
       rows.push({
         date: '',
@@ -213,7 +219,7 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
         amount: '',
         source: '归档文件',
         filename: entry.name,
-        filePath: path.resolve(cfg.paths.invoices, entry.name),
+        filePath: resolveIn(cwd, path.join(cfg.paths.invoices, entry.name)),
         status: '待补充',
         documentType: '',
         invoiceType: '',
@@ -246,16 +252,20 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
   };
 }
 
-export function loadAppSummary(configPath = defaultConfigPath(), cwd = process.cwd()): AppSummary {
+export function loadAppSummary(
+  configPath = defaultConfigPath(),
+  cwd = process.cwd(),
+  fallbackConfigPath = path.resolve(process.cwd(), 'config.example.json'),
+): AppSummary {
   const configExists = fs.existsSync(configPath);
-  const { cfg, error } = loadGuiConfig(configPath);
+  const { cfg, error } = loadGuiConfig(configPath, fallbackConfigPath);
   return {
     configPath,
     configExists,
     configError: error,
     history: readRunHistory(cwd),
-    inbox: summarizeInbox(cfg),
-    library: summarizeLibrary(cfg),
+    inbox: summarizeInbox(cfg, cwd),
+    library: summarizeLibrary(cfg, cwd),
     pending: summarizePending(cfg),
   };
 }

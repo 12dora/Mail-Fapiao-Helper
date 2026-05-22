@@ -1,0 +1,24 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="#2563EB"/>
+
+  <!-- 信封：浅蓝填充 + 白色封边（上移让翻盖露在发票上方） -->
+  <g transform="translate(152, 200)">
+    <rect x="0" y="0" width="720" height="520" rx="32" fill="#DBEAFE" stroke="#FFFFFF" stroke-width="16"/>
+    <path d="M 48 16 L 360 216 L 672 16" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+
+  <!-- 发票：白色，斜放 8°，缩小并下移露出信封翻盖 -->
+  <g transform="translate(512, 560) rotate(8) translate(-250, -310)">
+    <rect x="12" y="16" width="500" height="620" rx="20" fill="#0F172A" fill-opacity="0.2"/>
+    <rect x="0" y="0" width="500" height="620" rx="20" fill="#FFFFFF"/>
+    <rect x="56" y="80" width="388" height="22" rx="8" fill="#2563EB"/>
+    <rect x="56" y="160" width="300" height="13" rx="6" fill="#CBD5E1"/>
+    <rect x="56" y="210" width="356" height="13" rx="6" fill="#CBD5E1"/>
+    <rect x="56" y="260" width="256" height="13" rx="6" fill="#CBD5E1"/>
+    <rect x="56" y="340" width="220" height="20" rx="8" fill="#0F172A"/>
+    <!-- ¥ 字形路径（已转矢量，不依赖字体） -->
+    <g transform="translate(250, 540) scale(0.0859375, -0.0859375) translate(-713.0, 0)">
+      <path d="M1358 416H903V0H522V416H68V610H522V676L473 762H68V954H360L25 1493H424L713 1032L1001 1493H1401L1065 954H1358V762H952L903 676V610H1358Z" fill="#2563EB"/>
+    </g>
+  </g>
+</svg>

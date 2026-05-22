@@ -89,6 +89,7 @@ function readCsv(csvPath: string): Record<string, string>[] {
 }
 
 function asFormat(value: string): DocumentFormat {
+  if (value === 'image') return 'image';
   return value === 'ofd' ? 'ofd' : 'pdf';
 }
 

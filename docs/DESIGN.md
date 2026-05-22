@@ -174,7 +174,7 @@ disconnect
 - 启动时与 `invoices.csv` 的 messageId 列求并集自愈，CSV 才是归档真相（详见 `ARCHITECTURE.md §5`）
 - 同一封邮件可包含 PDF 发票和 OFD 行程单；附件提取会过滤 PDF/OFD 成对发票中的重复 OFD，只保留 PDF。若 OFD 名称/来源明确含 `行程单`、`航空运输电子客票`、`itinerary` 等行程单信号，则保留 OFD；普通“报销凭证”有 PDF 副本时不保留 OFD 副本。`invoices.csv` 以 `messageId + source` 去重，全部已归档文档另写 `invoices/ocr/ocr-pending.csv`
 - 通行费汇总单、订单/运单明细、结账单/账单、堂食明细、PDF 行程/行程报销单等支撑材料仍会归档，但在 OCR 队列中标记为 `documentType=supporting,status=ignored`，默认不送 OCR；原文件不删除，后续 GUI 可展示/手动处理
-- `mfh ocr run` 默认使用 `ocr.executionMode="auto"`：先探活/启动 `efapiao serve` 本地 HTTP 服务，按 `ocr.batchSize` 聚合后向 `/v1/invoices/parse-batch` POST，整批 `hint_type=auto` 以兼容 PDF/OFD 混合队列；服务不可用时回退逐张 CLI。`ocr.binaryPath="auto"` 时优先使用 `vendor/efapiao/0.1.2/<platform-arch>/` 下的内置二进制，缺失时回退 PATH
+- `mfh ocr run` 默认使用 `ocr.executionMode="auto"`：先探活/启动 `efapiao serve` 本地 HTTP 服务，按 `ocr.batchSize` 聚合后向 `/v1/invoices/parse-batch` POST，整批 `hint_type=auto` 以兼容 PDF/OFD/图片混合队列；服务不可用时回退逐张 CLI。桌面版 `ocr.binaryPath="auto"` 时优先使用安装包资源中的 `vendor/efapiao/0.1.3/<platform-arch>/` 二进制，源码运行时回退仓库 `vendor/`，再缺失则回退 PATH
 - `ocr.resultsCsv` 记录 `transport/extractedBy/parserVersion/ocrVendor`；`extractedBy=text_layer` 表示文本层规则命中，`qrcode` 表示二维码/渲染兜底命中，`ocr` 表示 OCR vendor 介入
 - `ocr-pending.csv` 是工作队列而不是静态清单：成功后标记为 `recognized`，失败后标记为 `failed`；支撑材料标记为 `ignored`；行本身保留，便于 GUI 和重复执行查看历史
 - `mfh ocr run --allow-parse-failures` 可用于批量任务：只要 OCR 程序/接口本身完成，即使个别文档业务解析失败也返回 0；默认行为仍在存在失败行时返回非零
