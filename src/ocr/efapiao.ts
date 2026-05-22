@@ -128,7 +128,7 @@ function serviceBaseUrl(cfg: Config): string {
 }
 
 function serviceKey(cfg: Config): string {
-  return `${binaryPath(cfg)}\0${cfg.ocr.serviceHost}\0${cfg.ocr.servicePort}`;
+  return `${binaryPath(cfg)}\0${cfg.ocr.serviceHost}\0${cfg.ocr.servicePort}\0${cfg.ocr.serviceWorkers}`;
 }
 
 function sleep(ms: number): Promise<void> {

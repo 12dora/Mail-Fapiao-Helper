@@ -8,7 +8,6 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   runPipeline: (payload) => ipcRenderer.invoke('mfh:run-pipeline', payload),
   runOcr: (payload) => ipcRenderer.invoke('mfh:run-ocr', payload),
   stopOcr: () => ipcRenderer.invoke('mfh:stop-ocr'),
-  clearOcrResults: () => ipcRenderer.invoke('mfh:clear-ocr-results'),
   organize: (payload) => ipcRenderer.invoke('mfh:organize', payload),
   openPath: (payload) => ipcRenderer.invoke('mfh:open-path', payload),
   copyText: (payload) => ipcRenderer.invoke('mfh:copy-text', payload),

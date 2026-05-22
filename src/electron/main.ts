@@ -52,6 +52,7 @@ interface SaveConfigPayload {
     executionMode?: string;
     serviceHost?: string;
     servicePort?: number | string;
+    serviceWorkers?: number | string;
     batchSize?: number | string;
     resultsCsv?: string;
     credentials?: Record<string, string>;
@@ -183,6 +184,24 @@ function writeConfig(payload: unknown): void {
   } catch {
     // Best-effort on platforms that do not preserve POSIX file modes.
   }
+}
+
+function writeOcrRunConfig(concurrency: number): string {
+  const current = readMutableConfig();
+  const ocr = asObject(current.ocr);
+  const host = typeof ocr.serviceHost === 'string' && ocr.serviceHost ? ocr.serviceHost : '127.0.0.1';
+  const basePort = Number(ocr.servicePort ?? 8000) || 8000;
+  const port = concurrency > 1 ? basePort + concurrency - 1 : basePort;
+  current.ocr = {
+    ...ocr,
+    serviceWorkers: concurrency,
+    servicePort: port,
+    serviceUrl: `http://${host}:${port}`,
+  };
+  const tmpPath = path.join(rootDir, '.mfh-cache', 'ocr-run-config.json');
+  fs.mkdirSync(path.dirname(tmpPath), { recursive: true });
+  fs.writeFileSync(tmpPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  return tmpPath;
 }
 
 function sendProgress(data: Record<string, unknown>): void {
@@ -839,8 +858,12 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     };
   }
 
-  const concurrency = Math.max(1, Math.floor(Number(raw.concurrency ?? 4) || 4));
-  const args = ['run', '--config', configPath, '--allow-parse-failures'];
+  const concurrency = Math.max(1, Math.floor(Number(raw.concurrency ?? 1) || 1));
+  if (raw.resetResults === true || raw.force === true) {
+    clearOcrResultsAndResetQueue();
+  }
+  const ocrConfigPath = writeOcrRunConfig(concurrency);
+  const args = ['run', '--config', ocrConfigPath, '--allow-parse-failures'];
   if (raw.force === true) args.push('--force');
   if (concurrency > 1) {
     args.push('--concurrency', String(concurrency));
@@ -883,11 +906,6 @@ ipcMain.handle('mfh:stop-ocr', () => {
   activeOcrStopRequested = true;
   activeOcrProcess.kill('SIGTERM');
   return { ok: true, message: '正在停止识别。' };
-});
-
-ipcMain.handle('mfh:clear-ocr-results', () => {
-  clearOcrResultsAndResetQueue();
-  return { ok: true, summary: loadAppSummary(configPath, rootDir) };
 });
 
 ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
