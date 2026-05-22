@@ -18,14 +18,3 @@ export const log: Logger = {
   warn: (m) => emit('warn', m),
   error: (m) => emit('error', m),
 };
-
-export function createLogger(level: Level): Logger {
-  const levels: Level[] = ['debug', 'info', 'warn', 'error'];
-  const threshold = levels.indexOf(level);
-  return {
-    debug: (m) => threshold <= 0 && emit('debug', m),
-    info: (m) => threshold <= 1 && emit('info', m),
-    warn: (m) => threshold <= 2 && emit('warn', m),
-    error: (m) => threshold <= 3 && emit('error', m),
-  };
-}

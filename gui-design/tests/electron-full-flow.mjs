@@ -8,7 +8,15 @@ function fail(message) {
 }
 
 async function expectText(page, text, timeout = 8000) {
-  await page.getByText(text, { exact: false }).first().waitFor({ state: 'visible', timeout });
+  await page.waitForFunction((needle) => {
+    const visible = (el) => {
+      const style = getComputedStyle(el);
+      if (style.visibility === 'hidden' || style.display === 'none') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    return Array.from(document.body.querySelectorAll('*')).some((el) => visible(el) && el.textContent?.includes(needle));
+  }, text, { timeout });
 }
 
 async function expectNoHorizontalOverflow(page, label) {
@@ -65,19 +73,19 @@ async function main() {
     const page = await app.firstWindow();
     await page.setViewportSize({ width: 1180, height: 780 });
     await page.waitForLoadState('domcontentloaded');
-    await expectText(page, '按顺序完成三步');
-    await expectNoHorizontalOverflow(page, '首页');
+    await expectText(page, '运行控制台');
+    await expectNoHorizontalOverflow(page, '运行控制台');
 
     const bridgeType = await page.evaluate(() => typeof window.mfhBridge?.startFetch);
     if (bridgeType !== 'function') fail('Electron preload bridge 不可用');
 
-    await page.getByRole('link', { name: '已有配置，开始处理' }).click();
     await page.waitForURL(/dashboard\.html/);
     await expectText(page, '运行控制台');
     await expectText(page, '获取发票文件实时日志');
     await expectText(page, '识别发票文件实时日志');
     await expectText(page, '获取邮件实时日志');
     await expectText(page, '最多显示最近 6 条记录');
+    await expectText(page, '已获取邮件');
     await expectNoHorizontalOverflow(page, '运行控制台');
 
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
@@ -107,16 +115,27 @@ async function main() {
     await expectText(page, '国家电网电子发票通知');
     const progress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (progress !== '100%') fail(`抓取后进度应为 100%，实际为 ${progress}`);
+    const fetchArgs = await page.evaluate(() => window.__mfhLastFetchArgs || []);
+    const outIndex = fetchArgs.indexOf('--out');
+    if (outIndex < 0 || fetchArgs[outIndex + 1] !== config.paths.samples) {
+      fail(`获取邮件没有写入配置的邮件缓存目录：${JSON.stringify(fetchArgs)}`);
+    }
 
     const afterFetch = await page.evaluate(() => ({
       cached: document.querySelector('[data-dash="cached-mails"]')?.textContent?.trim(),
+      navInbox: document.querySelector('[data-nav-badge="inbox"]')?.textContent?.trim(),
       invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
       itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
       supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
     }));
-    if (afterFetch.cached !== '2' || afterFetch.invoice !== '0' || afterFetch.itinerary !== '0' || afterFetch.supporting !== '0') {
+    if (afterFetch.cached !== '2' || afterFetch.navInbox !== '2' || afterFetch.invoice !== '0' || afterFetch.itinerary !== '0' || afterFetch.supporting !== '0') {
       fail(`获取邮件后不应已经生成发票文件统计：${JSON.stringify(afterFetch)}`);
     }
+    await page.getByRole('link', { name: /邮件记录/ }).click();
+    await page.waitForURL(/inbox\.html/);
+    await page.locator('main.main:not([style*="display: none"]) [data-inbox-rows]').getByText('国家电网电子发票通知', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.getByRole('link', { name: '开始处理' }).click();
+    await page.waitForURL(/dashboard\.html/);
 
     await page.getByRole('button', { name: '开始获取发票文件' }).click();
     await expectToast(page, '获取完成');
@@ -131,17 +150,22 @@ async function main() {
       supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
     }));
     if (afterFiles.invoice !== '1' || afterFiles.itinerary !== '1' || afterFiles.supporting !== '1') {
-      fail(`获取发票文件后首页统计不正确：${JSON.stringify(afterFiles)}`);
+      fail(`获取发票文件后开始处理页统计不正确：${JSON.stringify(afterFiles)}`);
     }
     const archivedFiles = await readdir(config.paths.invoices);
     if (!archivedFiles.includes('0001.pdf') || !archivedFiles.includes('0002.pdf')) {
       fail(`获取发票文件后应先按数字顺序重命名，实际：${JSON.stringify(archivedFiles)}`);
     }
+    await page.getByRole('link', { name: /发票库/ }).click();
+    await page.waitForURL(/library\.html/);
+    await page.locator('[data-library-rows]').getByText('0001.pdf', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.getByRole('link', { name: '开始处理' }).click();
+    await page.waitForURL(/dashboard\.html/);
     await page.getByRole('button', { name: '开始识别发票文件' }).click();
     await expectToast(page, '识别完成');
     await expectText(page, '已扫描 3 个文件，识别成功 2 个');
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
-    const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    const ocrProgress = await page.locator('main.main:not([style*="display: none"]) [data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (ocrProgress !== '100%') fail(`识别后进度应为 100%，实际为 ${ocrProgress}`);
     const ocrArgs = await page.evaluate(() => window.__mfhLastOcrArgs || []);
     if (!ocrArgs.includes('--single-item') || ocrArgs.includes('--concurrency') || ocrArgs.includes('--force')) {
@@ -162,8 +186,14 @@ async function main() {
 
     await page.getByRole('link', { name: /邮件记录/ }).click();
     await page.waitForURL(/inbox\.html/);
+    await page.getByRole('link', { name: '开始处理' }).click();
+    await page.waitForURL(/dashboard\.html/);
+    const preservedFileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (preservedFileProgress !== '100%') fail(`页面切换后获取发票进度不应丢失，实际为 ${preservedFileProgress}`);
+    await page.getByRole('link', { name: /邮件记录/ }).click();
+    await page.waitForURL(/inbox\.html/);
     await expectText(page, '邮件记录');
-    await expectText(page, '国家电网电子发票通知');
+    await page.locator('main.main:not([style*="display: none"]) [data-inbox-rows]').getByText('国家电网电子发票通知', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
     await expectNoHorizontalOverflow(page, '邮件记录');
     await page.locator('[data-search="inbox"]').fill('国家电网');
     const filteredInboxRows = await countRows(page, '[data-inbox-rows]');

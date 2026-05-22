@@ -36,13 +36,18 @@
             { id: 'settings',  label: '关于',       href: 'settings.html',  icon: 'info'   },
         ]},
     ];
+    const SPA_PAGES = new Set(['dashboard', 'inbox', 'library', 'pending', 'config', 'settings']);
+    const PAGE_SCRIPT_INIT = {
+        dashboard: () => window.MFH_PAGE_INIT?.dashboard?.(),
+        config: () => window.MFH_PAGE_INIT?.config?.(),
+    };
 
     function navHTML(active) {
         return NAV.map(sec => `
             <div class="nav-group">
                 <div class="nav-group__title">${sec.group}</div>
                 ${sec.items.map(it => `
-                    <a class="nav-item ${it.id === active ? 'is-active' : ''}" href="${document.body.dataset.page ? it.href : rel(it.href)}">
+                    <a class="nav-item ${it.id === active ? 'is-active' : ''}" href="${document.body.dataset.page ? it.href : rel(it.href)}" data-spa-page="${it.id}">
                         <span class="nav-item__icon">${ICON[it.icon]}</span>
                         <span>${it.label}</span>
                         ${it.badge ? `<span class="nav-item__badge" ${it.badgeKey ? `data-nav-badge="${it.badgeKey}"` : ''}>${it.badge}</span>` : ''}
@@ -66,10 +71,6 @@
                         <div class="sidebar__ver">本地预览版</div>
                     </div>
                 </div>
-                <a class="nav-home" href="${document.body.dataset.page ? '../index.html' : 'index.html'}">
-                    ${ICON.chev.replace('class="ic"', 'class="ic nav-home__icon"')}
-                    返回首页
-                </a>
                 <div class="sidebar__search">
                     <span class="sidebar__search-icon">${ICON.search}</span>
                     <input type="text" placeholder="搜索发票或邮件…" aria-label="搜索发票或邮件" data-global-search>
@@ -114,6 +115,10 @@
 
     /* ---------- Wiring ---------- */
     function wire() {
+        if (!document.body.dataset.page && location.pathname.endsWith('/index.html')) {
+            window.location.replace('pages/dashboard.html');
+            return;
+        }
         // Inject titlebar (drag region) + sidebar shell if marker exists.
         const titleMount = document.getElementById('titlebar-mount');
         if (titleMount) titleMount.outerHTML = titlebarHTML();
@@ -145,6 +150,35 @@
             const gh = e.target.closest('.group__head');
             if (gh) gh.parentElement.classList.toggle('is-open');
 
+            const spaLink = e.target.closest('a[data-spa-page]');
+            if (spaLink) {
+                e.preventDefault();
+                showPage(spaLink.dataset.spaPage, spaLink.getAttribute('href'));
+                return;
+            }
+            const pageLink = e.target.closest('a[href$=".html"]');
+            const pageId = pageLink ? pageIdFromPath(pageLink.getAttribute('href') || '') : '';
+            if (pageLink && pageId) {
+                e.preventDefault();
+                showPage(pageId, pageLink.getAttribute('href'));
+                return;
+            }
+
+            const sortHeader = e.target.closest('.table thead th');
+            if (sortHeader) {
+                const key = sortHeader.dataset.sortKey;
+                if (key) {
+                    const currentKey = window.FPH.sortKey;
+                    window.FPH.sortDir = currentKey === key && window.FPH.sortDir === 'asc' ? 'desc' : 'asc';
+                    window.FPH.sortKey = key;
+                    sortHeader.parentElement.querySelectorAll('th').forEach(x => x.classList.remove('is-sorted', 'is-sorted-desc'));
+                    sortHeader.classList.add('is-sorted');
+                    if (window.FPH.sortDir === 'desc') sortHeader.classList.add('is-sorted-desc');
+                    renderInboxRows();
+                    renderLibraryRows();
+                }
+            }
+
             // Tabs
             const tab = e.target.closest('.tabs .tab');
             if (tab) {
@@ -175,27 +209,20 @@
             if (action && !t && !action.closest('.tabs') && !action.closest('#date-preset-buttons')) handleAction(action);
         });
 
-        document.querySelectorAll('.table thead th').forEach(th => {
-            th.addEventListener('click', () => {
-                const key = th.dataset.sortKey;
-                if (!key) return;
-                const currentKey = window.FPH.sortKey;
-                window.FPH.sortDir = currentKey === key && window.FPH.sortDir === 'asc' ? 'desc' : 'asc';
-                window.FPH.sortKey = key;
-                th.parentElement.querySelectorAll('th').forEach(x => x.classList.remove('is-sorted', 'is-sorted-desc'));
-                th.classList.add('is-sorted');
-                if (window.FPH.sortDir === 'desc') th.classList.add('is-sorted-desc');
-                renderInboxRows();
-                renderLibraryRows();
-            });
+        document.body.addEventListener('click', (e) => {
+            const row = e.target.closest('.table tbody tr');
+            if (!row) return;
+            row.parentElement.querySelectorAll('tr').forEach(x => x.classList.remove('is-selected'));
+            row.classList.add('is-selected');
         });
 
-        // Table row select
-        document.querySelectorAll('.table tbody tr').forEach(tr => {
-            tr.addEventListener('click', () => {
-                tr.parentElement.querySelectorAll('tr').forEach(x => x.classList.remove('is-selected'));
-                tr.classList.add('is-selected');
-            });
+        document.body.addEventListener('input', (e) => {
+            if (e.target.matches('[data-search="inbox"]')) renderInboxRows();
+            if (e.target.matches('[data-search="library"]')) renderLibraryRows();
+        });
+
+        document.body.addEventListener('change', (e) => {
+            if (e.target.matches('[data-library-seller]')) renderLibraryRows();
         });
 
         refreshClock();
@@ -204,6 +231,86 @@
         loadBridgeSummary();
         loadBridgeConfig();
         wireOperationProgress();
+        window.addEventListener('popstate', () => {
+            const page = pageIdFromPath(location.pathname);
+            if (page) showPage(page, null, { push: false });
+        });
+        markPageLoaded(document.body.dataset.page || pageIdFromPath(location.pathname));
+    }
+
+    function pageIdFromPath(pathname) {
+        const match = /\/([^/]+)\.html$/.exec(pathname);
+        const name = match?.[1] || '';
+        return SPA_PAGES.has(name) ? name : '';
+    }
+
+    function pathForPage(pageId) {
+        if (!SPA_PAGES.has(pageId)) return '';
+        return `${pageId}.html`;
+    }
+
+    function markPageLoaded(pageId) {
+        if (!pageId) return;
+        const main = document.querySelector('main.main');
+        if (main) {
+            main.dataset.spaPage = pageId;
+            main.dataset.spaLoaded = 'true';
+        }
+        document.body.dataset.page = pageId;
+    }
+
+    function updateActiveNav(pageId) {
+        document.querySelectorAll('[data-spa-page]').forEach((link) => {
+            link.classList.toggle('is-active', link.dataset.spaPage === pageId);
+        });
+    }
+
+    async function loadPageMain(pageId, href) {
+        const url = href || pathForPage(pageId);
+        const response = await fetch(url, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`无法加载页面：${url}`);
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const main = doc.querySelector('main.main');
+        if (!main) throw new Error(`页面缺少 main：${url}`);
+        const clone = main.cloneNode(true);
+        clone.dataset.spaPage = pageId;
+        clone.dataset.spaLoaded = 'true';
+        clone.style.display = 'none';
+        document.querySelector('.app')?.appendChild(clone);
+        for (const script of doc.querySelectorAll('script')) {
+            if (script.src && script.src.includes('/scripts/shell.js')) continue;
+            if (script.src && script.getAttribute('src')?.includes('../scripts/shell.js')) continue;
+            const node = document.createElement('script');
+            if (script.src) node.src = script.src;
+            else node.textContent = script.textContent || '';
+            document.body.appendChild(node);
+            if (!script.src) node.remove();
+        }
+        PAGE_SCRIPT_INIT[pageId]?.();
+        return clone;
+    }
+
+    async function showPage(pageId, href, opts = {}) {
+        if (!SPA_PAGES.has(pageId)) return;
+        const current = document.querySelector('main.main:not([style*="display: none"])');
+        if (current?.dataset.spaPage === pageId) return;
+        try {
+            let target = document.querySelector(`main.main[data-spa-page="${pageId}"]`);
+            if (!target) target = await loadPageMain(pageId, href);
+            document.querySelectorAll('main.main').forEach((main) => {
+                main.style.display = main === target ? '' : 'none';
+            });
+            document.body.dataset.page = pageId;
+            updateActiveNav(pageId);
+            await loadBridgeSummary();
+            await loadBridgeConfig();
+            if (opts.push !== false) {
+                history.pushState({ page: pageId }, '', pathForPage(pageId));
+            }
+        } catch (err) {
+            showToast('页面加载失败', err?.message || '请重试。', 'err');
+        }
     }
 
     function refreshClock() {
@@ -214,6 +321,10 @@
 
     function text(selector, value) {
         document.querySelectorAll(selector).forEach((el) => { el.textContent = value; });
+    }
+
+    function activeMain() {
+        return document.querySelector('main.main:not([style*="display: none"])') || document;
     }
 
     function fmtInt(value) {
@@ -565,18 +676,17 @@
         text('[data-inbox="with-links"]', fmtInt(inbox.withLinks));
         text('[data-inbox="earliest"]', inbox.earliestMonth || '暂无');
         text('[data-inbox="latest"]', inbox.latestMonth || '暂无');
-        const tbody = document.querySelector('[data-inbox-rows]');
-        if (!tbody || !Array.isArray(inbox.rows)) return;
-        window.FPH.inboxRows = inbox.rows.slice();
+        if (Array.isArray(inbox.rows)) window.FPH.inboxRows = inbox.rows.slice();
         renderInboxRows();
     }
 
     function renderInboxRows() {
-        const tbody = document.querySelector('[data-inbox-rows]');
+        const scope = activeMain();
+        const tbody = scope.querySelector('[data-inbox-rows]');
         if (!tbody) return;
-        const query = String(document.querySelector('[data-search="inbox"]')?.value || '').trim().toLowerCase();
-        const attachmentOnly = document.querySelector('[data-filter="inbox-attachment"]')?.classList.contains('is-active');
-        const linksOnly = document.querySelector('[data-filter="inbox-links"]')?.classList.contains('is-active');
+        const query = String(scope.querySelector('[data-search="inbox"]')?.value || '').trim().toLowerCase();
+        const attachmentOnly = scope.querySelector('[data-filter="inbox-attachment"]')?.classList.contains('is-active');
+        const linksOnly = scope.querySelector('[data-filter="inbox-links"]')?.classList.contains('is-active');
         const rows = sortRows((window.FPH.inboxRows || []).filter((row) => {
             const haystack = `${row.messageId || ''} ${row.from || ''} ${row.subject || ''} ${row.mailbox || ''}`.toLowerCase();
             if (query && !haystack.includes(query)) return false;
@@ -608,20 +718,19 @@
         text('[data-lib="itinerary"]', fmtInt(library.itinerary));
         text('[data-lib="supporting"]', fmtInt(library.supporting));
 
-        const tbody = document.querySelector('[data-library-rows]');
-        if (!tbody || !Array.isArray(library.rows)) return;
-        window.FPH.libraryRows = library.rows.slice();
+        if (Array.isArray(library.rows)) window.FPH.libraryRows = library.rows.slice();
         renderLibraryRows();
         updateSellerOptions(window.FPH.libraryRows || []);
     }
 
     function renderLibraryRows() {
-        const tbody = document.querySelector('[data-library-rows]');
+        const scope = activeMain();
+        const tbody = scope.querySelector('[data-library-rows]');
         if (!tbody) return;
-        const query = String(document.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
-        const activeTab = document.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
-        const seller = document.querySelector('[data-library-seller]')?.value || '';
-        const failedOnly = document.querySelector('[data-filter="library-failed"]')?.classList.contains('is-active');
+        const query = String(scope.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
+        const activeTab = scope.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
+        const seller = scope.querySelector('[data-library-seller]')?.value || '';
+        const failedOnly = scope.querySelector('[data-filter="library-failed"]')?.classList.contains('is-active');
         const rows = sortRows((window.FPH.libraryRows || []).filter((row) => {
             const haystack = `${row.seller || ''} ${row.invoiceNo || ''} ${row.amount || ''} ${row.filename || ''} ${row.error || ''}`.toLowerCase();
             if (query && !haystack.includes(query)) return false;
@@ -652,7 +761,7 @@
     }
 
     function updateSellerOptions(rows) {
-        const select = document.querySelector('[data-library-seller]');
+        const select = activeMain().querySelector('[data-library-seller]');
         if (!select) return;
         const sellers = Array.from(new Set(rows.map((row) => row.seller).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
         const current = select.value;
@@ -759,11 +868,8 @@
             if (event.key !== 'Enter') return;
             const q = encodeURIComponent(event.currentTarget.value.trim());
             if (!q) return;
-            window.location.href = rel(`library.html?q=${q}`);
+            showPage('library', `library.html?q=${q}`);
         });
-        document.querySelector('[data-search="inbox"]')?.addEventListener('input', renderInboxRows);
-        document.querySelector('[data-search="library"]')?.addEventListener('input', renderLibraryRows);
-        document.querySelector('[data-library-seller]')?.addEventListener('change', renderLibraryRows);
         const params = new URLSearchParams(window.location.search);
         const q = params.get('q');
         if (q) {
@@ -780,8 +886,8 @@
 
     async function handleAction(action) {
         const name = action.dataset.action;
-        if (name === 'open-dashboard') { window.location.href = rel('dashboard.html'); return; }
-        if (name === 'open-pending-page') { window.location.href = rel('pending.html'); return; }
+        if (name === 'open-dashboard') { await showPage('dashboard', rel('dashboard.html')); return; }
+        if (name === 'open-pending-page') { await showPage('pending', rel('pending.html')); return; }
         if (name === 'reload-summary') { await loadBridgeSummary(); showToast('已刷新', '本地列表已重新读取。'); return; }
         if (name === 'preview-fetch') { showFetchPreview(); return; }
         if (name === 'export-log') { exportVisibleLog(); return; }
