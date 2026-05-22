@@ -1065,18 +1065,23 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   return { ok: result.code === 0, ...result, message: ocrRunMessage(result), summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
-ipcMain.handle('mfh:organize', async () => {
+ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
+  const raw = asObject(payload);
+  const applyRename = raw.applyRename === true;
   const startedAt = Date.now();
-  const result = await runCli('organize', ['--config', configPath]);
-  historyEntry('organize', '整理输出文件', startedAt, result);
+  const cliArgs = ['--config', configPath];
+  if (applyRename) cliArgs.push('--apply-rename');
+  const result = await runCli('organize', cliArgs);
+  historyEntry('organize', applyRename ? '一键改名整理' : '整理输出文件', startedAt, result);
   const output = `${result.stdout}\n${result.stderr}`;
   const scannedMatch = /Organize complete: scanned=(\d+)/.exec(output);
   const scanned = scannedMatch ? Number(scannedMatch[1]) : NaN;
+  const baseLabel = applyRename ? '改名' : '整理';
   const message = Number.isFinite(scanned) && scanned === 0
     ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
     : Number.isFinite(scanned)
-      ? `整理完成，处理 ${scanned} 条识别结果。`
-      : '整理完成。';
+      ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
+      : `${baseLabel}完成。`;
   return {
     ok: result.code === 0,
     ...result,

@@ -192,10 +192,11 @@ export function writeOrganizeAudit(csvPath: string, row: OcrResultRow, outputPat
   }
 }
 
-export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { resultsCsv?: string; outDir?: string } = {}): OrganizeSummary {
+export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { resultsCsv?: string; outDir?: string; applyRename?: boolean } = {}): OrganizeSummary {
   const resultsCsv = path.resolve(opts.resultsCsv ?? cfg.ocr.resultsCsv);
   const invoicesDir = path.resolve(cfg.paths.invoices);
   const organizedDir = path.resolve(opts.outDir ?? cfg.rename.organizedDir);
+  const applyRename = opts.applyRename ?? cfg.rename.applyAfterOcr;
   const auditCsv = path.join(organizedDir, 'organize-results.csv');
   const rows = readOcrResults(resultsCsv);
   const summary: OrganizeSummary = { scanned: rows.length, copied: 0, skipped: 0, failed: 0 };
@@ -226,7 +227,7 @@ export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { results
     }
 
     try {
-      const filename = cfg.rename.applyAfterOcr ? renderFilename(row, cfg) : safePathSegment(row.filename, 'document.pdf');
+      const filename = applyRename ? renderFilename(row, cfg) : safePathSegment(row.filename, 'document.pdf');
       const targetDir = renderTargetDir(row, cfg, organizedDir);
       const result = copyFileConflictSafe(src, path.join(targetDir, filename));
       if (result.copied) {

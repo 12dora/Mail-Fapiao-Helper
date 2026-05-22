@@ -179,8 +179,8 @@ async function main() {
       fail(`识别后统计不正确：${JSON.stringify(afterOcr)}`);
     }
 
-    await page.getByRole('button', { name: '整理识别结果' }).click();
-    await expectToast(page, '整理完成');
+    await page.getByRole('button', { name: '一键改名' }).first().click();
+    await expectToast(page, '改名完成');
     await page.getByRole('button', { name: '复制日志' }).click();
     await expectToast(page, '已复制');
 
@@ -225,8 +225,8 @@ async function main() {
     await page.getByRole('button', { name: '重新识别' }).click();
     await expectToast(page, '识别完成');
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
-    await page.getByRole('button', { name: '整理输出' }).click();
-    await expectToast(page, '整理完成');
+    await page.getByRole('button', { name: '一键改名' }).click();
+    await expectToast(page, '改名完成');
 
     await page.getByRole('link', { name: /待确认/ }).click();
     await page.waitForURL(/pending\.html/);
