@@ -111,8 +111,8 @@ function classifyPending(row: PendingRow): Omit<PendingGroup, 'count' | 'rows'> 
   };
 }
 
-export function summarizePending(cfg: Config): PendingSummary {
-  const csvPath = path.join(path.resolve(cfg.paths.pending), 'pending.csv');
+export function summarizePending(cfg: Config, cwd: string = process.cwd()): PendingSummary {
+  const csvPath = path.join(path.resolve(cwd, cfg.paths.pending), 'pending.csv');
   const rows = readCsvRows(csvPath).map(rowFromRaw);
   const byKey = new Map<string, PendingGroup>();
 
@@ -139,8 +139,8 @@ export function summarizePending(cfg: Config): PendingSummary {
   return { csvPath, total: rows.length, groups };
 }
 
-export function pendingEmlPath(cfg: Config, row: PendingRow): string {
-  return path.join(path.resolve(cfg.paths.pending), `${row.hash}.eml`);
+export function pendingEmlPath(cfg: Config, row: PendingRow, cwd: string = process.cwd()): string {
+  return path.join(path.resolve(cwd, cfg.paths.pending), `${row.hash}.eml`);
 }
 
 export function pendingEmlExists(cfg: Config, row: PendingRow): boolean {

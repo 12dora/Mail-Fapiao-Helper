@@ -1,4 +1,12 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
+// Electron 42's main-process "electron" module is CJS with dynamic exports —
+// ESM named imports fail ("does not provide an export named 'BrowserWindow'")
+// and ESM default-import yields the launcher path stub, not the API. Going
+// through createRequire forces the proper main-process module.
+import { createRequire as _createRequire } from 'node:module';
+import type * as ElectronAPI from 'electron';
+const _require = _createRequire(import.meta.url);
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell }: typeof ElectronAPI = _require('electron');
+type BrowserWindowType = ElectronAPI.BrowserWindow;
 import { ImapFlow } from 'imapflow';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -84,7 +92,7 @@ const configPath = process.env.MFH_CONFIG_PATH
 const statePath = process.env.MFH_STATE_PATH
   ? path.resolve(process.env.MFH_STATE_PATH)
   : path.join(dataDir, 'state.json');
-let mainWindow: BrowserWindow | undefined;
+let mainWindow: BrowserWindowType | undefined;
 let activeOcrProcess: ChildProcess | undefined;
 let activeOcrStopRequested = false;
 
@@ -917,7 +925,26 @@ ipcMain.handle('mfh:get-summary', () => loadAppSummary(configPath, dataDir, bund
 
 ipcMain.handle('mfh:get-config', () => {
   const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
-  return { configPath, configExists: fs.existsSync(configPath), configError: error, config: cfg, dataDir };
+  // Redact secrets so they never reach the renderer process. We still report whether each
+  // secret is populated so the UI can show "已保存（留空则不修改）" placeholders.
+  const redactedImap = { ...cfg.imap, pass: cfg.imap?.pass ? '' : '' };
+  const ocrSrc = (cfg as { ocr?: Record<string, unknown> }).ocr ?? {};
+  const credsSrc = asObject((ocrSrc as Record<string, unknown>).credentials);
+  const redactedCreds = {
+    ...credsSrc,
+    tencentSecretId: '',
+    tencentSecretKey: '',
+    secretId: '',
+    secretKey: '',
+  };
+  const redactedOcr = { ...ocrSrc, credentials: redactedCreds };
+  const redactedConfig = { ...cfg, imap: redactedImap, ocr: redactedOcr };
+  const secrets = {
+    imapPass: Boolean(cfg.imap?.pass),
+    tencentSecretId: Boolean(credsSrc.tencentSecretId || credsSrc.secretId),
+    tencentSecretKey: Boolean(credsSrc.tencentSecretKey || credsSrc.secretKey),
+  };
+  return { configPath, configExists: fs.existsSync(configPath), configError: error, config: redactedConfig, secrets, dataDir };
 });
 
 ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
@@ -1070,6 +1097,11 @@ ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
   const target = typeof raw.path === 'string' ? raw.path : dataDir;
   const resolved = path.resolve(dataDir, target);
   if (raw.reveal === true) {
+    // shell.showItemInFolder silently does nothing when the path is missing, which
+    // leaves the renderer thinking the operation succeeded. Verify first.
+    if (!fs.existsSync(resolved)) {
+      return { ok: false, error: '文件已不存在，可能被移动或删除。请重新归档。' };
+    }
     shell.showItemInFolder(resolved);
     return { ok: true, error: '' };
   }
@@ -1115,11 +1147,24 @@ ipcMain.handle('mfh:test-connection', async (_event, payload: unknown) => {
     const mailbox = Array.isArray(configured) && typeof configured[0] === 'string' && configured[0]
       ? configured[0]
       : 'INBOX';
-    await client.mailboxOpen(mailbox).catch(async () => {
+    let fallbackMailbox = '';
+    try {
+      await client.mailboxOpen(mailbox);
+    } catch {
       const boxes = await client.list();
-      if (boxes.length > 0) await client.mailboxOpen(boxes[0]!.path);
-    });
+      if (boxes.length > 0) {
+        fallbackMailbox = boxes[0]!.path;
+        await client.mailboxOpen(fallbackMailbox);
+      }
+    }
     await client.logout().catch(() => undefined);
+    if (fallbackMailbox) {
+      return {
+        ok: true,
+        kind: 'warn',
+        message: `邮箱连接正常，但找不到配置的文件夹「${mailbox}」，已临时打开「${fallbackMailbox}」。请在配置中重新选择目标文件夹。`,
+      };
+    }
     return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
   } catch (err) {
     return { ok: false, message: `邮箱连接失败：${err instanceof Error ? err.message : String(err)}` };

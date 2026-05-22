@@ -73,11 +73,11 @@
                             </div>
                         </div>
                         <div class="row gap-8 mt-12" id="date-preset-buttons">
-                            <button class="btn btn--sm" data-range="today">今天</button>
-                            <button class="btn btn--sm" data-range="week">本周以来</button>
-                            <button class="btn btn--sm btn--primary" data-range="month">本月以来</button>
-                            <button class="btn btn--sm" data-range="quarter">本季以来</button>
-                            <button class="btn btn--sm" data-range="year">今年以来</button>
+                            <button class="btn btn--sm" type="button" data-range="today">今天</button>
+                            <button class="btn btn--sm" type="button" data-range="week">本周以来</button>
+                            <button class="btn btn--sm btn--primary" type="button" data-range="month">本月以来</button>
+                            <button class="btn btn--sm" type="button" data-range="quarter">本季以来</button>
+                            <button class="btn btn--sm" type="button" data-range="year">今年以来</button>
                         </div>
                     </div>
 
@@ -97,13 +97,13 @@
                     </div>
 
                     <div class="row gap-8 mb-12">
-                        <button class="btn btn--primary" id="run-btn">
+                        <button class="btn btn--primary" id="run-btn" type="button">
                             <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
                             开始获取邮件
                         </button>
-                        <button class="btn" data-action="preview-fetch">查看将要执行的操作</button>
+                        <button class="btn" type="button" data-action="preview-fetch">查看将要执行的操作</button>
                         <div style="flex: 1;"></div>
-                        <span class="mono small muted" id="range-preview">2026-05-01 至 2026-05-21</span>
+                        <span class="mono small muted" id="range-preview">--</span>
                     </div>
 
                     <div class="progress is-idle" id="run-progress">
@@ -126,7 +126,7 @@
                         <h3 class="card__title" style="margin: 0;">获取邮件实时日志</h3>
                     </div>
                     <div class="console console--panel" id="console-out">
-                        <div class="console__line"><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">选择日期范围后，点击“开始获取邮件”才会运行。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">选择日期范围后，点击“开始获取邮件”才会运行。</span></div>
                     </div>
                 </div>
             </div>
@@ -160,8 +160,9 @@
                     </div>
                     <hr class="hairline">
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary" data-action="run-pipeline">开始获取发票文件</button>
-                        <button class="btn btn--sm" data-action="open-invoices-folder">打开归档目录</button>
+                        <button class="btn btn--sm btn--primary" type="button" data-action="run-pipeline">开始获取发票文件</button>
+                        <button class="btn btn--sm" type="button" data-action="rerun-pipeline">重新获取（忽略已处理）</button>
+                        <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
                     </div>
                     <div class="ocr-runner mt-12" data-file-runner>
                         <div class="row row--between small muted">
@@ -184,7 +185,7 @@
                         <h3 class="card__title" style="margin: 0;">获取发票文件实时日志</h3>
                     </div>
                     <div class="console console--panel" data-file-log>
-                        <div class="console__line"><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始获取发票文件”后，这里会显示下载和归档过程。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始获取发票文件”后，这里会显示下载和归档过程。</span></div>
                     </div>
                 </div>
             </div>
@@ -199,8 +200,8 @@
                         <span class="pill pill--info">再识别内容</span>
                     </div>
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary" data-action="ocr-toggle" data-ocr-mode="start">开始识别发票文件</button>
-                        <button class="btn btn--sm" data-action="organize">整理识别结果</button>
+                        <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别发票文件</button>
+                        <button class="btn btn--sm" type="button" data-action="organize">整理识别结果</button>
                         <select class="select" data-ocr-parallel style="width: 120px;">
                             <option value="1" selected>1 个并行</option>
                             <option value="2">2 个并行</option>
@@ -229,7 +230,7 @@
                         <h3 class="card__title" style="margin: 0;">识别发票文件实时日志</h3>
                     </div>
                     <div class="console console--panel" data-ocr-log>
-                        <div class="console__line"><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始识别发票文件”后，这里会显示识别过程。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始识别发票文件”后，这里会显示识别过程。</span></div>
                     </div>
                 </div>
             </div>
@@ -241,9 +242,6 @@
                         <div>
                             <h3 class="card__title" style="margin: 0 0 4px;">本次抓取邮件清单</h3>
                             <p class="card__sub" style="margin: 0;">本次运行保存的邮件</p>
-                        </div>
-                        <div class="row gap-8">
-                            <button class="btn btn--sm" data-action="organize">按规则整理到分类目录</button>
                         </div>
                     </div>
                 </div>
@@ -282,7 +280,7 @@
                 <hr class="hairline">
                 <div class="row row--between small mono muted">
                     <span data-history-total>0 条记录</span>
-                    <button class="btn btn--sm btn--ghost" data-action="export-log">复制日志</button>
+                    <button class="btn btn--sm btn--ghost" type="button" data-action="export-log">复制日志</button>
                 </div>
             </div>
         </div>
@@ -320,6 +318,7 @@ function startOfWeek(d) {
 }
 
 function rangeFor(preset) {
+    if (preset === 'custom') return null;
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const from = new Date(today);
@@ -338,9 +337,12 @@ function rangeFor(preset) {
 }
 
 function setRange(preset) {
-    const [from, to] = rangeFor(preset);
-    dateFrom.value = fmt(from);
-    dateTo.value = fmt(to);
+    const range = rangeFor(preset);
+    if (range) {
+        const [from, to] = range;
+        dateFrom.value = fmt(from);
+        dateTo.value = fmt(to);
+    }
     rangePreset.value = preset;
     presetButtons.querySelectorAll('[data-range]').forEach((button) => {
         button.classList.toggle('btn--primary', button.dataset.range === preset);
@@ -349,7 +351,25 @@ function setRange(preset) {
 }
 
 function updatePreview() {
-    rangePreview.textContent = `${dateFrom.value} 至 ${dateTo.value}`;
+    const hasBoth = Boolean(dateFrom.value && dateTo.value);
+    const reversed = hasBoth && dateFrom.value > dateTo.value;
+    if (reversed) {
+        rangePreview.textContent = `开始日期 ${dateFrom.value} 晚于结束日期 ${dateTo.value}`;
+        rangePreview.classList.add('is-invalid');
+        dateFrom.classList.add('is-invalid');
+        dateTo.classList.add('is-invalid');
+    } else {
+        rangePreview.textContent = `${dateFrom.value} 至 ${dateTo.value}`;
+        rangePreview.classList.remove('is-invalid');
+        dateFrom.classList.remove('is-invalid');
+        dateTo.classList.remove('is-invalid');
+    }
+    if (runBtn && runBtn.dataset.busy !== 'true') {
+        runBtn.disabled = reversed || !hasBoth;
+        if (reversed) runBtn.title = '开始日期晚于结束日期，请先调整';
+        else if (!hasBoth) runBtn.title = '请先选择开始与结束日期';
+        else runBtn.removeAttribute('title');
+    }
     if (rangePreset.value !== 'custom') {
         const [from, to] = rangeFor(rangePreset.value);
         if (dateFrom.value !== fmt(from) || dateTo.value !== fmt(to)) {
@@ -360,6 +380,7 @@ function updatePreview() {
 }
 
 function appendLog(tag, message, kind = '') {
+    consoleOut.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
     const line = document.createElement('div');
     line.className = 'console__line';
     const now = new Date();
@@ -376,22 +397,36 @@ function applyProgress(data) {
     saved.textContent = data.saved ?? saved.textContent;
     skip.textContent = data.skipped ?? skip.textContent;
     if (data.message) appendLog(data.step || '进度', data.message, data.kind || '');
+    const errored = data.kind === 'err';
+    progress.classList.toggle('is-error', errored);
+    if (errored) {
+        status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+        runBtn.dataset.busy = '';
+        runBtn.disabled = false;
+        return;
+    }
     if (pct >= 100 || data.done) {
         progress.classList.add('is-done');
         status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+        runBtn.dataset.busy = '';
         runBtn.disabled = false;
     }
 }
 
 async function startRun() {
     runBtn.disabled = true;
-    progress.classList.remove('is-idle', 'is-done');
+    runBtn.dataset.busy = 'true';
+    progress.classList.remove('is-idle', 'is-done', 'is-error');
     progBar.style.setProperty('--p', '0%');
     matched.textContent = '0';
     saved.textContent = '0';
     skip.textContent = '0';
     consoleOut.innerHTML = '';
     status.innerHTML = '<span class="pill pill--info"><span class="pill__dot"></span>运行中</span>';
+
+    // Make sure the bridge config has been applied before reading the checks, so we
+    // never send the hardcoded HTML defaults when the user has saved something else.
+    await window.FPH?.whenConfigReady?.();
 
     const fetchCheck = (key) => document.querySelector(`[data-fetch-check="${key}"]`)?.classList.contains('is-on') === true;
     const payload = {
@@ -405,13 +440,33 @@ async function startRun() {
 
     if (window.mfhBridge?.startFetch) {
         window.mfhBridge.onFetchProgress?.(applyProgress);
-        const result = await window.mfhBridge.startFetch(payload);
+        let result;
+        try {
+            result = await window.mfhBridge.startFetch(payload);
+        } catch (err) {
+            appendLog('失败', err?.message || '抓取过程异常中断。', 'err');
+            status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+            progress.classList.add('is-error');
+            runBtn.dataset.busy = '';
+        runBtn.disabled = false;
+            return;
+        }
         if (result?.summary) window.FPH?.applySummary?.(result.summary);
         if (!result?.ok) {
             appendLog('失败', result?.message || result?.stderr || '抓取失败，请检查配置。', 'err');
             status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+            progress.classList.add('is-error');
+            runBtn.dataset.busy = '';
+        runBtn.disabled = false;
+            return;
+        }
+        // Fallback in case no final progress event arrived: guarantee the UI lands on "完成".
+        if (!progress.classList.contains('is-done')) {
+            progBar.style.setProperty('--p', '100%');
             progress.classList.add('is-done');
-            runBtn.disabled = false;
+            status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+            runBtn.dataset.busy = '';
+        runBtn.disabled = false;
         }
         return;
     }
