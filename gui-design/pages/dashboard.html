@@ -16,7 +16,7 @@
             <span class="toolbar__crumb">工作流</span>
             <span class="toolbar__title">运行控制台</span>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">邮箱已连接 · <span data-clock>--:--</span></span>
+            <span class="toolbar__meta"><span data-mail-status-meta>请先在「配置」页填写邮箱</span> · <span data-clock>--:--</span></span>
         </div>
 
         <div class="page stagger">
@@ -54,11 +54,11 @@
                         <div class="field-row field-row--3">
                             <div class="field" style="margin-bottom: 0;">
                                 <label class="field__label">开始日期</label>
-                                <input class="input" id="date-from" type="date" value="2026-05-01">
+                                <input class="input" id="date-from" type="date">
                             </div>
                             <div class="field" style="margin-bottom: 0;">
                                 <label class="field__label">结束日期</label>
-                                <input class="input" id="date-to" type="date" value="2026-05-21">
+                                <input class="input" id="date-to" type="date">
                             </div>
                             <div class="field" style="margin-bottom: 0;">
                                 <label class="field__label">快捷选择</label>
@@ -161,7 +161,7 @@
                     <hr class="hairline">
                     <div class="row gap-8">
                         <button class="btn btn--sm btn--primary" data-action="run-pipeline">开始获取发票文件</button>
-                        <button class="btn btn--sm" data-action="open-invoices-folder">打开文件位置</button>
+                        <button class="btn btn--sm" data-action="open-invoices-folder">打开归档目录</button>
                     </div>
                     <div class="ocr-runner mt-12" data-file-runner>
                         <div class="row row--between small muted">
@@ -216,13 +216,13 @@
                         <div class="progress is-idle mt-12" data-ocr-progress>
                             <div class="progress__bar" data-ocr-bar style="--p: 0%"></div>
                         </div>
-                    <div class="row gap-12 mt-12 mono small muted">
-                        <span>成功 <strong class="strong" data-ocr-parsed>0</strong></span>
-                        <span>跳过 <strong class="strong" data-ocr-skipped>0</strong></span>
-                        <span>失败 <strong style="color: var(--err);" data-ocr-failed>0</strong></span>
+                        <div class="row gap-12 mt-12 mono small muted">
+                            <span>成功 <strong class="strong" data-ocr-parsed>0</strong></span>
+                            <span>跳过 <strong class="strong" data-ocr-skipped>0</strong></span>
+                            <span>失败 <strong style="color: var(--err);" data-ocr-failed>0</strong></span>
+                        </div>
                     </div>
                 </div>
-            </div>
 
                 <div class="card card--log">
                     <div style="padding: 12px 16px; border-bottom: 1px solid var(--border);">
@@ -243,7 +243,7 @@
                             <p class="card__sub" style="margin: 0;">本次运行保存的邮件</p>
                         </div>
                         <div class="row gap-8">
-                            <button class="btn btn--sm" data-action="organize">整理到文件夹</button>
+                            <button class="btn btn--sm" data-action="organize">按规则整理到分类目录</button>
                         </div>
                     </div>
                 </div>
@@ -431,7 +431,7 @@ presetButtons.addEventListener('click', (event) => {
 dateFrom.addEventListener('input', updatePreview);
 dateTo.addEventListener('input', updatePreview);
 runBtn?.addEventListener('click', startRun);
-updatePreview();
+setRange(rangePreset.value || 'month');
 </script>
 </body>
 </html>

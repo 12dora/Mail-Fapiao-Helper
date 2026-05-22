@@ -55,11 +55,11 @@
                         <label class="field__label">邮箱文件夹 <span class="field__hint">不选择则扫描全部</span></label>
                         <select class="select select--mailboxes" multiple size="6" data-config="imap.mailbox">
                             <option value="INBOX">INBOX</option>
-                            <option value="其他文件夹/已处理 2025发票">其他文件夹/已处理 2025发票</option>
-                            <option value="其他文件夹/已处理 2026发票">其他文件夹/已处理 2026发票</option>
-                            <option value="Sent Messages">Sent Messages</option>
-                            <option value="邮件归档">邮件归档</option>
                         </select>
+                        <div class="row gap-8" style="margin-top: 8px;">
+                            <button class="btn btn--sm" type="button" data-action="reload-mailboxes">读取我的邮箱文件夹</button>
+                            <span class="small muted" data-mailbox-status>未读取过</span>
+                        </div>
                         <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">imap.mailbox</code>；不选则扫描全部 mailbox</div>
                     </div>
                     <div class="field field--compact">
@@ -233,21 +233,38 @@
                     <input class="input input--mono" data-config="ocr.resultsCsv" value="./invoices/ocr/ocr-results.csv">
                     <div class="field__hint">这些鉴权信息只写入本机配置；运行 efapiao 时会作为本地环境变量透传，不会写入发票文件。</div>
                 </div>
+
+                <details style="margin-top: 12px;">
+                    <summary style="cursor: pointer; font-size: 13px; color: var(--fg-muted);">高级：本机识别服务参数</summary>
+                    <div class="field-row field-row--3" style="margin-top: 12px;">
+                        <div class="field">
+                            <label class="field__label">服务主机</label>
+                            <input class="input input--mono" data-config="ocr.serviceHost" placeholder="127.0.0.1">
+                        </div>
+                        <div class="field">
+                            <label class="field__label">服务端口</label>
+                            <input class="input input--mono" data-config="ocr.servicePort" placeholder="8000">
+                        </div>
+                        <div class="field">
+                            <label class="field__label">默认并行数</label>
+                            <input class="input input--mono" data-config="ocr.serviceWorkers" placeholder="1">
+                            <div class="field__hint">"开始处理"页的并行选择会覆盖这里。</div>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label class="field__label">批量大小</label>
+                        <input class="input input--mono" data-config="ocr.batchSize" placeholder="1">
+                    </div>
+                </details>
             </div>
 
-            <!-- 智能查找兜底 -->
-            <div class="card">
-                <h3 class="card__title">智能查找兜底</h3>
-                <p class="card__sub">这是给未来 LLM 邮件理解接口预留的能力，目前还没有开发完成，所以暂不可用</p>
-
-                <div class="field-row">
-                    <div class="field">
-                        <label class="field__label">当前状态</label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check"></div>
-                            未开放
-                        </label>
-                    </div>
+            <!-- 智能查找兜底（实验性，默认折叠） -->
+            <details class="card">
+                <summary style="cursor: pointer; list-style: none;">
+                    <h3 class="card__title" style="display: inline; margin: 0;">智能查找兜底 <span class="pill pill--warn">暂未开放</span></h3>
+                    <p class="card__sub" style="margin-top: 4px;">给未来 LLM 邮件理解接口预留的入口；展开仅供预览</p>
+                </summary>
+                <div class="field-row" style="margin-top: 12px;">
                     <div class="field">
                         <label class="field__label">服务来源</label>
                         <select class="select" disabled aria-label="智能查找服务来源">
@@ -259,13 +276,12 @@
                         <input class="input input--mono" value="暂未启用" disabled>
                     </div>
                 </div>
-
                 <div class="field">
                     <label class="field__label">访问密钥</label>
                     <input class="input input--mono" type="password" placeholder="功能开放后可填写" disabled>
                     <div class="field__hint">当前版本不会调用 LLM，也不会上传邮件正文给智能模型。</div>
                 </div>
-            </div>
+            </details>
 
             <!-- 网页自动下载 -->
             <div class="card">
@@ -352,8 +368,6 @@ function collectConfigPayload() {
         },
         filter: {
             keywords: keywords.length ? keywords : ['发票'],
-            matchSubject: true,
-            matchBody: true,
         },
         paths: {
             samples: value('paths.samples'),
@@ -377,10 +391,14 @@ function collectConfigPayload() {
             ocrMode: value('ocr.ocrMode'),
             executionMode: value('ocr.executionMode'),
             resultsCsv: value('ocr.resultsCsv'),
+            serviceHost: value('ocr.serviceHost') || undefined,
+            servicePort: numberValue('ocr.servicePort'),
+            serviceWorkers: numberValue('ocr.serviceWorkers'),
+            batchSize: numberValue('ocr.batchSize'),
             credentials: {
-                tencentSecretId: document.getElementById('tencent-secret-id')?.value,
-                tencentSecretKey: document.getElementById('tencent-secret-key')?.value,
-                tencentRegion: document.getElementById('tencent-region')?.value,
+                tencentSecretId: document.getElementById('tencent-secret-id')?.value || undefined,
+                tencentSecretKey: document.getElementById('tencent-secret-key')?.value || undefined,
+                tencentRegion: document.getElementById('tencent-region')?.value || undefined,
             },
         },
         playwright: {

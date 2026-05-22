@@ -174,7 +174,7 @@ async function main() {
           return {
             configExists: true,
             config: {
-              imap: { host: 'imap.test.local', port: 993, user: 'user@test.local' },
+              imap: { host: 'imap.test.local', port: 993, user: 'user@test.local', pass: 'app-token', tls: true, mailbox: ['INBOX'] },
               filter: { keywords: ['发票', '行程单'], since: '2026-05-01', until: '2026-05-21', sinceDays: 30 },
               paths: { samples: './samples/raw', invoices: './invoices', pending: './pending' },
               output: { csv: './invoices.csv' },
@@ -234,6 +234,10 @@ async function main() {
           record('testMailConnection');
           return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
         },
+        async listMailboxes() {
+          record('listMailboxes');
+          return { ok: true, mailboxes: ['INBOX', 'Sent Messages', '邮件归档'] };
+        },
         async testConnection() {
           record('testConnection');
           return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
@@ -268,7 +272,7 @@ async function main() {
     await expectText(page, '邮件记录');
     await expectText(page, '发票库');
     await expectText(page, '待确认');
-    await expectText(page, '邮箱已连接');
+    await expectText(page, '已配置 · user@test.local');
     await expectText(page, '获取发票文件');
     await expectText(page, '获取发票文件实时日志');
     await expectText(page, '识别发票文件');
@@ -352,7 +356,7 @@ async function main() {
     await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
     await page.getByRole('button', { name: '开始获取发票文件' }).click();
     await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
-    await page.getByRole('button', { name: '打开文件位置' }).click();
+    await page.getByRole('button', { name: '打开归档目录' }).first().click();
     const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (fileProgress !== '100%') fail(`获取发票文件进度应到 100%，实际为 ${fileProgress}`);
     const logStyles = await page.evaluate(() => {

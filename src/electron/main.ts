@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron';
 import { ImapFlow } from 'imapflow';
 import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultConfigPath, historyPath, loadAppSummary, loadGuiConfig, readRunHistory, type RunHistoryEntry } from './summary.js';
 import { readCsvRows } from '../util/csv.js';
+import { msgIdHash } from '../util/hash.js';
 
 interface DateRangePayload {
   from?: string;
@@ -294,6 +295,88 @@ function parseCsvLine(line: string): string[] {
   }
   out.push(cur);
   return out;
+}
+
+function pendingDirPath(): string {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  return path.resolve(dataDir, typeof paths.pending === 'string' ? paths.pending : './pending');
+}
+
+function invoicesDirPath(): string {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  return path.resolve(dataDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices');
+}
+
+function samplesDirPath(): string {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  return path.resolve(dataDir, typeof paths.samples === 'string' ? paths.samples : './samples/raw');
+}
+
+function rewritePendingCsv(filter: (row: Record<string, string>) => boolean): { removed: number; remaining: number } {
+  const pendingCsv = path.join(pendingDirPath(), 'pending.csv');
+  if (!fs.existsSync(pendingCsv)) return { removed: 0, remaining: 0 };
+  const text = fs.readFileSync(pendingCsv, 'utf8');
+  const bom = text.startsWith('﻿') ? '﻿' : '';
+  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  const header = parseCsvLine(lines[0] ?? '');
+  if (header.length === 0) return { removed: 0, remaining: 0 };
+  const out = [`${bom}${header.map(csvCell).join(',')}`];
+  let removed = 0;
+  let remaining = 0;
+  for (const line of lines.slice(1)) {
+    if (!line) continue;
+    const cols = parseCsvLine(line);
+    const row: Record<string, string> = {};
+    for (let i = 0; i < header.length; i++) {
+      const key = header[i];
+      if (!key) continue;
+      row[key] = cols[i] ?? '';
+    }
+    if (filter(row)) {
+      out.push(header.map((_, i) => csvCell(cols[i] ?? '')).join(','));
+      remaining++;
+    } else {
+      removed++;
+    }
+  }
+  fs.writeFileSync(pendingCsv, `${out.join('\n')}\n`, 'utf8');
+  return { removed, remaining };
+}
+
+function pendingRowHash(row: Record<string, string>): string {
+  return msgIdHash(row.messageId || undefined, row.from ?? '', row.date ?? '', row.subject ?? '');
+}
+
+function findPendingRow(hash: string): Record<string, string> | undefined {
+  const pendingCsv = path.join(pendingDirPath(), 'pending.csv');
+  for (const row of readCsvRows(pendingCsv)) {
+    if (pendingRowHash(row) === hash) return row;
+  }
+  return undefined;
+}
+
+function ensureBaseDirectories(): void {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  const ocr = asObject(cfg.ocr);
+  const rename = asObject(cfg.rename);
+  const ensure = (value: unknown, fallback: string) => {
+    const v = typeof value === 'string' && value.length > 0 ? value : fallback;
+    fs.mkdirSync(path.resolve(dataDir, v), { recursive: true });
+  };
+  ensure(paths.samples, './samples/raw');
+  ensure(paths.invoices, './invoices');
+  ensure(paths.pending, './pending');
+  if (typeof ocr.resultsCsv === 'string' && ocr.resultsCsv.length > 0) {
+    fs.mkdirSync(path.dirname(path.resolve(dataDir, ocr.resultsCsv)), { recursive: true });
+  }
+  if (typeof rename.organizedDir === 'string' && rename.organizedDir.length > 0) {
+    fs.mkdirSync(path.resolve(dataDir, rename.organizedDir), { recursive: true });
+  }
+  fs.mkdirSync(path.join(dataDir, '.mfh-cache'), { recursive: true });
 }
 
 function clearOcrResultsAndResetQueue(): void {
@@ -1043,6 +1126,122 @@ ipcMain.handle('mfh:test-connection', async (_event, payload: unknown) => {
   }
 });
 
+ipcMain.handle('mfh:list-mailboxes', async (_event, payload: unknown) => {
+  try {
+    if (payload && typeof payload === 'object') writeConfig(payload);
+  } catch {
+    // Ignore write failures here and still attempt a live connection.
+  }
+  if (process.env.MFH_E2E_FAKE_CLI === '1') {
+    return { ok: true, mailboxes: ['INBOX', 'Sent Messages', '邮件归档'] };
+  }
+  try {
+    const cfg = readMutableConfig();
+    const imap = asObject(cfg.imap);
+    const host = stringField(imap.host);
+    const port = numberField(imap.port);
+    const user = stringField(imap.user);
+    const pass = stringField(imap.pass);
+    const tls = imap.tls !== false;
+    if (!host || !Number.isFinite(port) || port <= 0 || !user || !pass) {
+      return { ok: false, message: '请先填写邮箱主机、端口、账号和授权码。', mailboxes: [] };
+    }
+    const client = new ImapFlow({ host, port, secure: tls, auth: { user, pass }, logger: false });
+    await client.connect();
+    const boxes = await client.list();
+    await client.logout().catch(() => undefined);
+    const mailboxes = boxes.map((b) => b.path).filter(Boolean);
+    return { ok: true, mailboxes };
+  } catch (err) {
+    return { ok: false, message: `读取文件夹失败：${err instanceof Error ? err.message : String(err)}`, mailboxes: [] };
+  }
+});
+
+ipcMain.handle('mfh:pending-ignore', (_event, payload: unknown) => {
+  const raw = asObject(payload);
+  const hash = typeof raw.hash === 'string' ? raw.hash : '';
+  if (!hash) return { ok: false, message: '缺少待忽略邮件的标识。' };
+  const result = rewritePendingCsv((row) => pendingRowHash(row) !== hash);
+  if (result.removed === 0) {
+    return {
+      ok: false,
+      message: '没有找到对应的待确认邮件，可能已经处理过。',
+      summary: loadAppSummary(configPath, dataDir, bundledConfigPath),
+    };
+  }
+  return {
+    ok: true,
+    message: '已从待确认队列中移除该邮件。',
+    removed: result.removed,
+    summary: loadAppSummary(configPath, dataDir, bundledConfigPath),
+  };
+});
+
+ipcMain.handle('mfh:pending-refresh-link', async (_event, payload: unknown) => {
+  const raw = asObject(payload);
+  const hash = typeof raw.hash === 'string' ? raw.hash : '';
+  if (!hash) return { ok: false, message: '缺少邮件标识。' };
+  const row = findPendingRow(hash);
+  const emlPath = path.join(pendingDirPath(), `${hash}.eml`);
+  const fallback = path.join(samplesDirPath());
+  if (fs.existsSync(emlPath)) {
+    const error = await shell.openPath(emlPath);
+    if (!error) {
+      return { ok: true, message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
+    }
+    shell.showItemInFolder(emlPath);
+    return { ok: true, message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
+  }
+  const error = await shell.openPath(fallback);
+  return {
+    ok: !error,
+    message: row
+      ? '没有找到本地副本，已打开邮件缓存目录，请手动查找原始邮件并刷新链接。'
+      : '没有找到对应邮件。',
+    error: error || undefined,
+  };
+});
+
+ipcMain.handle('mfh:pending-manual-archive', async (_event, payload: unknown) => {
+  const raw = asObject(payload);
+  const hash = typeof raw.hash === 'string' ? raw.hash : '';
+  if (!hash) return { ok: false, message: '缺少邮件标识。', canceled: false };
+  const targetDir = invoicesDirPath();
+  fs.mkdirSync(targetDir, { recursive: true });
+  const dialogResult = await dialog.showOpenDialog({
+    title: '选择要归档的发票文件',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg', 'zip'] },
+      { name: '全部文件', extensions: ['*'] },
+    ],
+  });
+  if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
+    return { ok: false, canceled: true, message: '已取消归档。' };
+  }
+  const copied: string[] = [];
+  for (const src of dialogResult.filePaths) {
+    const base = path.basename(src);
+    let dest = path.join(targetDir, base);
+    let counter = 1;
+    while (fs.existsSync(dest)) {
+      const ext = path.extname(base);
+      const stem = base.slice(0, base.length - ext.length);
+      dest = path.join(targetDir, `${stem}-${counter}${ext}`);
+      counter++;
+    }
+    fs.copyFileSync(src, dest);
+    copied.push(path.basename(dest));
+  }
+  rewritePendingCsv((row) => pendingRowHash(row) !== hash);
+  return {
+    ok: true,
+    message: `已归档 ${copied.length} 个文件，并从待确认队列移除。`,
+    files: copied,
+    summary: loadAppSummary(configPath, dataDir, bundledConfigPath),
+  };
+});
+
 ipcMain.handle('mfh:developer-reset', () => {
   const cfg = readConfigForPaths();
   const paths = asObject(cfg.paths);
@@ -1070,7 +1269,7 @@ ipcMain.handle('mfh:developer-reset', () => {
     fs.rmSync(target, { recursive: true, force: true });
     removed.push(path.relative(dataDir, target) || target);
   }
-  fs.mkdirSync(path.join(dataDir, '.mfh-cache'), { recursive: true });
+  ensureBaseDirectories();
   return { ok: true, removed: Array.from(new Set(removed)), summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
