@@ -53,20 +53,20 @@
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">邮箱文件夹 <span class="field__hint">不选择则扫描全部</span></label>
-                        <select class="select select--mailboxes" multiple size="6">
-                            <option>INBOX</option>
-                            <option>其他文件夹/已处理 2025发票</option>
-                            <option>其他文件夹/已处理 2026发票</option>
-                            <option>Sent Messages</option>
-                            <option>邮件归档</option>
+                        <select class="select select--mailboxes" multiple size="6" data-config="imap.mailbox">
+                            <option value="INBOX">INBOX</option>
+                            <option value="其他文件夹/已处理 2025发票">其他文件夹/已处理 2025发票</option>
+                            <option value="其他文件夹/已处理 2026发票">其他文件夹/已处理 2026发票</option>
+                            <option value="Sent Messages">Sent Messages</option>
+                            <option value="邮件归档">邮件归档</option>
                         </select>
-                        <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">imap.mailbox</code>；空数组表示全部 mailbox</div>
+                        <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">imap.mailbox</code>；不选则扫描全部 mailbox</div>
                     </div>
                     <div class="field field--compact">
                         <label class="field__label">TLS 加密</label>
                         <label class="check-label">
-                            <div class="check is-on"></div>
-                            启用（强制）
+                            <div class="check is-on" data-config-check="imap.tls"></div>
+                            启用（推荐）
                         </label>
                     </div>
                 </div>
@@ -141,13 +141,17 @@
                     <div class="field">
                         <label class="field__label">识别后自动改名</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check"></div>
-                            未启用
+                            <div class="check" data-config-check="rename.applyAfterOcr"></div>
+                            识别成功后按规则改名
                         </label>
                     </div>
                     <div class="field">
                         <label class="field__label">按类型分目录</label>
-                        <input class="input input--mono" data-config="rename.typeDirRule" value="{documentType}">
+                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
+                            <div class="check" data-config-check="rename.organizeByType"></div>
+                            按类型分文件夹归档
+                        </label>
+                        <input class="input input--mono mt-12" data-config="rename.typeDirRule" value="{documentType}">
                     </div>
                 </div>
 
@@ -292,11 +296,11 @@
                 <div class="field-row">
                     <div class="field">
                         <label class="field__label">重试次数</label>
-                        <input class="input input--mono" value="3">
+                        <input class="input input--mono" data-config="network.retries" value="3">
                     </div>
                     <div class="field">
                         <label class="field__label">基础间隔（毫秒）</label>
-                        <input class="input input--mono" value="1000">
+                        <input class="input input--mono" data-config="network.retryDelayMs" value="1000">
                     </div>
                 </div>
                 <div class="field__hint" style="margin-top: 8px;">保存到 <code class="code-inline">network.retries</code> 与 <code class="code-inline">network.retryDelayMs</code></div>
@@ -328,6 +332,11 @@ function collectConfigPayload() {
         const n = Number(value(key));
         return Number.isFinite(n) ? n : undefined;
     };
+    const checkOn = (key) => document.querySelector(`[data-config-check="${key}"]`)?.classList.contains('is-on') === true;
+    const mailboxSelect = document.querySelector('[data-config="imap.mailbox"]');
+    const mailbox = mailboxSelect
+        ? Array.from(mailboxSelect.selectedOptions).map((opt) => opt.value).filter(Boolean)
+        : [];
     const keywords = String(value('filter.keywords') || '')
         .split(/[，,]/)
         .map((item) => item.trim())
@@ -338,6 +347,8 @@ function collectConfigPayload() {
             port: numberValue('imap.port'),
             user: value('imap.user'),
             pass: value('imap.pass') || undefined,
+            tls: checkOn('imap.tls'),
+            mailbox,
         },
         filter: {
             keywords: keywords.length ? keywords : ['发票'],
@@ -354,6 +365,8 @@ function collectConfigPayload() {
         },
         rename: {
             avoidConflictBeforeOcr: document.querySelector('[data-config-check="rename.avoidConflictBeforeOcr"]')?.classList.contains('is-on') !== false,
+            applyAfterOcr: checkOn('rename.applyAfterOcr'),
+            organizeByType: checkOn('rename.organizeByType'),
             rule: value('rename.rule'),
             fallback: value('rename.fallback'),
             typeDirRule: value('rename.typeDirRule'),
@@ -374,8 +387,14 @@ function collectConfigPayload() {
             browserManagement: value('playwright.browserManagement'),
             timeoutMs: numberValue('playwright.timeoutMs'),
         },
+        network: {
+            retries: numberValue('network.retries'),
+            retryDelayMs: numberValue('network.retryDelayMs'),
+        },
     };
 }
+
+window.collectConfigPayload = collectConfigPayload;
 
 let saveTimer = 0;
 

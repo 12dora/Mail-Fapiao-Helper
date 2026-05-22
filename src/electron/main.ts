@@ -11,6 +11,8 @@ interface DateRangePayload {
   from?: string;
   to?: string;
   dryRun?: boolean;
+  matchSubject?: boolean;
+  matchBody?: boolean;
 }
 
 interface SaveConfigPayload {
@@ -19,6 +21,7 @@ interface SaveConfigPayload {
     port?: number | string;
     user?: string;
     pass?: string;
+    tls?: boolean;
     mailbox?: string[];
   };
   filter?: {
@@ -62,6 +65,10 @@ interface SaveConfigPayload {
     headless?: boolean;
     timeoutMs?: number | string;
     browserManagement?: string;
+  };
+  network?: {
+    retries?: number | string;
+    retryDelayMs?: number | string;
   };
 }
 
@@ -123,6 +130,8 @@ function asDateRange(value: unknown): DateRangePayload {
     from: typeof raw.from === 'string' ? raw.from : undefined,
     to: typeof raw.to === 'string' ? raw.to : undefined,
     dryRun: raw.dryRun === true,
+    matchSubject: typeof raw.matchSubject === 'boolean' ? raw.matchSubject : undefined,
+    matchBody: typeof raw.matchBody === 'boolean' ? raw.matchBody : undefined,
   };
 }
 
@@ -178,6 +187,7 @@ function normalizeSavePayload(value: unknown): Record<string, unknown> {
       credentials: ocrCredentials,
     },
     playwright: payload.playwright,
+    network: payload.network,
   };
 }
 
@@ -834,10 +844,24 @@ ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
 
 ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
   const startedAt = Date.now();
-  const args = fetchArgs(asDateRange(payload));
+  const range = asDateRange(payload);
+  if (typeof range.matchSubject === 'boolean' || typeof range.matchBody === 'boolean') {
+    const filterPatch: Record<string, boolean> = {};
+    if (typeof range.matchSubject === 'boolean') filterPatch.matchSubject = range.matchSubject;
+    if (typeof range.matchBody === 'boolean') filterPatch.matchBody = range.matchBody;
+    if (filterPatch.matchSubject === false && filterPatch.matchBody === false) {
+      filterPatch.matchSubject = true;
+    }
+    try {
+      writeConfig({ filter: filterPatch });
+    } catch {
+      // ignore; CLI will surface config errors
+    }
+  }
+  const args = fetchArgs(range);
   mainWindow?.webContents.executeJavaScript(`window.__mfhLastFetchArgs = ${JSON.stringify(args)}`).catch(() => {});
   const result = await runCli('fetch', args, { progress: true });
-  historyEntry('fetch', '获取邮件', startedAt, result);
+  historyEntry('fetch', range.dryRun ? '预览邮件' : '获取邮件', startedAt, result);
   return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
 });
 
@@ -935,7 +959,20 @@ ipcMain.handle('mfh:organize', async () => {
   const startedAt = Date.now();
   const result = await runCli('organize', ['--config', configPath]);
   historyEntry('organize', '整理输出文件', startedAt, result);
-  return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, dataDir, bundledConfigPath) };
+  const output = `${result.stdout}\n${result.stderr}`;
+  const scannedMatch = /Organize complete: scanned=(\d+)/.exec(output);
+  const scanned = scannedMatch ? Number(scannedMatch[1]) : NaN;
+  const message = Number.isFinite(scanned) && scanned === 0
+    ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
+    : Number.isFinite(scanned)
+      ? `整理完成，处理 ${scanned} 条识别结果。`
+      : '整理完成。';
+  return {
+    ok: result.code === 0,
+    ...result,
+    message,
+    summary: loadAppSummary(configPath, dataDir, bundledConfigPath),
+  };
 });
 
 ipcMain.handle('mfh:stop-ocr', () => {

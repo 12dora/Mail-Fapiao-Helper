@@ -181,7 +181,7 @@ async function main() {
 
     await page.getByRole('button', { name: '整理识别结果' }).click();
     await expectToast(page, '整理完成');
-    await page.getByRole('button', { name: '导出日志' }).click();
+    await page.getByRole('button', { name: '复制日志' }).click();
     await expectToast(page, '已复制');
 
     await page.getByRole('link', { name: /邮件记录/ }).click();
@@ -200,7 +200,7 @@ async function main() {
     if (filteredInboxRows !== 1) fail(`邮件搜索后应只剩 1 行，实际 ${filteredInboxRows}`);
     await page.locator('[data-filter="inbox-attachment"]').click();
     await page.locator('[data-filter="inbox-links"]').click();
-    await page.getByRole('button', { name: '导出表格' }).click();
+    await page.getByRole('button', { name: '复制为 CSV' }).click();
     await expectToast(page, '已复制');
     await page.getByRole('button', { name: '打开邮件缓存' }).click();
     await expectToast(page, '已打开文件夹');
@@ -239,7 +239,7 @@ async function main() {
     await expectToast(page, '已打开文件夹');
     await page.getByRole('button', { name: '复制原因' }).click();
     await expectToast(page, '已复制');
-    await page.getByRole('button', { name: '导出清单' }).click();
+    await page.getByRole('button', { name: '复制为 CSV' }).click();
     await expectToast(page, '已复制');
     await page.getByRole('button', { name: '刷新列表' }).first().click();
     await expectToast(page, '已刷新');

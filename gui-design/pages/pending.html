@@ -22,24 +22,24 @@
         <div class="page stagger">
             <div class="stats">
                 <div class="stat" data-pending-stat>
-                    <div class="stat__label">飞猪链接过期</div>
-                    <div class="stat__value" style="color: var(--warn);">7</div>
-                    <div class="stat__delta is-flat">刷新链接</div>
+                    <div class="stat__label">暂无待确认</div>
+                    <div class="stat__value">0</div>
+                    <div class="stat__delta is-flat">无需处理</div>
                 </div>
                 <div class="stat" data-pending-stat>
-                    <div class="stat__label">无下载文件</div>
-                    <div class="stat__value">3</div>
-                    <div class="stat__delta is-flat">手动保存</div>
+                    <div class="stat__label">暂无待确认</div>
+                    <div class="stat__value">0</div>
+                    <div class="stat__delta is-flat">无需处理</div>
                 </div>
                 <div class="stat" data-pending-stat>
-                    <div class="stat__label">慧通过期</div>
-                    <div class="stat__value" style="color: var(--warn);">1</div>
-                    <div class="stat__delta is-flat">刷新链接</div>
+                    <div class="stat__label">暂无待确认</div>
+                    <div class="stat__value">0</div>
+                    <div class="stat__delta is-flat">无需处理</div>
                 </div>
                 <div class="stat" data-pending-stat>
-                    <div class="stat__label">非支持附件</div>
-                    <div class="stat__value">1</div>
-                    <div class="stat__delta is-flat">可忽略</div>
+                    <div class="stat__label">暂无待确认</div>
+                    <div class="stat__value">0</div>
+                    <div class="stat__delta is-flat">无需处理</div>
                 </div>
             </div>
 
@@ -51,7 +51,7 @@
                         <div class="small muted" style="margin-top: 4px;">你可以打开原邮件、重新授权、手动添加文件，或确认这封邮件不用处理。</div>
                     </div>
                     <div class="row gap-8" style="align-self: flex-start;">
-                        <button class="btn btn--sm" data-action="export-table">导出清单</button>
+                        <button class="btn btn--sm" data-action="export-table">复制为 CSV</button>
                         <button class="btn btn--sm btn--primary" data-action="reload-summary">刷新列表</button>
                     </div>
                 </div>
@@ -59,10 +59,10 @@
 
             <div class="filterbar">
                 <div class="tabs">
-                    <button class="tab is-active">全部</button>
-                    <button class="tab">刷新链接</button>
-                    <button class="tab">手动归档</button>
-                    <button class="tab">可忽略</button>
+                    <button class="tab is-active" data-pending-tab="all">全部</button>
+                    <button class="tab" data-pending-tab="refresh_link">刷新链接</button>
+                    <button class="tab" data-pending-tab="manual_archive">手动归档</button>
+                    <button class="tab" data-pending-tab="ignore">可忽略</button>
                 </div>
 
                 <div class="spacer"></div>

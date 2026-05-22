@@ -11,7 +11,6 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   organize: (payload) => ipcRenderer.invoke('mfh:organize', payload),
   openPath: (payload) => ipcRenderer.invoke('mfh:open-path', payload),
   copyText: (payload) => ipcRenderer.invoke('mfh:copy-text', payload),
-  testConnection: (payload) => ipcRenderer.invoke('mfh:test-connection', payload),
   testMailConnection: (payload) => ipcRenderer.invoke('mfh:test-connection', payload),
   developerReset: () => ipcRenderer.invoke('mfh:developer-reset'),
   onFetchProgress: (callback) => {
