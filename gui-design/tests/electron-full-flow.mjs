@@ -28,6 +28,7 @@ async function main() {
   const tmp = await mkdtemp(join(tmpdir(), 'mfh-electron-full-'));
   const configPath = join(tmp, 'config.json');
   const statePath = join(tmp, 'state.json');
+  const userDataPath = join(tmp, 'user-data');
   await copyFile('config.example.json', configPath);
 
   const config = JSON.parse(await readFile(configPath, 'utf8'));
@@ -51,7 +52,7 @@ async function main() {
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
   const app = await electron.launch({
-    args: ['.'],
+    args: ['.', `--user-data-dir=${userDataPath}`],
     env: {
       ...process.env,
       MFH_CONFIG_PATH: configPath,
@@ -82,7 +83,7 @@ async function main() {
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (initialProgress !== '0%') fail(`初始进度应为 0%，实际为 ${initialProgress}`);
     const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('.page h3')).map((el) => el.textContent.trim()).slice(0, 8));
-    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
     for (let i = 0; i < expectedOrder.length; i++) {
       if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
     }
@@ -120,6 +121,8 @@ async function main() {
     await page.getByRole('button', { name: '开始获取发票文件' }).click();
     await expectToast(page, '获取完成');
     await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
+    await page.getByRole('button', { name: '打开文件位置' }).click();
+    await expectToast(page, '已打开文件夹');
     const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (fileProgress !== '100%') fail(`获取发票文件后进度应为 100%，实际为 ${fileProgress}`);
     const afterFiles = await page.evaluate(() => ({
@@ -184,6 +187,8 @@ async function main() {
     await expectText(page, '没有找到匹配结果');
     await page.locator('[data-search="library"]').fill('');
     await page.locator('[data-library-rows]').getByText('0002.pdf', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.locator('[data-library-rows]').getByRole('button', { name: '打开' }).first().click();
+    await expectToast(page, '已打开文件位置');
     await page.getByRole('button', { name: '打开归档目录' }).click();
     await expectToast(page, '已打开文件夹');
     page.once('dialog', (dialog) => dialog.accept());

@@ -11,6 +11,7 @@ async function main() {
   const tmp = await mkdtemp(join(tmpdir(), 'mfh-electron-'));
   const configPath = join(tmp, 'config.json');
   const statePath = join(tmp, 'state.json');
+  const userDataPath = join(tmp, 'user-data');
   await copyFile('config.example.json', configPath);
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   config.paths.samples = join(tmp, 'samples', 'raw');
@@ -24,7 +25,7 @@ async function main() {
   await mkdir(config.paths.samples, { recursive: true });
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
   const app = await electron.launch({
-    args: ['.'],
+    args: ['.', `--user-data-dir=${userDataPath}`],
     env: { ...process.env, MFH_CONFIG_PATH: configPath, MFH_STATE_PATH: statePath },
   });
   try {

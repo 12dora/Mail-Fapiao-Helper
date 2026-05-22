@@ -644,8 +644,9 @@
                 <td><span class="pill">${escapeHtml(sourceLabel(row.source))}</span></td>
                 <td class="mono small">${escapeHtml(row.filename || '')}</td>
                 <td>${statusPill(row.status)}</td>
+                <td><button class="btn btn--sm" data-action="open-row-file" data-file-path="${escapeHtml(row.filePath || row.filename || '')}">打开</button></td>
             </tr>
-        `).join('') || `<tr><td colspan="7" class="muted">没有找到匹配结果。你可以换个关键词或取消筛选。</td></tr>`;
+        `).join('') || `<tr><td colspan="8" class="muted">没有找到匹配结果。你可以换个关键词或取消筛选。</td></tr>`;
         text('[data-library-page]', `显示 ${fmtInt(Math.min(rows.length, 80))} · 共 ${fmtInt(rows.length)} 条`);
         text('[data-library-sellers]', seller ? `销售方：${seller}` : '销售方：全部');
     }
@@ -789,9 +790,10 @@
         if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
         if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
+        if (name === 'open-row-file') { await openRowFile(action); return; }
         if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
         if (name === 'organize') { await runBridgeAction('organize', {}, '整理完成', '已按当前规则整理输出。'); return; }
-        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled() }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
+        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: true }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
         if (name === 'test-connection') { await testConnection(); return; }
         if (name === 'discard-config') { window.location.reload(); return; }
         if (name === 'developer-reset') { await developerReset(); return; }
@@ -904,6 +906,17 @@
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
         const result = await window.mfhBridge.openPath({ path: value });
         showToast(result?.ok ? '已打开文件夹' : '打开失败', result?.ok ? value : (result?.error || value), result?.ok ? 'ok' : 'err');
+    }
+
+    async function openRowFile(action) {
+        const value = action.dataset.filePath || '';
+        if (!value) {
+            showToast('打开失败', '这条记录没有对应文件路径。', 'err');
+            return;
+        }
+        if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
+        const result = await window.mfhBridge.openPath({ path: value, reveal: true });
+        showToast(result?.ok ? '已打开文件位置' : '打开失败', result?.ok ? '已定位到对应文件。' : (result?.error || value), result?.ok ? 'ok' : 'err');
     }
 
     async function copyText(value) {
