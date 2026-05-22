@@ -28,6 +28,7 @@ export interface Config {
     csv: string;
   };
   rename: {
+    avoidConflictBeforeOcr: boolean;
     rule: string;
     fallback: string;
     applyAfterOcr: boolean;
@@ -39,6 +40,7 @@ export interface Config {
     enabled: boolean;
     provider: string;
     binaryPath: string;
+    ocrMode: 'auto' | 'disabled' | 'required';
     executionMode: 'auto' | 'serve' | 'cli';
     serviceUrl: string;
     serviceHost: string;
@@ -59,6 +61,7 @@ export interface Config {
   playwright: {
     headless: boolean;
     timeoutMs: number;
+    browserManagement: string;
   };
   network: {
     retries: number;
@@ -188,6 +191,9 @@ export function loadConfig(path: string): Config {
       csv: asString(requireField(raw, 'output.csv'), 'output.csv'),
     },
     rename: {
+      avoidConflictBeforeOcr: typeof (raw as { rename?: { avoidConflictBeforeOcr?: unknown } }).rename?.avoidConflictBeforeOcr === 'boolean'
+        ? ((raw as { rename: { avoidConflictBeforeOcr: boolean } }).rename.avoidConflictBeforeOcr)
+        : true,
       rule: asString(requireField(raw, 'rename.rule'), 'rename.rule'),
       fallback: asString(requireField(raw, 'rename.fallback'), 'rename.fallback'),
       applyAfterOcr: typeof (raw as { rename?: { applyAfterOcr?: unknown } }).rename?.applyAfterOcr === 'boolean'
@@ -209,6 +215,12 @@ export function loadConfig(path: string): Config {
       binaryPath: typeof (raw as { ocr?: { binaryPath?: unknown } }).ocr?.binaryPath === 'string'
         ? ((raw as { ocr: { binaryPath: string } }).ocr.binaryPath)
         : 'auto',
+      ocrMode: (() => {
+        const v = (raw as { ocr?: { ocrMode?: unknown } }).ocr?.ocrMode;
+        if (v === undefined || v === null || v === '') return 'auto';
+        if (v === 'auto' || v === 'disabled' || v === 'required') return v;
+        throw new Error('config.ocr.ocrMode must be one of auto, disabled, required');
+      })(),
       executionMode: (() => {
         const v = (raw as { ocr?: { executionMode?: unknown } }).ocr?.executionMode;
         if (v === undefined || v === null || v === '') return 'auto';
@@ -252,6 +264,9 @@ export function loadConfig(path: string): Config {
     playwright: {
       headless: asBool(requireField(raw, 'playwright.headless'), 'playwright.headless'),
       timeoutMs: asNumber(requireField(raw, 'playwright.timeoutMs'), 'playwright.timeoutMs'),
+      browserManagement: typeof (raw as { playwright?: { browserManagement?: unknown } }).playwright?.browserManagement === 'string'
+        ? ((raw as { playwright: { browserManagement: string } }).playwright.browserManagement)
+        : 'app-managed',
     },
     network: {
       retries: optNumber((raw as { network?: { retries?: unknown } }).network?.retries, 'network.retries', 3),

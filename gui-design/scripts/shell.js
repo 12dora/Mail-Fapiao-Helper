@@ -203,6 +203,7 @@
         wireSearch();
         loadBridgeSummary();
         loadBridgeConfig();
+        wireOperationProgress();
     }
 
     function refreshClock() {
@@ -324,6 +325,130 @@
         }
     }
 
+    function wireOperationProgress() {
+        window.mfhBridge?.onOperationProgress?.((data) => {
+            if (!data || data.operation !== 'ocr') return;
+            applyOcrProgress(data);
+        });
+        window.mfhBridge?.onFileProgress?.((data) => {
+            if (!data || data.operation !== 'files') return;
+            applyFileProgress(data);
+        });
+    }
+
+    function logTime() {
+        const now = new Date();
+        return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    }
+
+    function consoleLine(tag, message, kind = '') {
+        return `<div class="console__line"><span class="console__time">${logTime()}</span><span class="console__tag ${kind}">${escapeHtml(tag)}</span><span class="console__msg">${escapeHtml(message)}</span></div>`;
+    }
+
+    function resetOcrProgress(message = '正在准备识别文件。') {
+        document.querySelectorAll('[data-ocr-progress]').forEach((el) => {
+            el.classList.remove('is-idle', 'is-done');
+        });
+        document.querySelectorAll('[data-ocr-bar]').forEach((el) => {
+            el.style.setProperty('--p', '0%');
+        });
+        text('[data-ocr-phase]', '准备识别');
+        text('[data-ocr-counts]', '0 / 0');
+        text('[data-ocr-parsed]', '0');
+        text('[data-ocr-skipped]', '0');
+        text('[data-ocr-failed]', '0');
+        document.querySelectorAll('[data-action="run-ocr"], [data-action="rerun-ocr"]').forEach((el) => { el.disabled = true; });
+        document.querySelectorAll('[data-action="stop-ocr"]').forEach((el) => { el.disabled = false; });
+        document.querySelectorAll('[data-ocr-parallel]').forEach((el) => { el.disabled = true; });
+        document.querySelectorAll('[data-ocr-log]').forEach((el) => {
+            el.innerHTML = consoleLine('准备', message);
+            el.scrollTop = el.scrollHeight;
+        });
+    }
+
+    function appendOcrLog(message, kind = '') {
+        if (!message) return;
+        document.querySelectorAll('[data-ocr-log]').forEach((el) => {
+            el.insertAdjacentHTML('beforeend', consoleLine(kind === 'ok' ? '成功' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
+            el.scrollTop = el.scrollHeight;
+        });
+    }
+
+    function applyOcrProgress(data) {
+        const total = Number(data.total || 0);
+        const processed = Number(data.processed || 0);
+        const parsed = Number(data.parsed || 0);
+        const skipped = Number(data.skipped || 0);
+        const failed = Number(data.failed || 0);
+        const percent = data.percent === undefined
+            ? (total > 0 ? Math.min(96, Math.round((processed / total) * 100)) : 12)
+            : Math.max(0, Math.min(100, Number(data.percent) || 0));
+        document.querySelectorAll('[data-ocr-progress]').forEach((el) => {
+            el.classList.remove('is-idle');
+            el.classList.toggle('is-done', Boolean(data.done) || percent >= 100);
+        });
+        document.querySelectorAll('[data-ocr-bar]').forEach((el) => {
+            el.style.setProperty('--p', `${percent}%`);
+        });
+        text('[data-ocr-phase]', data.phase || (data.done ? '识别完成' : '正在识别'));
+        text('[data-ocr-counts]', `${fmtInt(processed)} / ${fmtInt(total)}`);
+        text('[data-ocr-parsed]', fmtInt(parsed));
+        text('[data-ocr-skipped]', fmtInt(skipped));
+        text('[data-ocr-failed]', fmtInt(failed));
+        document.querySelectorAll('[data-action="run-ocr"], [data-action="rerun-ocr"]').forEach((el) => { el.disabled = !data.done; });
+        document.querySelectorAll('[data-action="stop-ocr"]').forEach((el) => { el.disabled = Boolean(data.done); });
+        document.querySelectorAll('[data-ocr-parallel]').forEach((el) => { el.disabled = !data.done; });
+        appendOcrLog(data.message, data.kind || '');
+    }
+
+    function resetFileProgress(message = '正在准备获取发票文件。') {
+        document.querySelectorAll('[data-file-progress]').forEach((el) => {
+            el.classList.remove('is-idle', 'is-done');
+        });
+        document.querySelectorAll('[data-file-bar]').forEach((el) => {
+            el.style.setProperty('--p', '0%');
+        });
+        text('[data-file-phase]', '准备获取');
+        text('[data-file-counts]', '0 封');
+        text('[data-file-processed]', '0');
+        text('[data-file-skipped]', '0');
+        text('[data-file-failed]', '0');
+        document.querySelectorAll('[data-file-log]').forEach((el) => {
+            el.innerHTML = consoleLine('准备', message);
+            el.scrollTop = el.scrollHeight;
+        });
+    }
+
+    function appendFileLog(message, kind = '') {
+        if (!message) return;
+        document.querySelectorAll('[data-file-log]').forEach((el) => {
+            el.insertAdjacentHTML('beforeend', consoleLine(kind === 'ok' ? '完成' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
+            el.scrollTop = el.scrollHeight;
+        });
+    }
+
+    function applyFileProgress(data) {
+        const processed = Number(data.processed || 0);
+        const skipped = Number(data.skipped || 0);
+        const failed = Number(data.failed || 0);
+        const percent = data.percent === undefined
+            ? Math.min(96, 12 + (processed + skipped + failed) * 4)
+            : Math.max(0, Math.min(100, Number(data.percent) || 0));
+        document.querySelectorAll('[data-file-progress]').forEach((el) => {
+            el.classList.remove('is-idle');
+            el.classList.toggle('is-done', Boolean(data.done) || percent >= 100);
+        });
+        document.querySelectorAll('[data-file-bar]').forEach((el) => {
+            el.style.setProperty('--p', `${percent}%`);
+        });
+        text('[data-file-phase]', data.phase || (data.done ? '获取完成' : '正在获取'));
+        text('[data-file-counts]', `${fmtInt(processed)} 封`);
+        text('[data-file-processed]', fmtInt(processed));
+        text('[data-file-skipped]', fmtInt(skipped));
+        text('[data-file-failed]', fmtInt(failed));
+        appendFileLog(data.message, data.kind || '');
+    }
+
     function applySummary(summary) {
         const inbox = summary.inbox || {};
         const library = summary.library || {};
@@ -369,7 +494,7 @@
     function applyHistory(history) {
         const mount = document.querySelector('[data-run-history]');
         if (!mount) return;
-        mount.innerHTML = history.slice(0, 8).map((item) => {
+        mount.innerHTML = history.slice(0, 6).map((item) => {
             const kind = item.status === 'success' ? 'ok' : item.status === 'partial' ? 'warn' : 'err';
             const label = item.status === 'success' ? '成功' : item.status === 'partial' ? '部分成功' : '失败';
             return `
@@ -383,11 +508,11 @@
                 </div>
             `;
         }).join('') || `
-            <div class="empty empty--compact">
-                <div class="empty__title">还没有运行记录</div>
-                <div class="empty__sub">点击“开始抓取”或“开始识别”后，这里会显示真实结果。</div>
-            </div>
-        `;
+                <div class="empty empty--compact">
+                    <div class="empty__title">还没有运行记录</div>
+                    <div class="empty__sub">点击“开始获取邮件”或“开始识别发票文件”后，这里会显示真实结果。</div>
+                </div>
+            `;
         const total = document.querySelector('[data-history-total]');
         if (total) total.textContent = `${fmtInt(history.length)} 条记录`;
     }
@@ -581,9 +706,6 @@
         set('[data-config="imap.port"]', cfg.imap?.port);
         set('[data-config="imap.user"]', cfg.imap?.user);
         set('[data-config="filter.keywords"]', Array.isArray(cfg.filter?.keywords) ? cfg.filter.keywords.join(', ') : '');
-        set('[data-config="filter.since"]', cfg.filter?.since || '');
-        set('[data-config="filter.until"]', cfg.filter?.until || '');
-        set('[data-config="filter.sinceDays"]', cfg.filter?.sinceDays);
         set('[data-config="paths.samples"]', cfg.paths?.samples);
         set('[data-config="paths.invoices"]', cfg.paths?.invoices);
         set('[data-config="paths.pending"]', cfg.paths?.pending);
@@ -591,12 +713,18 @@
         set('[data-config="rename.rule"]', cfg.rename?.rule);
         set('[data-config="rename.fallback"]', cfg.rename?.fallback);
         set('[data-config="rename.typeDirRule"]', cfg.rename?.typeDirRule);
+        document.querySelectorAll('[data-config-check="rename.avoidConflictBeforeOcr"]').forEach((el) => {
+            el.classList.toggle('is-on', cfg.rename?.avoidConflictBeforeOcr !== false);
+        });
         set('[data-config="ocr.provider"]', cfg.ocr?.enabled === false ? 'none' : (cfg.ocr?.provider || 'efapiao'));
+        set('[data-config="ocr.ocrMode"]', cfg.ocr?.ocrMode || 'auto');
         set('[data-config="ocr.executionMode"]', cfg.ocr?.executionMode);
         set('[data-config="ocr.resultsCsv"]', cfg.ocr?.resultsCsv);
         set('[data-config="ocr.credentials.tencentSecretId"]', cfg.ocr?.credentials?.tencentSecretId || cfg.ocr?.credentials?.secretId || '');
         set('[data-config="ocr.credentials.tencentSecretKey"]', cfg.ocr?.credentials?.tencentSecretKey || cfg.ocr?.credentials?.secretKey || '');
         set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || 'ap-shanghai');
+        set('[data-config="playwright.browserManagement"]', cfg.playwright?.browserManagement || 'app-managed');
+        set('[data-config="playwright.timeoutMs"]', cfg.playwright?.timeoutMs);
     }
 
     function wireSearch() {
@@ -635,13 +763,55 @@
         if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
         if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
-        if (name === 'run-ocr') { await runBridgeAction('runOcr', { force: action.dataset.force === 'true' }, '识别完成', '已尝试识别本地文件。'); return; }
+        if (name === 'run-ocr') { await runOcr(false); return; }
+        if (name === 'rerun-ocr') { await rerunOcr(); return; }
+        if (name === 'stop-ocr') { await stopOcr(); return; }
         if (name === 'organize') { await runBridgeAction('organize', {}, '整理完成', '已按当前规则整理输出。'); return; }
-        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', {}, '处理完成', '已处理本地缓存邮件。'); return; }
+        if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled() }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
         if (name === 'test-connection') { await testConnection(); return; }
         if (name === 'discard-config') { window.location.reload(); return; }
         if (name === 'developer-reset') { await developerReset(); return; }
         if (name === 'pending-primary') { handlePendingAction(action); return; }
+    }
+
+    function selectedOcrConcurrency() {
+        const value = Number(document.querySelector('[data-ocr-parallel]')?.value || 4);
+        return Number.isFinite(value) && value > 0 ? Math.floor(value) : 4;
+    }
+
+    function downloadRenameEnabled() {
+        return document.querySelector('[data-download-rename-toggle]')?.classList.contains('is-on') !== false;
+    }
+
+    async function runOcr(force) {
+        await runBridgeAction('runOcr', {
+            force: Boolean(force),
+            concurrency: selectedOcrConcurrency(),
+        }, '识别完成', '已尝试识别本地文件。');
+    }
+
+    async function rerunOcr() {
+        const confirmed = window.confirm('重新识别会删除已有识别结果，并把发票队列重置为待识别。确认继续吗？');
+        if (!confirmed) return;
+        const clear = window.mfhBridge?.clearOcrResults;
+        if (!clear) { bridgeUnavailable(); return; }
+        let result;
+        try {
+            result = await clear();
+        } catch (err) {
+            showToast('清空失败', err?.message || '请查看最近运行记录。', 'err');
+            return;
+        }
+        if (result?.summary) applySummary(result.summary);
+        showToast(result?.ok ? '已清空识别结果' : '清空失败', result?.ok ? '正在重新识别发票文件。' : (result?.message || result?.error || '请查看最近运行记录。'), result?.ok ? 'ok' : 'err');
+        if (result?.ok) await runOcr(true);
+    }
+
+    async function stopOcr() {
+        const fn = window.mfhBridge?.stopOcr;
+        if (!fn) { bridgeUnavailable(); return; }
+        const result = await fn();
+        showToast(result?.ok ? '正在停止识别' : '停止失败', result?.message || '', result?.ok ? 'warn' : 'err');
     }
 
     function bridgeUnavailable() {
@@ -651,8 +821,57 @@
     async function runBridgeAction(method, payload, okTitle, okMessage) {
         const fn = window.mfhBridge?.[method];
         if (!fn) { bridgeUnavailable(); return; }
-        const result = await fn(payload);
+        if (method === 'runOcr') resetOcrProgress();
+        if (method === 'runPipeline') resetFileProgress();
+        let result;
+        try {
+            result = await fn(payload);
+        } catch (err) {
+            if (method === 'runOcr') {
+                applyOcrProgress({
+                    phase: '识别失败',
+                    percent: 100,
+                    total: 0,
+                    processed: 0,
+                    parsed: 0,
+                    skipped: 0,
+                    failed: 0,
+                    message: err?.message || '识别失败，请查看最近运行记录。',
+                    kind: 'err',
+                    done: true,
+                });
+            }
+            if (method === 'runPipeline') {
+                applyFileProgress({
+                    phase: '获取失败',
+                    percent: 100,
+                    message: err?.message || '获取发票文件失败，请查看最近运行记录。',
+                    kind: 'err',
+                    done: true,
+                });
+            }
+            showToast('运行失败', err?.message || '请查看最近运行记录。', 'err');
+            return;
+        }
         if (result?.summary) applySummary(result.summary);
+        if (method === 'runOcr' && !result?.ok && !result?.summary) {
+            applyOcrProgress({
+                phase: '识别失败',
+                percent: 100,
+                message: result?.message || result?.stderr || result?.error || '识别失败，请查看最近运行记录。',
+                kind: 'err',
+                done: true,
+            });
+        }
+        if (method === 'runPipeline' && !result?.ok && !result?.summary) {
+            applyFileProgress({
+                phase: '获取失败',
+                percent: 100,
+                message: result?.message || result?.stderr || result?.error || '获取发票文件失败，请查看最近运行记录。',
+                kind: 'err',
+                done: true,
+            });
+        }
         showToast(result?.ok ? okTitle : '运行失败', result?.ok ? (result?.message || okMessage) : (result?.message || result?.stderr || result?.error || '请查看最近运行记录。'), result?.ok ? 'ok' : 'err');
     }
 
@@ -671,9 +890,14 @@
     }
 
     async function testConnection() {
-        if (!window.mfhBridge?.testConnection) { bridgeUnavailable(); return; }
-        const result = await window.mfhBridge.testConnection();
-        showToast(result?.ok ? '配置可用' : '配置有问题', result?.message || '', result?.ok ? 'ok' : 'err');
+        const fn = window.mfhBridge?.testMailConnection || window.mfhBridge?.testConnection;
+        if (!fn) { bridgeUnavailable(); return; }
+        const payload = typeof window.collectConfigPayload === 'function' ? window.collectConfigPayload() : undefined;
+        if (payload && window.mfhBridge?.saveConfig) {
+            await window.mfhBridge.saveConfig(payload);
+        }
+        const result = await fn(payload);
+        showToast(result?.ok ? '邮箱连接正常' : '邮箱连接失败', result?.message || '', result?.ok ? 'ok' : 'err');
     }
 
     async function developerReset() {
@@ -770,6 +994,8 @@
         applySummary,
         applyConfig,
         bridge: window.mfhBridge || null,
+        applyOcrProgress,
+        applyFileProgress,
         ICON
     };
 })();

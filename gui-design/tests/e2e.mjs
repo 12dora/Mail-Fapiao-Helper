@@ -65,9 +65,19 @@ async function main() {
       };
       window.mfhBridge = {
         async getSummary() {
+          const history = Array.from({ length: 8 }, (_, index) => ({
+            id: `hist-${index}`,
+            time: new Date(Date.UTC(2026, 4, 21, 10, index)).toISOString(),
+            action: index % 2 === 0 ? 'fetch' : 'ocr',
+            title: index % 2 === 0 ? '获取邮件' : '识别发票文件',
+            status: 'success',
+            message: '已完成',
+            detail: '测试记录',
+            durationMs: 1200 + index,
+          }));
           return {
             configExists: true,
-            history: [],
+            history,
             inbox: {
               total: 2,
               withAttachment: 1,
@@ -165,21 +175,26 @@ async function main() {
               ocr: {
                 enabled: true,
                 provider: 'efapiao',
+                ocrMode: 'auto',
                 executionMode: 'auto',
                 resultsCsv: './invoices/ocr/ocr-results.csv',
                 credentials: { tencentRegion: 'ap-shanghai' },
               },
+              playwright: { browserManagement: 'app-managed', timeoutMs: 30000 },
             },
           };
         },
         async startFetch() {
           record('startFetch');
-          window.__afterFetchDone = true;
           return { ok: true, summary: await window.mfhBridge.getSummary() };
         },
         async runOcr(payload) {
           record('runOcr', payload);
-          return { ok: true };
+          if (payload?.concurrency !== 4) throw new Error(`runOcr should receive selected concurrency=4, got ${JSON.stringify(payload)}`);
+          window.__ocrProgress?.({ operation: 'ocr', phase: '开始识别', percent: 10, total: 3, processed: 0, parsed: 0, skipped: 0, failed: 0, message: '发现 3 个待识别文件，正在启动识别。' });
+          window.__ocrProgress?.({ operation: 'ocr', phase: '正在识别', percent: 50, total: 3, processed: 1, parsed: 1, skipped: 0, failed: 0, message: '识别成功：国家电网-318.42.pdf', kind: 'ok' });
+          window.__ocrProgress?.({ operation: 'ocr', phase: '识别完成', percent: 100, total: 3, processed: 3, parsed: 2, skipped: 1, failed: 0, message: '识别完成：成功 2 个，跳过 1 个，失败 0 个。', kind: 'ok', done: true });
+          return { ok: true, message: '已扫描 3 个文件，识别成功 2 个，跳过 1 个，失败 0 个。', summary: await window.mfhBridge.getSummary() };
         },
         async organize(payload) {
           record('organize', payload);
@@ -187,7 +202,12 @@ async function main() {
         },
         async runPipeline(payload) {
           record('runPipeline', payload);
-          return { ok: true };
+          if (payload?.avoidConflictBeforeOcr !== true) throw new Error(`runPipeline should receive rename setting, got ${JSON.stringify(payload)}`);
+          window.__fileProgress?.({ operation: 'files', phase: '开始获取', percent: 10, processed: 0, skipped: 0, failed: 0, message: '正在从本地邮件中获取发票文件。' });
+          window.__fileProgress?.({ operation: 'files', phase: '正在获取', percent: 60, processed: 1, skipped: 0, failed: 0, message: '已获取：国家电网电子发票通知', kind: 'ok' });
+          window.__fileProgress?.({ operation: 'files', phase: '获取完成', percent: 100, processed: 2, skipped: 0, failed: 0, message: '获取完成：处理 2 封，跳过 0 封，失败 0 封。', kind: 'ok', done: true });
+          window.__afterFetchDone = true;
+          return { ok: true, message: '已从本地邮件中获取发票文件。', summary: await window.mfhBridge.getSummary() };
         },
         async openPath(payload) {
           record('openPath', payload);
@@ -197,9 +217,22 @@ async function main() {
           record('copyText', payload);
           return { ok: true };
         },
+        async clearOcrResults() {
+          record('clearOcrResults');
+          window.__afterFetchDone = true;
+          return { ok: true, summary: await window.mfhBridge.getSummary() };
+        },
+        async stopOcr() {
+          record('stopOcr');
+          return { ok: true, message: '正在停止识别。' };
+        },
+        async testMailConnection() {
+          record('testMailConnection');
+          return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
+        },
         async testConnection() {
           record('testConnection');
-          return { ok: true, message: '配置文件可以读取。' };
+          return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
         },
         async developerReset() {
           record('developerReset');
@@ -213,13 +246,19 @@ async function main() {
         onFetchProgress(callback) {
           setTimeout(() => callback({ percent: 100, matched: 2, saved: 1, skipped: 1, step: '完成', message: '测试完成', done: true }), 20);
         },
+        onOperationProgress(callback) {
+          window.__ocrProgress = callback;
+        },
+        onFileProgress(callback) {
+          window.__fileProgress = callback;
+        },
       };
     });
     await page.goto(`${baseUrl}/`);
 
     await expectText(page, '按顺序完成三步');
     await expectText(page, '设置邮箱与保存位置');
-    await expectText(page, '开始抓取邮件');
+    await expectText(page, '开始获取邮件');
     await expectText(page, '查看发票库和待确认');
     await page.getByRole('link', { name: '已有配置，开始处理' }).click();
     await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
@@ -233,9 +272,21 @@ async function main() {
     await expectText(page, '发票库');
     await expectText(page, '待确认');
     await expectText(page, '邮箱已连接');
-    await expectText(page, '识别完成后的汇总');
+    await expectText(page, '获取发票文件');
+    await expectText(page, '获取发票文件实时日志');
+    await expectText(page, '识别发票文件');
+    await expectText(page, '识别发票文件实时日志');
+    await expectText(page, '获取邮件');
+    await expectText(page, '获取邮件实时日志');
+    await expectText(page, '最多显示最近 6 条记录');
     await expectText(page, '2026-05 至 2026-05');
-    await expectText(page, '选择日期范围后，点击“开始抓取”才会运行');
+    await expectText(page, '选择日期范围后，点击“开始获取邮件”才会运行');
+
+    const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('.page h3')).map((el) => el.textContent.trim()));
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    for (let i = 0; i < expectedOrder.length; i++) {
+      if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
+    }
 
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (initialProgress !== '0%') fail(`页面打开时进度条不应启动，实际为 ${initialProgress}`);
@@ -259,23 +310,53 @@ async function main() {
     });
     if (englishLeak) fail(`页面仍暴露英文/内部状态：${englishLeak}`);
 
-    await page.getByRole('button', { name: '开始抓取' }).click();
+    await page.getByRole('button', { name: '开始获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
     const afterFetchOcrCounts = await page.evaluate(() => ({
       invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
       itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
       supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
     }));
-    if (afterFetchOcrCounts.invoice !== '2' || afterFetchOcrCounts.itinerary !== '1' || afterFetchOcrCounts.supporting !== '1') {
-      fail(`抓取完成后待识别文件没有随真实汇总更新：${JSON.stringify(afterFetchOcrCounts)}`);
+    if (afterFetchOcrCounts.invoice !== '0' || afterFetchOcrCounts.itinerary !== '0' || afterFetchOcrCounts.supporting !== '0') {
+      fail(`获取邮件后不应已经生成发票文件统计：${JSON.stringify(afterFetchOcrCounts)}`);
     }
-    await page.getByRole('button', { name: '整理输出' }).first().click();
-    await page.getByRole('button', { name: '开始识别' }).click();
+    await page.getByRole('button', { name: '开始获取发票文件' }).click();
+    await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
+    const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (fileProgress !== '100%') fail(`获取发票文件进度应到 100%，实际为 ${fileProgress}`);
+    const logStyles = await page.evaluate(() => {
+      const fileLog = document.querySelector('[data-file-log]');
+      const ocrLog = document.querySelector('[data-ocr-log]');
+      const mailLog = document.querySelector('#console-out');
+      const styleOf = (el) => {
+        const style = getComputedStyle(el);
+        return { background: style.backgroundColor, height: style.height, overflowY: style.overflowY };
+      };
+      return { file: styleOf(fileLog), ocr: styleOf(ocrLog), mail: styleOf(mailLog) };
+    });
+    if (logStyles.file.background !== logStyles.ocr.background || logStyles.file.height !== logStyles.ocr.height || logStyles.file.overflowY !== 'auto') {
+      fail(`获取/识别日志样式不一致或不可滚动：${JSON.stringify(logStyles)}`);
+    }
+    const afterFiles = await page.evaluate(() => ({
+      invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
+      itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
+      supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
+    }));
+    if (afterFiles.invoice !== '2' || afterFiles.itinerary !== '1' || afterFiles.supporting !== '1') {
+      fail(`获取发票文件后统计不正确：${JSON.stringify(afterFiles)}`);
+    }
+    await page.getByRole('button', { name: '整理识别结果' }).click();
+    await page.getByRole('button', { name: '开始识别发票文件' }).click();
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (ocrProgress !== '100%') fail(`识别进度应到 100%，实际为 ${ocrProgress}`);
     await page.getByRole('button', { name: '查看将要执行的操作' }).click();
     const dashboardCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
-    for (const expected of ['startFetch', 'organize', 'runOcr']) {
+    for (const expected of ['startFetch', 'runPipeline', 'organize', 'runOcr']) {
       if (!dashboardCalls.includes(expected)) fail(`控制台按钮没有调用 ${expected}: ${dashboardCalls.join(',')}`);
     }
+    const historyCards = await page.locator('[data-run-history] .history-item').count();
+    if (historyCards > 6) fail(`最近运行最多显示 6 条，实际 ${historyCards}`);
 
     await page.getByRole('link', { name: '待确认 1' }).click();
     await page.waitForURL(`${baseUrl}/pages/pending.html`);
@@ -303,6 +384,12 @@ async function main() {
     const startOcrClass = await page.getByRole('button', { name: '开始识别' }).evaluate((el) => el.className);
     if (!String(startOcrClass).includes('btn--primary')) fail(`发票库开始识别按钮不是蓝色主按钮：${startOcrClass}`);
     await page.getByRole('button', { name: '开始识别' }).click();
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.getByRole('button', { name: '重新识别' }).click();
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    const rerunCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
+    if (!rerunCalls.includes('clearOcrResults')) fail(`重新识别没有先清空结果：${rerunCalls.join(',')}`);
     await page.getByRole('button', { name: '整理输出' }).click();
 
     await page.getByRole('link', { name: '邮件记录 2' }).click();
@@ -316,13 +403,24 @@ async function main() {
     await page.waitForURL(`${baseUrl}/pages/config.html`);
     await expectText(page, '先保存所有发票或行程单原件');
     await expectText(page, 'efapiao（内置）');
+    await expectText(page, '这里只设置要找什么内容');
+    await expectText(page, '{seller}');
+    await expectText(page, '{invoiceNo}');
+    const modeHelp = await page.locator('body').evaluate((body) => body.innerText.includes('默认“规则优先，必要时调用 OCR”'));
+    if (!modeHelp) fail('设置页缺少 efapiao 识别模式说明');
     await expectText(page, '腾讯云 SecretId');
     await expectText(page, '运行 efapiao 时会作为本地环境变量透传');
+    await expectText(page, '当前版本不会调用 LLM');
+    await expectText(page, '桌面版会随应用准备浏览器');
     await expectText(page, '修改后自动保存');
+    const removedConfigText = await page.locator('body').evaluate((body) => /自定义日期范围|最近多少天|匹配范围|npx playwright install chromium/.exec(body.innerText)?.[0] || '');
+    if (removedConfigText) fail(`设置页仍显示应移除的配置项：${removedConfigText}`);
     const saveButtonCount = await page.getByRole('button', { name: '保存并应用' }).count();
     if (saveButtonCount !== 0) fail('设置页不应再显示“保存并应用”按钮');
     const defaultVendor = await page.getByLabel('上游识别引擎').inputValue();
     if (defaultVendor !== 'efapiao') fail(`默认识别后端应为 efapiao，实际为 ${defaultVendor}`);
+    const defaultOcrMode = await page.getByLabel('识别模式').inputValue();
+    if (defaultOcrMode !== 'auto') fail(`默认识别模式应为 auto，实际为 ${defaultOcrMode}`);
     const mailboxSize = await page.locator('.select--mailboxes').evaluate((el) => ({
       height: el.getBoundingClientRect().height,
       size: el.getAttribute('size'),
@@ -336,8 +434,10 @@ async function main() {
       return label && check ? Math.abs(label.left - check.left) : 999;
     });
     if (tlsAlignment > 4) fail(`TLS 勾选框没有在标签下方对齐：${tlsAlignment}`);
-    await page.getByRole('button', { name: '测试配置' }).click();
+    await page.getByRole('button', { name: '测试邮箱连接' }).click();
+    await expectText(page, '邮箱连接正常');
     await page.getByLabel('上游识别引擎').selectOption('efapiao');
+    await page.getByLabel('识别模式').selectOption('disabled');
     await page.locator('#tencent-secret-id').fill('demo-secret-id');
     await page.locator('#tencent-secret-key').fill('demo-secret-key');
     await page.locator('#tencent-region').fill('ap-guangzhou');
@@ -347,12 +447,18 @@ async function main() {
     if (savedPayload?.ocr?.credentials?.tencentRegion !== 'ap-guangzhou') {
       fail(`配置保存没有携带腾讯 OCR 区域：${JSON.stringify(savedPayload)}`);
     }
+    if (savedPayload?.ocr?.ocrMode !== 'disabled' || savedPayload?.filter?.since || savedPayload?.filter?.until || savedPayload?.filter?.sinceDays) {
+      fail(`配置保存内容不符合设置页收敛要求：${JSON.stringify(savedPayload)}`);
+    }
+    if (savedPayload?.playwright?.browserManagement !== 'app-managed') {
+      fail(`网页自动下载浏览器策略未保存：${JSON.stringify(savedPayload?.playwright)}`);
+    }
     page.on('dialog', async (dialog) => {
       await dialog.accept();
     });
     await page.getByRole('button', { name: '删除本机缓存' }).click();
     const configCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
-    for (const expected of ['testConnection', 'saveConfig', 'developerReset']) {
+    for (const expected of ['testMailConnection', 'saveConfig', 'developerReset']) {
       if (!configCalls.includes(expected)) fail(`设置页按钮没有调用 ${expected}: ${configCalls.join(',')}`);
     }
 

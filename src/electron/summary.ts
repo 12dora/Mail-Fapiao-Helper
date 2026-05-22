@@ -139,9 +139,26 @@ function money(value: string): string {
   return `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function resultKey(row: Record<string, string>): string {
+  return `${row.hash ?? ''}\0${row.source ?? row.filename ?? ''}`;
+}
+
+function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
+  const index = new Map<string, Record<string, string>>();
+  for (const row of rows) {
+    const key = resultKey(row);
+    const existing = index.get(key);
+    const status = (row.status ?? '').toLowerCase();
+    const existingStatus = (existing?.status ?? '').toLowerCase();
+    if (existing && existingStatus === 'success' && status !== 'success') continue;
+    index.set(key, row);
+  }
+  return Array.from(index.values());
+}
+
 export function summarizeLibrary(cfg: Config): LibrarySummary {
   const ocr = summarizeOcr(cfg);
-  const rows = readCsvRows(ocr.resultsCsv)
+  const rows = currentResultRows(readCsvRows(ocr.resultsCsv))
     .map((row): InvoiceRow => ({
       date: row.dateValue || row.date || '',
       seller: row.seller || '未识别销售方',

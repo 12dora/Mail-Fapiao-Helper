@@ -236,7 +236,7 @@ DISCOVERED                  // 来自 fetcher
 | # | 风险 | 影响 | 缓解 |
 |---|---|---|---|
 | R1 | Message-Id 缺失或重复（部分国内邮件服务器） | 幂等失效、重复下载 | 用 `sha1(messageId || from+date+subject)` 做 msgIdHash；以此为状态键 |
-| R2 | Playwright 在打包后（pkg / node --sea）找不到 Chromium | 第三方站点全部失败 | 文档明确"首次运行执行 `npx playwright install chromium`"；不内嵌浏览器到单文件 |
+| R2 | Playwright 在打包后找不到 Chromium | 第三方站点全部失败 | 桌面版随应用准备浏览器或使用系统浏览器；缺失时给出应用级修复提示，不要求用户安装开发工具 |
 | R3 | SiteHandler 长尾无止境，开发者持续往里塞 | 代码腐烂 | 硬性门槛：vendor 邮件数 ≥ 累计 5% 才写 handler；否则进 manual。覆盖到 80% 就停手（NEXT_STEPS Phase 5 已规约） |
 | R4 | 大附件 PDF/OFD 全部驻留内存（`DocumentArtifact.data: Buffer`） | OOM 风险 | v1 接受；约束单封邮件文档总大小上限 50MB，超过则 manual。**不引入流式接口** |
 | R5 | CSV 在 Excel 打开时被锁（Windows） | 追加失败导致整封回滚 | 追加失败重试 3 次（指数退避 100ms→1s），仍失败 → manual(reason="csv_locked")，邮件不丢 |

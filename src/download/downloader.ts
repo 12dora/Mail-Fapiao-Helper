@@ -12,6 +12,10 @@ export interface DownloadResult {
   requiresOcr: boolean;
 }
 
+export interface DownloadOptions {
+  avoidConflictBeforeOcr?: boolean;
+}
+
 function artifactExt(artifact: PdfArtifact): 'pdf' | 'ofd' {
   if (artifact.data.subarray(0, 4).toString('ascii') === '%PDF') return 'pdf';
   if (artifact.data.subarray(0, 2).toString('ascii') === 'PK') return 'ofd';
@@ -32,6 +36,29 @@ function safeFilename(name: string, fallback: string, ext: 'pdf' | 'ofd'): strin
     .trim();
   const cleaned = base.length > 0 ? base : fallback;
   return path.extname(cleaned).length > 0 ? cleaned : `${cleaned}.${ext}`;
+}
+
+function nextNumberedPath(dir: string, ext: 'pdf' | 'ofd'): string {
+  let counter = 1;
+  while (true) {
+    const candidate = `${String(counter).padStart(4, '0')}.${ext}`;
+    const candidatePath = path.join(dir, candidate);
+    if (!fs.existsSync(candidatePath)) return candidatePath;
+    counter++;
+  }
+}
+
+function finalizeNumbered(stagingPath: string, invoicesDir: string, ext: 'pdf' | 'ofd'): string {
+  while (true) {
+    const finalPath = nextNumberedPath(invoicesDir, ext);
+    try {
+      fs.copyFileSync(stagingPath, finalPath, fs.constants.COPYFILE_EXCL);
+      fs.unlinkSync(stagingPath);
+      return finalPath;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+  }
 }
 
 function ensureDir(dir: string): void {
@@ -59,7 +86,8 @@ export async function downloadPdfs(
   pdfs: PdfArtifact[],
   msgIdHash: string,
   invoicesDir: string,
-  log: Logger
+  log: Logger,
+  opts: DownloadOptions = {},
 ): Promise<DownloadResult[]> {
   const stagingDir = path.join(invoicesDir, '.staging', msgIdHash);
   ensureDir(stagingDir);
@@ -77,15 +105,15 @@ export async function downloadPdfs(
     fs.writeFileSync(stagingPath, pdf.data);
     log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
 
-    const suggestedName = safeFilename(
-      pdf.suggestedName || `${msgIdHash}-${i}.${ext}`,
-      `${msgIdHash}-${i}.${ext}`,
-      ext,
-    );
-    const targetPath = path.join(invoicesDir, suggestedName);
-    const finalPath = resolveConflict(targetPath);
+    const finalPath = opts.avoidConflictBeforeOcr === false
+      ? resolveConflict(path.join(invoicesDir, safeFilename(
+          pdf.suggestedName || `${msgIdHash}-${i}.${ext}`,
+          `${msgIdHash}-${i}.${ext}`,
+          ext,
+        )))
+      : finalizeNumbered(stagingPath, invoicesDir, ext);
 
-    fs.renameSync(stagingPath, finalPath);
+    if (opts.avoidConflictBeforeOcr === false) fs.renameSync(stagingPath, finalPath);
     log.debug(`Finalized ${stagingPath} -> ${finalPath}`);
 
     results.push({

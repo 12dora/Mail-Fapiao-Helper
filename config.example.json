@@ -26,6 +26,7 @@
     "csv": "./invoices.csv"
   },
   "rename": {
+    "avoidConflictBeforeOcr": true,
     "rule": "{seller}-{amount}.pdf",
     "fallback": "{date}-{messageId}.pdf",
     "applyAfterOcr": false,
@@ -37,6 +38,7 @@
     "enabled": true,
     "provider": "efapiao",
     "binaryPath": "auto",
+    "ocrMode": "auto",
     "executionMode": "auto",
     "serviceUrl": "http://127.0.0.1:8000",
     "serviceHost": "127.0.0.1",
@@ -62,7 +64,8 @@
   },
   "playwright": {
     "headless": true,
-    "timeoutMs": 30000
+    "timeoutMs": 30000,
+    "browserManagement": "app-managed"
   },
   "network": {
     "retries": 3,

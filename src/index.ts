@@ -77,6 +77,8 @@ Commands:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --force              Re-parse rows already present in ocr.resultsCsv
+  --single-item        Parse files one by one for visible progress and checkpoint resume
+  --concurrency <n>    Parse up to N files in parallel
   --allow-parse-failures
                        Exit 0 when OCR transport completed but some rows failed to parse
   --json               Print machine-readable summary for GUI integration
@@ -124,6 +126,8 @@ interface OcrOpts {
   command: 'run' | 'summary';
   configPath: string;
   force: boolean;
+  singleItem: boolean;
+  concurrency: number;
   allowParseFailures: boolean;
   json: boolean;
 }
@@ -199,6 +203,8 @@ function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
     command: subcmd,
     configPath: './config.json',
     force: false,
+    singleItem: false,
+    concurrency: 1,
     allowParseFailures: false,
     json: false,
   };
@@ -206,13 +212,20 @@ function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
     const a = rest[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--force') { opts.force = true; continue; }
+    if (a === '--single-item') { opts.singleItem = true; continue; }
+    if (a === '--concurrency') {
+      const v = Number(requireValue(rest, ++i, a));
+      if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
+      opts.concurrency = v;
+      continue;
+    }
     if (a === '--allow-parse-failures') { opts.allowParseFailures = true; continue; }
     if (a === '--json') { opts.json = true; continue; }
     if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
     throw new Error(`unknown option: ${a}`);
   }
-  if (opts.command === 'summary' && (opts.force || opts.allowParseFailures)) {
-    throw new Error('--force and --allow-parse-failures are only valid for mfh ocr run');
+  if (opts.command === 'summary' && (opts.force || opts.singleItem || opts.concurrency !== 1 || opts.allowParseFailures)) {
+    throw new Error('--force, --single-item, --concurrency and --allow-parse-failures are only valid for mfh ocr run');
   }
   return opts;
 }
@@ -480,6 +493,11 @@ async function cmdRun(argv: string[]): Promise<number> {
       browserPromise ??= chromium.launch({
         headless: cfg.playwright.headless,
         timeout: cfg.playwright.timeoutMs,
+      }).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `网页自动下载浏览器启动失败。桌面版会随应用准备浏览器；请重新安装或更新应用后再试。原始错误：${message}`,
+        );
       });
       browserInstance = await browserPromise;
     }
@@ -737,7 +755,11 @@ async function cmdOcr(argv: string[]): Promise<number> {
       return 0;
     }
 
-    const summary = await runOcrPending(cfg, log, { force: parsed.force });
+    const summary = await runOcrPending(cfg, log, {
+      force: parsed.force,
+      singleItem: parsed.singleItem,
+      concurrency: parsed.concurrency,
+    });
     log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}, updated=${summary.updated}`);
     if (summary.failed > 0 && !parsed.allowParseFailures) return 1;
     return 0;
