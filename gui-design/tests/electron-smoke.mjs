@@ -31,8 +31,7 @@ async function main() {
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState('domcontentloaded');
-    await page.getByText('按顺序完成三步', { exact: false }).waitFor({ state: 'visible', timeout: 5000 });
-    await page.getByRole('link', { name: '已有配置，开始处理' }).click();
+    await page.getByText('运行控制台', { exact: false }).waitFor({ state: 'visible', timeout: 5000 });
     await page.waitForURL(/dashboard\.html/);
 
     const bridgeType = await page.evaluate(() => typeof window.mfhBridge?.getSummary);
@@ -55,7 +54,7 @@ async function main() {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
     if (overflow) fail('Electron 窗口下配置页存在横向溢出');
     const scrollCheck = await page.evaluate(() => {
-      const scroller = document.querySelector('.page');
+      const scroller = document.querySelector('main.main:not([style*="display: none"]) .page');
       if (!scroller) return { ok: false, after: 0, max: 0 };
       const max = scroller.scrollHeight - scroller.clientHeight;
       scroller.scrollTop = max;

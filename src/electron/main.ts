@@ -95,7 +95,7 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   });
-  void mainWindow.loadFile(uiPath('index.html'));
+  void mainWindow.loadFile(uiPath('pages', 'dashboard.html'));
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -793,6 +793,10 @@ function historyEntry(action: string, title: string, startedAt: number, result: 
 
 function fetchArgs(payload: DateRangePayload): string[] {
   const args = ['--config', configPath, '--state', statePath];
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  const samples = typeof paths.samples === 'string' && paths.samples.length > 0 ? paths.samples : './samples/raw';
+  args.push('--out', path.resolve(rootDir, samples));
   if (payload.from) args.push('--since', payload.from);
   if (payload.to) args.push('--until', payload.to);
   if (payload.dryRun) args.push('--dry-run');
@@ -813,7 +817,9 @@ ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
 
 ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
   const startedAt = Date.now();
-  const result = await runCli('fetch', fetchArgs(asDateRange(payload)), { progress: true });
+  const args = fetchArgs(asDateRange(payload));
+  mainWindow?.webContents.executeJavaScript(`window.__mfhLastFetchArgs = ${JSON.stringify(args)}`).catch(() => {});
+  const result = await runCli('fetch', args, { progress: true });
   historyEntry('fetch', '获取邮件', startedAt, result);
   return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, rootDir) };
 });

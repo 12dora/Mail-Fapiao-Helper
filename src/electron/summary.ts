@@ -39,6 +39,10 @@ export interface InvoiceRow {
   error: string;
 }
 
+function isArchivedDocument(name: string): boolean {
+  return /\.(pdf|ofd)$/i.test(name);
+}
+
 export interface LibrarySummary {
   pendingCsv: string;
   resultsCsv: string;
@@ -141,7 +145,10 @@ function money(value: string): string {
 }
 
 function resultKey(row: Record<string, string>): string {
-  return `${row.hash ?? ''}\0${row.source ?? row.filename ?? ''}`;
+  const hash = row.hash ?? '';
+  const source = row.source ?? row.filename ?? '';
+  if (!hash) return `filename\0${row.filename ?? source}`;
+  return `${hash}\0${source}`;
 }
 
 function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
@@ -159,7 +166,8 @@ function currentResultRows(rows: Record<string, string>[]): Record<string, strin
 
 export function summarizeLibrary(cfg: Config): LibrarySummary {
   const ocr = summarizeOcr(cfg);
-  const rows = currentResultRows(readCsvRows(ocr.resultsCsv))
+  const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
+  const rows = resultRows
     .map((row): InvoiceRow => ({
       date: row.dateValue || row.date || '',
       seller: row.seller || '未识别销售方',
@@ -170,29 +178,70 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
       filePath: row.filename ? path.resolve(cfg.paths.invoices, row.filename) : '',
       status: (row.status ?? '').toLowerCase() === 'error'
         ? '识别失败'
-        : row.invoiceNo ? '完整' : '待补充',
+        : (row.invoiceNo || row.seller || row.amount) ? '完整' : '待补充',
       documentType: row.documentType || '',
       invoiceType: row.invoiceType || '',
       error: row.error || '',
     }))
-    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date))
-    .slice(0, 80);
+    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  const seenFiles = new Set(rows.map((row) => row.filename).filter(Boolean));
+  for (const row of readCsvRows(ocr.pendingCsv)) {
+    const filename = row.filename || '';
+    if (!filename || seenFiles.has(filename)) continue;
+    seenFiles.add(filename);
+    rows.push({
+      date: row.date || '',
+      seller: row.documentType === 'supporting' ? '支撑材料' : '待识别',
+      invoiceNo: '',
+      amount: '',
+      source: '归档文件',
+      filename,
+      filePath: path.resolve(cfg.paths.invoices, filename),
+      status: row.status === 'ignored' ? '已归档' : '待补充',
+      documentType: row.documentType || '',
+      invoiceType: '',
+      error: row.reason || '',
+    });
+  }
+  try {
+    for (const entry of fs.readdirSync(path.resolve(cfg.paths.invoices), { withFileTypes: true })) {
+      if (!entry.isFile() || !isArchivedDocument(entry.name) || seenFiles.has(entry.name)) continue;
+      rows.push({
+        date: '',
+        seller: '待识别',
+        invoiceNo: '',
+        amount: '',
+        source: '归档文件',
+        filename: entry.name,
+        filePath: path.resolve(cfg.paths.invoices, entry.name),
+        status: '待补充',
+        documentType: '',
+        invoiceType: '',
+        error: '',
+      });
+    }
+  } catch {
+    // Directory may not exist yet on a fresh install.
+  }
+  rows.sort((a, b) => Date.parse(b.date) - Date.parse(a.date) || a.filename.localeCompare(b.filename, 'zh-CN'));
 
   const itinerary = ocr.byDocumentType.find((group) => group.key === 'itinerary')?.count ?? 0;
   const supporting = ocr.ignored;
   const invoiceLike = Math.max(0, ocr.recognized - itinerary);
+  const archivedTotal = rows.filter((row) => isArchivedDocument(row.filename)).length;
+  const pendingRows = rows.filter((row) => row.status === '待补充').length;
   return {
     pendingCsv: ocr.pendingCsv,
     resultsCsv: ocr.resultsCsv,
-    total: ocr.total,
+    total: Math.max(ocr.total, archivedTotal),
     recognized: ocr.recognized,
     failed: ocr.failed,
     ignored: ocr.ignored,
-    pending: ocr.pending,
+    pending: Math.max(ocr.pending, pendingRows),
     invoiceLike,
     itinerary,
     supporting,
-    rows,
+    rows: rows.slice(0, 200),
     ocr,
   };
 }

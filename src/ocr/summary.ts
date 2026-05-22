@@ -70,7 +70,10 @@ function compactReason(reason: string): string {
 }
 
 function resultKey(row: Record<string, string>): string {
-  return `${row.hash ?? ''}\0${row.source ?? row.filename ?? ''}`;
+  const hash = row.hash ?? '';
+  const source = row.source ?? row.filename ?? '';
+  if (!hash) return `filename\0${row.filename ?? source}`;
+  return `${hash}\0${source}`;
 }
 
 function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
@@ -92,6 +95,7 @@ export function summarizeOcr(cfg: Config): OcrSummary {
   const pendingRows = readCsvRows(pendingCsv);
   const resultRows = currentResultRows(readCsvRows(resultsCsv));
   const currentResults = new Map(resultRows.map((row) => [resultKey(row), row]));
+  const currentResultsByFilename = new Map(resultRows.map((row) => [row.filename ?? '', row]));
   const byDocumentType = new Map<string, OcrSummaryGroup>();
   const bySupportingReason = new Map<string, OcrSummaryGroup>();
   const byFailureReason = new Map<string, OcrSummaryGroup>();
@@ -102,7 +106,7 @@ export function summarizeOcr(cfg: Config): OcrSummary {
   let pending = 0;
 
   for (const row of pendingRows) {
-    const result = currentResults.get(resultKey(row));
+    const result = currentResults.get(resultKey(row)) || currentResultsByFilename.get(row.filename ?? '');
     const resultStatus = (result?.status ?? '').toLowerCase();
     const status = resultStatus === 'success' ? 'recognized' : (row.status ?? '').toLowerCase();
     const documentType = result?.documentType || row.documentType || '';
@@ -130,10 +134,25 @@ export function summarizeOcr(cfg: Config): OcrSummary {
     }
   }
 
+  if (pendingRows.length === 0 && resultRows.length > 0) {
+    for (const row of resultRows) {
+      const status = (row.status ?? '').toLowerCase();
+      const documentType = row.documentType || 'invoice';
+      const example = exampleFromRow(row, row.error ?? '');
+      bump(byDocumentType, documentType, example);
+      if (status === 'error') {
+        failed++;
+        bump(byFailureReason, compactReason(row.error ?? '') || 'error', example);
+      } else {
+        recognized++;
+      }
+    }
+  }
+
   return {
     pendingCsv,
     resultsCsv,
-    total: pendingRows.length,
+    total: pendingRows.length || resultRows.length,
     recognized,
     failed,
     ignored,

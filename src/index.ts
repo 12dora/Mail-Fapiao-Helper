@@ -93,7 +93,7 @@ Usage:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --state <path>       Path to state.json         (default: ./state.json)
-  --out <dir>          Output dir for samples     (default: ./samples/raw)
+  --out <dir>          Output dir for samples     (default: config.paths.samples)
   --since-days <n>     Use a rolling N-day window (overrides config.filter.sinceDays)
   --since <date>       Lower bound, inclusive     (YYYY-MM-DD or ISO 8601)
   --until <date>       Upper bound, inclusive     (YYYY-MM-DD or ISO 8601)
@@ -109,7 +109,7 @@ Notes:
 interface FetchOpts {
   configPath: string;
   statePath: string;
-  outDir: string;
+  outDir: string | undefined;
   sinceDaysOverride: number | undefined;
   sinceOverride: string | undefined;
   untilOverride: string | undefined;
@@ -136,7 +136,7 @@ function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
   const opts: FetchOpts = {
     configPath: './config.json',
     statePath: './state.json',
-    outDir: './samples/raw',
+    outDir: undefined,
     sinceDaysOverride: undefined,
     sinceOverride: undefined,
     untilOverride: undefined,
@@ -329,7 +329,7 @@ async function cmdFetch(argv: string[]): Promise<number> {
   const state: State = loadState(statePath);
   const fetched = new Set(state.fetchedHashes);
 
-  const outDir = resolve(opts.outDir);
+  const outDir = resolve(opts.outDir ?? cfg.paths.samples);
   const indexCsv = join(outDir, 'INDEX.csv');
   if (!opts.dryRun) ensureIndexCsv(indexCsv);
 

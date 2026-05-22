@@ -67,9 +67,6 @@ export interface Config {
     retries: number;
     retryDelayMs: number;
   };
-  log: {
-    level: 'debug' | 'info' | 'warn' | 'error';
-  };
 }
 
 function requireField(obj: unknown, path: string): unknown {
@@ -271,13 +268,6 @@ export function loadConfig(path: string): Config {
     network: {
       retries: optNumber((raw as { network?: { retries?: unknown } }).network?.retries, 'network.retries', 3),
       retryDelayMs: optNumber((raw as { network?: { retryDelayMs?: unknown } }).network?.retryDelayMs, 'network.retryDelayMs', 1000),
-    },
-    log: {
-      level: (() => {
-        const v = (raw as { log?: { level?: unknown } }).log?.level;
-        if (v === 'debug' || v === 'info' || v === 'warn' || v === 'error') return v;
-        return 'info';
-      })(),
     },
   };
 

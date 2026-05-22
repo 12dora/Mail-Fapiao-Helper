@@ -58,7 +58,9 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     await page.addInitScript(() => {
       window.__savedConfigPayload = null;
+      window.__afterMailDone = false;
       window.__afterFetchDone = false;
+      window.__afterOcrDone = false;
       window.__bridgeCalls = [];
       const record = (name, payload) => {
         window.__bridgeCalls.push({ name, payload });
@@ -75,40 +77,64 @@ async function main() {
             detail: '测试记录',
             durationMs: 1200 + index,
           }));
+          const inboxRows = window.__afterMailDone ? [
+            {
+              date: '2026-05-21T08:30:00.000Z',
+              from: '国家电网 <noreply@example.com>',
+              subject: '国家电网电子发票通知',
+              mailbox: 'INBOX',
+              hasAttachment: true,
+              bodyLinkCount: 3,
+            },
+            {
+              date: '2026-05-20T08:30:00.000Z',
+              from: '服务商 <vendor@example.com>',
+              subject: '普通通知',
+              mailbox: 'INBOX',
+              hasAttachment: false,
+              bodyLinkCount: 0,
+            },
+          ] : [];
+          const libraryRows = window.__afterFetchDone ? [
+            {
+              date: '2026-05-21',
+              seller: window.__afterOcrDone ? '国家电网有限公司' : '待识别',
+              invoiceNo: window.__afterOcrDone ? '123456' : '',
+              amount: window.__afterOcrDone ? '¥ 318.42' : '',
+              source: window.__afterOcrDone ? '本机识别' : '归档文件',
+              filename: '国家电网-318.42.pdf',
+              status: window.__afterOcrDone ? '完整' : '待补充',
+              documentType: 'invoice',
+            },
+            {
+              date: '2026-05-20',
+              seller: '未识别销售方',
+              invoiceNo: '',
+              amount: '',
+              source: '本机识别',
+              filename: 'bad.pdf',
+              status: '识别失败',
+              error: '暂未识别',
+              documentType: 'invoice',
+            },
+          ] : [];
           return {
             configExists: true,
             history,
             inbox: {
-              total: 2,
-              withAttachment: 1,
-              withLinks: 2,
-              earliestMonth: '2026-05',
-              latestMonth: '2026-05',
-              rows: [
-                {
-                  date: '2026-05-21T08:30:00.000Z',
-                  from: '国家电网 <noreply@example.com>',
-                  subject: '国家电网电子发票通知',
-                  mailbox: 'INBOX',
-                  hasAttachment: true,
-                  bodyLinkCount: 3,
-                },
-                {
-                  date: '2026-05-20T08:30:00.000Z',
-                  from: '服务商 <vendor@example.com>',
-                  subject: '普通通知',
-                  mailbox: 'INBOX',
-                  hasAttachment: false,
-                  bodyLinkCount: 0,
-                },
-              ],
+              total: inboxRows.length,
+              withAttachment: inboxRows.filter((row) => row.hasAttachment).length,
+              withLinks: inboxRows.filter((row) => row.bodyLinkCount > 0).length,
+              earliestMonth: inboxRows.length ? '2026-05' : '',
+              latestMonth: inboxRows.length ? '2026-05' : '',
+              rows: inboxRows,
             },
             library: {
-              total: 3,
-              recognized: 2,
-              failed: 1,
-              ignored: 1,
-                pending: window.__afterFetchDone ? 3 : 0,
+              total: window.__afterFetchDone ? 3 : 0,
+              recognized: window.__afterOcrDone ? 2 : 0,
+              failed: window.__afterFetchDone ? 1 : 0,
+              ignored: window.__afterFetchDone ? 1 : 0,
+                pending: window.__afterFetchDone && !window.__afterOcrDone ? 3 : 0,
                 invoiceLike: window.__afterFetchDone ? 2 : 0,
                 itinerary: window.__afterFetchDone ? 1 : 0,
                 supporting: window.__afterFetchDone ? 1 : 0,
@@ -119,27 +145,7 @@ async function main() {
                   { key: 'supporting', count: 1 },
                 ] : [],
               },
-              rows: [
-                {
-                  date: '2026-05-21',
-                  seller: '国家电网有限公司',
-                  invoiceNo: '123456',
-                  amount: '¥ 318.42',
-                  source: '本机识别',
-                  filename: '国家电网-318.42.pdf',
-                  status: '完整',
-                },
-                {
-                  date: '2026-05-20',
-                  seller: '未识别销售方',
-                  invoiceNo: '',
-                  amount: '',
-                  source: '本机识别',
-                  filename: 'bad.pdf',
-                  status: '识别失败',
-                  error: '暂未识别',
-                },
-              ],
+              rows: libraryRows,
             },
             pending: {
               total: 1,
@@ -186,6 +192,7 @@ async function main() {
         },
         async startFetch() {
           record('startFetch');
+          window.__afterMailDone = true;
           return { ok: true, summary: await window.mfhBridge.getSummary() };
         },
         async runOcr(payload) {
@@ -194,6 +201,7 @@ async function main() {
           window.__ocrProgress?.({ operation: 'ocr', phase: '开始识别', percent: 10, total: 3, processed: 0, parsed: 0, skipped: 0, failed: 0, message: '发现 3 个待识别文件，正在启动识别。' });
           window.__ocrProgress?.({ operation: 'ocr', phase: '正在识别', percent: 50, total: 3, processed: 1, parsed: 1, skipped: 0, failed: 0, message: '识别成功：国家电网-318.42.pdf', kind: 'ok' });
           window.__ocrProgress?.({ operation: 'ocr', phase: '识别完成', percent: 100, total: 3, processed: 3, parsed: 2, skipped: 1, failed: 0, message: '识别完成：成功 2 个，跳过 1 个，失败 0 个。', kind: 'ok', done: true });
+          window.__afterOcrDone = true;
           return { ok: true, message: '已扫描 3 个文件，识别成功 2 个，跳过 1 个，失败 0 个。', summary: await window.mfhBridge.getSummary() };
         },
         async organize(payload) {
@@ -249,20 +257,13 @@ async function main() {
         },
       };
     });
-    await page.goto(`${baseUrl}/`);
-
-    await expectText(page, '按顺序完成三步');
-    await expectText(page, '设置邮箱与保存位置');
-    await expectText(page, '开始获取邮件');
-    await expectText(page, '查看发票库和待确认');
-    await page.getByRole('link', { name: '已有配置，开始处理' }).click();
+    await page.goto(`${baseUrl}/pages/dashboard.html`);
     await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
 
     const theme = await page.evaluate(() => document.documentElement.dataset.theme || 'light');
     if (theme !== 'light') fail(`默认主题应为亮色，实际为 ${theme}`);
 
     await expectText(page, '开始处理');
-    await expectText(page, '返回首页');
     await expectText(page, '邮件记录');
     await expectText(page, '发票库');
     await expectText(page, '待确认');
@@ -274,7 +275,7 @@ async function main() {
     await expectText(page, '获取邮件');
     await expectText(page, '获取邮件实时日志');
     await expectText(page, '最多显示最近 6 条记录');
-    await expectText(page, '2026-05 至 2026-05');
+    await expectText(page, '已获取邮件');
     await expectText(page, '选择日期范围后，点击“开始获取邮件”才会运行');
 
     const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('.page h3')).map((el) => el.textContent.trim()));
@@ -307,6 +308,13 @@ async function main() {
 
     await page.getByRole('button', { name: '开始获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
+    const afterFetchMail = await page.evaluate(() => ({
+      cached: document.querySelector('[data-dash="cached-mails"]')?.textContent?.trim(),
+      navInbox: document.querySelector('[data-nav-badge="inbox"]')?.textContent?.trim(),
+    }));
+    if (afterFetchMail.cached !== '2' || afterFetchMail.navInbox !== '2') {
+      fail(`获取邮件后已获取邮件统计没有刷新：${JSON.stringify(afterFetchMail)}`);
+    }
     const afterFetchOcrCounts = await page.evaluate(() => ({
       invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
       itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
@@ -315,6 +323,11 @@ async function main() {
     if (afterFetchOcrCounts.invoice !== '0' || afterFetchOcrCounts.itinerary !== '0' || afterFetchOcrCounts.supporting !== '0') {
       fail(`获取邮件后不应已经生成发票文件统计：${JSON.stringify(afterFetchOcrCounts)}`);
     }
+    await page.getByRole('link', { name: '邮件记录 2' }).click();
+    await page.waitForURL(`${baseUrl}/pages/inbox.html`);
+    await page.locator('[data-inbox-rows]').getByText('国家电网电子发票通知', { exact: false }).waitFor({ state: 'visible', timeout: 6000 });
+    await page.getByRole('link', { name: '开始处理' }).click();
+    await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
     await page.getByRole('button', { name: '开始获取发票文件' }).click();
     await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
     await page.getByRole('button', { name: '打开文件位置' }).click();
@@ -356,6 +369,12 @@ async function main() {
 
     await page.getByRole('link', { name: '待确认 1' }).click();
     await page.waitForURL(`${baseUrl}/pages/pending.html`);
+    await page.getByRole('link', { name: '开始处理' }).click();
+    await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
+    const preservedFileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (preservedFileProgress !== '100%') fail(`页面切换后获取发票进度不应丢失，实际为 ${preservedFileProgress}`);
+    await page.getByRole('link', { name: '待确认 1' }).click();
+    await page.waitForURL(`${baseUrl}/pages/pending.html`);
     await expectText(page, '这些邮件大多是历史链接过期');
     await expectText(page, '发票下载链接已过期');
     await page.locator('[data-action="pending-primary"]').click();
@@ -391,7 +410,7 @@ async function main() {
     await page.waitForURL(`${baseUrl}/pages/inbox.html`);
     await page.locator('[data-search="inbox"]').fill('国家电网');
     await expectText(page, '国家电网电子发票通知');
-    const normalVisible = await page.getByText('普通通知', { exact: false }).count();
+    const normalVisible = await page.locator('[data-inbox-rows]').getByText('普通通知', { exact: false }).count();
     if (normalVisible !== 0) fail('邮件搜索没有过滤不匹配结果');
 
     await page.getByRole('link', { name: '邮箱与保存' }).click();
@@ -474,7 +493,7 @@ async function main() {
     await page.getByRole('link', { name: '邮箱与保存' }).click();
     await page.waitForURL(`${baseUrl}/pages/config.html`);
     const scrollCheck = await page.evaluate(() => {
-      const scroller = document.querySelector('.page');
+      const scroller = document.querySelector('main.main:not([style*="display: none"]) .page');
       if (!scroller) return { ok: false, before: 0, after: 0, max: 0 };
       const max = scroller.scrollHeight - scroller.clientHeight;
       scroller.scrollTop = max;

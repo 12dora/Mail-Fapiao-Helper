@@ -5,8 +5,6 @@ export interface State {
   fetchedHashes: string[];
 }
 
-const EMPTY: State = { processedHashes: [], fetchedHashes: [] };
-
 export function loadState(path: string): State {
   if (!existsSync(path)) {
     return { processedHashes: [], fetchedHashes: [] };
@@ -34,8 +32,4 @@ export function saveState(path: string, state: State): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
   renameSync(tmp, path);
-}
-
-export function emptyState(): State {
-  return { ...EMPTY, processedHashes: [], fetchedHashes: [] };
 }
