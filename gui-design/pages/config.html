@@ -16,7 +16,7 @@
             <span class="toolbar__crumb">系统</span>
             <span class="toolbar__title">配置</span>
             <div class="toolbar__spacer"></div>
-            <button class="btn btn--sm" data-theme-toggle>
+            <button class="btn btn--sm" type="button" data-theme-toggle>
                 <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><line x1="12" y1="2" x2="12" y2="4"></line><line x1="12" y1="20" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"></line><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="4" y2="12"></line><line x1="20" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"></line><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"></line></svg>
             </button>
             <span class="toolbar__meta"><span data-summary="config-path">本机配置</span></span>
@@ -47,6 +47,9 @@
                     <div class="field">
                         <label class="field__label">密码 <span class="field__hint">本地存储 · 不上传</span></label>
                         <input class="input" data-config="imap.pass" type="password" value="" placeholder="留空则不修改已有密码">
+                        <div class="row gap-8" style="margin-top: 8px;">
+                            <button class="btn btn--sm btn--ghost" type="button" data-action="clear-secret" data-secret-key="imap.pass" data-secret-label="邮箱密码">清除已保存密码</button>
+                        </div>
                     </div>
                 </div>
 
@@ -72,7 +75,7 @@
                 </div>
 
                 <div class="row gap-8 mt-16">
-                    <button class="btn" data-action="test-connection">测试邮箱连接</button>
+                    <button class="btn" type="button" data-action="test-connection">测试邮箱连接</button>
                     <span class="pill"><span class="pill__dot"></span>保存后即可抓取</span>
                 </div>
             </div>
@@ -157,7 +160,8 @@
 
                 <div style="background: var(--ok-soft); border: 1px solid var(--ok); border-radius: var(--radius); padding: 12px 14px; margin-top: 12px;">
                     <div class="small muted" style="margin-bottom: 4px;">实时预览</div>
-                    <div class="mono strong">国家电网-318.42.pdf</div>
+                    <div class="mono strong" data-rename-preview>国家电网-318.42.pdf</div>
+                    <div class="mono small muted" style="margin-top: 4px;" data-rename-fallback-preview>回退：2026-05-20-a91f0e2c.pdf</div>
                 </div>
 
                 <div class="template-fields">
@@ -191,7 +195,6 @@
                         <select class="select" id="ocr-vendor" data-config="ocr.provider" aria-label="上游识别引擎">
                             <option value="efapiao" selected>efapiao（内置）</option>
                             <option value="none">暂不识别，只保存原件</option>
-                            <option value="custom">自定义本地服务</option>
                         </select>
                     </div>
                     <div class="field">
@@ -226,6 +229,11 @@
                         <label class="field__label">腾讯云区域</label>
                         <input class="input input--mono" id="tencent-region" data-config="ocr.credentials.tencentRegion" value="ap-shanghai">
                     </div>
+                </div>
+
+                <div class="row gap-8" style="margin-top: -4px; margin-bottom: 12px;">
+                    <button class="btn btn--sm btn--ghost" type="button" data-action="clear-secret" data-secret-key="ocr.credentials.tencentSecretId" data-secret-label="腾讯云 SecretId">清除 SecretId</button>
+                    <button class="btn btn--sm btn--ghost" type="button" data-action="clear-secret" data-secret-key="ocr.credentials.tencentSecretKey" data-secret-label="腾讯云 SecretKey">清除 SecretKey</button>
                 </div>
 
                 <div class="field">
@@ -324,7 +332,7 @@
 
             <div class="row row--between" style="padding: 18px; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-lg);">
                 <span class="pill pill--ok" id="save-state"><span class="pill__dot"></span>修改后自动保存</span>
-                <button class="btn" data-action="discard-config">重新读取配置</button>
+                <button class="btn" type="button" data-action="discard-config">重新读取配置</button>
             </div>
 
             <div class="card card--danger">
@@ -333,7 +341,7 @@
                         <h3 class="card__title" style="margin: 0 0 4px;">开发者重置</h3>
                         <p class="card__sub" style="margin: 0;">删除本机缓存邮件、已归档发票、待确认队列、识别结果和运行记录。配置不会删除。</p>
                     </div>
-                    <button class="btn btn--danger" data-action="developer-reset">删除本机缓存</button>
+                    <button class="btn btn--danger" type="button" data-action="developer-reset">删除本机缓存</button>
                 </div>
             </div>
         </div>
@@ -416,6 +424,52 @@ window.collectConfigPayload = collectConfigPayload;
 
 let saveTimer = 0;
 
+const NUMERIC_CONFIG_KEYS = [
+    'imap.port',
+    'playwright.timeoutMs',
+    'network.retries',
+    'network.retryDelayMs',
+    'ocr.servicePort',
+    'ocr.serviceWorkers',
+    'ocr.batchSize',
+];
+
+// Keys that must be non-empty positive integers (cannot be cleared).
+const REQUIRED_NUMERIC_KEYS = new Set(['imap.port']);
+
+function validateNumericFields() {
+    let allValid = true;
+    let invalidLabel = '';
+    for (const key of NUMERIC_CONFIG_KEYS) {
+        const el = document.querySelector(`[data-config="${key}"]`);
+        if (!el) continue;
+        const raw = String(el.value || '').trim();
+        const required = REQUIRED_NUMERIC_KEYS.has(key);
+        let valid;
+        if (required) {
+            const n = Number(raw);
+            valid = raw !== '' && Number.isFinite(n) && n > 0;
+        } else {
+            valid = raw === '' || Number.isFinite(Number(raw));
+        }
+        el.classList.toggle('is-invalid', !valid);
+        if (!valid && !invalidLabel) invalidLabel = key;
+        if (!valid) allValid = false;
+    }
+    return { allValid, invalidLabel };
+}
+
+window.MFH_CONFIG_CANCEL_PENDING_SAVE = () => {
+    window.clearTimeout(saveTimer);
+    saveTimer = 0;
+    const state = document.getElementById('save-state');
+    if (!state) return;
+    state.className = 'pill pill--ok';
+    state.innerHTML = '<span class="pill__dot"></span>修改后自动保存';
+};
+
+window.MFH_CONFIG_HAS_PENDING_SAVE = () => saveTimer !== 0;
+
 async function saveConfigNow() {
     const payload = collectConfigPayload();
     if (window.mfhBridge?.saveConfig) {
@@ -428,14 +482,23 @@ async function saveConfigNow() {
             tencentRegion: payload.ocr.credentials.tencentRegion,
         }));
     }
+    // The save-state pill already conveys "saved" — adding a toast for every
+    // keystroke-debounced save spams the user (one toast per typing burst).
     const state = document.getElementById('save-state');
     state.className = 'pill pill--ok';
     state.innerHTML = '<span class="pill__dot"></span>已保存到本机';
-    window.FPH?.showToast('设置已保存', '腾讯云鉴权会在运行 efapiao 时从本机配置透传。');
 }
 
 function scheduleConfigSave() {
     const state = document.getElementById('save-state');
+    const validation = validateNumericFields();
+    if (!validation.allValid) {
+        window.clearTimeout(saveTimer);
+        saveTimer = 0;
+        state.className = 'pill pill--err';
+        state.innerHTML = '<span class="pill__dot"></span>有数字字段填写非法，未保存';
+        return;
+    }
     state.className = 'pill pill--warn';
     state.innerHTML = '<span class="pill__dot"></span>正在保存…';
     window.clearTimeout(saveTimer);
@@ -458,10 +521,64 @@ function wireAutoSave() {
     });
 }
 
+const RENAME_PREVIEW_SAMPLE = {
+    seller: '国家电网',
+    amount: '318.42',
+    date: '2026-05-20',
+    invoiceNo: '1234567890',
+    invoiceType: '电子发票',
+    documentType: 'invoice',
+    format: 'PDF',
+    filename: 'invoice-original.pdf',
+    messageId: 'a91f0e2c',
+    hash: 'a91f0e2c',
+    from: '财务部 <billing@example.com>',
+    subject: '电子发票-318.42 元',
+    source: '附件',
+    status: '识别成功',
+    error: '',
+};
+
+function renderRenameTemplate(rule) {
+    return String(rule || '').replace(/\{(\w+)\}/g, (m, key) => {
+        const value = RENAME_PREVIEW_SAMPLE[key];
+        return value === undefined ? m : String(value);
+    });
+}
+
+function updateRenamePreview() {
+    const rule = document.querySelector('[data-config="rename.rule"]')?.value || '{seller}-{amount}.pdf';
+    const fallback = document.querySelector('[data-config="rename.fallback"]')?.value || '{date}-{messageId}.pdf';
+    const previewEl = document.querySelector('[data-rename-preview]');
+    const fallbackEl = document.querySelector('[data-rename-fallback-preview]');
+    if (previewEl) previewEl.textContent = renderRenameTemplate(rule);
+    if (fallbackEl) fallbackEl.textContent = `回退：${renderRenameTemplate(fallback)}`;
+}
+
+window.MFH_UPDATE_RENAME_PREVIEW = updateRenamePreview;
+
+function wireRenamePreview() {
+    const rule = document.querySelector('[data-config="rename.rule"]');
+    const fallback = document.querySelector('[data-config="rename.fallback"]');
+    rule?.addEventListener('input', updateRenamePreview);
+    fallback?.addEventListener('input', updateRenamePreview);
+    updateRenamePreview();
+}
+
+window.MFH_PAGE_INIT = window.MFH_PAGE_INIT || {};
+window.MFH_PAGE_INIT.config = () => {
+    wireAutoSave();
+    wireRenamePreview();
+};
+
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', wireAutoSave);
+    document.addEventListener('DOMContentLoaded', () => {
+        wireAutoSave();
+        wireRenamePreview();
+    });
 } else {
     wireAutoSave();
+    wireRenamePreview();
 }
 </script>
 </body>

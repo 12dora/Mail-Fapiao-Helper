@@ -89,9 +89,9 @@ function currentResultRows(rows: Record<string, string>[]): Record<string, strin
   return Array.from(index.values());
 }
 
-export function summarizeOcr(cfg: Config): OcrSummary {
-  const pendingCsv = path.join(path.resolve(cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
-  const resultsCsv = path.resolve(cfg.ocr.resultsCsv);
+export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
+  const pendingCsv = path.join(path.resolve(cwd, cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
+  const resultsCsv = path.resolve(cwd, cfg.ocr.resultsCsv);
   const pendingRows = readCsvRows(pendingCsv);
   const resultRows = currentResultRows(readCsvRows(resultsCsv));
   const currentResults = new Map(resultRows.map((row) => [resultKey(row), row]));

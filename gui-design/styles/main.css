@@ -554,6 +554,16 @@ kbd {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
+.input.is-invalid, .select.is-invalid, .textarea.is-invalid {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+.input.is-invalid:focus {
+  box-shadow: 0 0 0 3px var(--err-soft);
+}
+.is-invalid.mono, span.is-invalid {
+  color: var(--err);
+}
 .textarea {
   height: auto;
   min-height: 80px;
@@ -905,6 +915,8 @@ kbd {
 @keyframes shimmer { to { transform: translateX(100%); } }
 .progress.is-idle .progress__bar::after { display: none; }
 .progress.is-done .progress__bar::after { display: none; }
+.progress.is-error .progress__bar { background: var(--err); }
+.progress.is-error .progress__bar::after { display: none; }
 
 .ocr-runner {
   border-top: 1px solid var(--border);

@@ -171,7 +171,7 @@ function currentResultRows(rows: Record<string, string>[]): Record<string, strin
 }
 
 export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySummary {
-  const ocr = summarizeOcr(cfg);
+  const ocr = summarizeOcr(cfg, cwd);
   const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
   const rows = resultRows
     .map((row): InvoiceRow => ({
@@ -266,7 +266,7 @@ export function loadAppSummary(
     history: readRunHistory(cwd),
     inbox: summarizeInbox(cfg, cwd),
     library: summarizeLibrary(cfg, cwd),
-    pending: summarizePending(cfg),
+    pending: summarizePending(cfg, cwd),
   };
 }
 

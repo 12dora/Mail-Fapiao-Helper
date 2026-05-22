@@ -20,23 +20,8 @@
         </div>
 
         <div class="page stagger">
-            <div class="stats">
-                <div class="stat" data-pending-stat>
-                    <div class="stat__label">暂无待确认</div>
-                    <div class="stat__value">0</div>
-                    <div class="stat__delta is-flat">无需处理</div>
-                </div>
-                <div class="stat" data-pending-stat>
-                    <div class="stat__label">暂无待确认</div>
-                    <div class="stat__value">0</div>
-                    <div class="stat__delta is-flat">无需处理</div>
-                </div>
-                <div class="stat" data-pending-stat>
-                    <div class="stat__label">暂无待确认</div>
-                    <div class="stat__value">0</div>
-                    <div class="stat__delta is-flat">无需处理</div>
-                </div>
-                <div class="stat" data-pending-stat>
+            <div class="stats" data-pending-stats>
+                <div class="stat">
                     <div class="stat__label">暂无待确认</div>
                     <div class="stat__value">0</div>
                     <div class="stat__delta is-flat">无需处理</div>
@@ -51,8 +36,8 @@
                         <div class="small muted" style="margin-top: 4px;">你可以打开原邮件、重新授权、手动添加文件，或确认这封邮件不用处理。</div>
                     </div>
                     <div class="row gap-8" style="align-self: flex-start;">
-                        <button class="btn btn--sm" data-action="export-table">复制为 CSV</button>
-                        <button class="btn btn--sm btn--primary" data-action="reload-summary">刷新列表</button>
+                        <button class="btn btn--sm" type="button" data-action="export-table">复制为 CSV</button>
+                        <button class="btn btn--sm btn--primary" type="button" data-action="reload-summary">刷新列表</button>
                     </div>
                 </div>
             </div>
@@ -67,8 +52,8 @@
                 </div>
 
                 <div class="spacer"></div>
-                <button class="btn btn--sm" data-action="open-pending-folder">打开待确认文件夹</button>
-                <button class="btn btn--sm" data-action="reload-summary">刷新列表</button>
+                <button class="btn btn--sm" type="button" data-action="open-pending-folder">打开待确认文件夹</button>
+                <button class="btn btn--sm" type="button" data-action="reload-summary">刷新列表</button>
             </div>
 
             <div data-pending-groups>
