@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   openPath: (payload) => ipcRenderer.invoke('mfh:open-path', payload),
   copyText: (payload) => ipcRenderer.invoke('mfh:copy-text', payload),
   testMailConnection: (payload) => ipcRenderer.invoke('mfh:test-connection', payload),
+  listMailboxes: (payload) => ipcRenderer.invoke('mfh:list-mailboxes', payload),
+  pendingIgnore: (payload) => ipcRenderer.invoke('mfh:pending-ignore', payload),
+  pendingRefreshLink: (payload) => ipcRenderer.invoke('mfh:pending-refresh-link', payload),
+  pendingManualArchive: (payload) => ipcRenderer.invoke('mfh:pending-manual-archive', payload),
   developerReset: () => ipcRenderer.invoke('mfh:developer-reset'),
   onFetchProgress: (callback) => {
     if (typeof callback !== 'function') return;

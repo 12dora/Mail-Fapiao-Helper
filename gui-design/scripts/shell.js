@@ -80,8 +80,8 @@
                     ${navHTML(active)}
                 </div>
                 <div class="sidebar__foot">
-                    <span class="status-dot"></span>
-                    <span>邮箱已连接</span>
+                    <span class="status-dot" data-mail-status-dot></span>
+                    <span data-mail-status-label>邮箱未配置</span>
                     <span class="sidebar__foot-meta" data-clock>--:--</span>
                     <button class="theme-toggle" data-theme-toggle aria-label="切换到深色主题" title="切换到深色主题">${ICON.moon}</button>
                 </div>
@@ -203,7 +203,7 @@
             const ck = e.target.closest('.check');
             if (ck) {
                 ck.classList.toggle('is-on');
-                renderLibraryRows();
+                if (ck.dataset.filter === 'library-failed') renderLibraryRows();
             }
 
             const action = e.target.closest('[data-action]');
@@ -619,14 +619,6 @@
         text('[data-dash="itinerary"]', fmtInt(groupCount('itinerary') || library.itinerary || 0));
         text('[data-dash="supporting"]', fmtInt(groupCount('supporting') || library.supporting || 0));
         text('[data-dash="pending-total"]', `${fmtInt(pending.total)} 封`);
-        const groups = pending.groups || [];
-        const slots = document.querySelectorAll('[data-pending-line]');
-        slots.forEach((slot, index) => {
-            const group = groups[index];
-            slot.innerHTML = group
-                ? `<span>${group.title}</span><span class="strong">${fmtInt(group.count)}</span>`
-                : '<span>暂无待确认邮件</span><span class="strong">0</span>';
-        });
     }
 
     function applyHistory(history) {
@@ -677,6 +669,10 @@
         text('[data-inbox="with-links"]', fmtInt(inbox.withLinks));
         text('[data-inbox="earliest"]', inbox.earliestMonth || '暂无');
         text('[data-inbox="latest"]', inbox.latestMonth || '暂无');
+        const total = Number(inbox.total || 0);
+        const pct = (n) => total > 0 ? `占比 ${Math.round((Number(n || 0) / total) * 100)}%` : '占比 —';
+        text('[data-inbox-delta="attachment"]', pct(inbox.withAttachment));
+        text('[data-inbox-delta="links"]', pct(inbox.withLinks));
         if (Array.isArray(inbox.rows)) window.FPH.inboxRows = inbox.rows.slice();
         renderInboxRows();
     }
@@ -754,7 +750,7 @@
                 <td><span class="pill">${escapeHtml(sourceLabel(row.source))}</span></td>
                 <td class="mono small">${escapeHtml(row.filename || '')}</td>
                 <td>${statusPill(row.status)}</td>
-                <td><button class="btn btn--sm" data-action="open-row-file" data-file-path="${escapeHtml(row.filePath || row.filename || '')}">打开</button></td>
+                <td><button class="btn btn--sm" data-action="open-row-file" data-file-path="${escapeHtml(row.filePath || '')}">打开</button></td>
             </tr>
         `).join('') || `<tr><td colspan="8" class="muted">没有找到匹配结果。你可以换个关键词或取消筛选。</td></tr>`;
         text('[data-library-page]', `显示 ${fmtInt(Math.min(rows.length, 80))} · 共 ${fmtInt(rows.length)} 条`);
@@ -771,10 +767,10 @@
     }
 
     function actionText(action) {
-        if (action === 'refresh_link') return ['刷新链接', '需要用户重新打开平台或授权'];
+        if (action === 'refresh_link') return ['打开原始邮件', '在邮件中刷新授权后重新抓取'];
         if (action === 'retry') return ['重新尝试', '适合临时网络失败'];
-        if (action === 'ignore') return ['确认忽略', '确认不是发票后可忽略'];
-        return ['手动归档', '保存已下载的文件'];
+        if (action === 'ignore') return ['确认忽略', '从待确认队列中移除'];
+        return ['选择文件归档', '把下载好的文件复制到归档目录'];
     }
 
     function applyPendingSummary(pending) {
@@ -805,10 +801,11 @@
         if (!mount) return;
         const pending = window.FPH.pending || {};
         const activeTab = activeMain().querySelector('[data-pending-tab].is-active')?.dataset.pendingTab || 'all';
+        const knownActions = new Set(['refresh_link', 'retry', 'ignore', 'manual_archive']);
         const groups = (pending.groups || []).filter((group) => {
             if (activeTab === 'all') return true;
             if (activeTab === 'manual_archive') {
-                return !['refresh_link', 'retry', 'ignore'].includes(group.action);
+                return group.action === 'manual_archive' || !knownActions.has(group.action);
             }
             return group.action === activeTab;
         });
@@ -848,7 +845,25 @@
         }).join('') || '<div class="card"><div class="strong">暂无待确认邮件</div><div class="small muted mt-12">当前本地队列为空。</div></div>';
     }
 
+    function applyMailStatus(cfg) {
+        const imap = cfg?.imap || {};
+        const host = typeof imap.host === 'string' ? imap.host.trim() : '';
+        const user = typeof imap.user === 'string' ? imap.user.trim() : '';
+        const pass = typeof imap.pass === 'string' ? imap.pass.trim() : '';
+        const configured = Boolean(host && user && pass);
+        document.querySelectorAll('[data-mail-status-label]').forEach((el) => {
+            el.textContent = configured ? `已配置 · ${user}` : '邮箱未配置';
+        });
+        document.querySelectorAll('[data-mail-status-dot]').forEach((el) => {
+            el.classList.toggle('is-off', !configured);
+        });
+        document.querySelectorAll('[data-mail-status-meta]').forEach((el) => {
+            el.textContent = configured ? `邮箱已配置 · ${host}` : '请先在「配置」页填写邮箱';
+        });
+    }
+
     function applyConfig(cfg) {
+        applyMailStatus(cfg);
         const set = (selector, value) => {
             const el = document.querySelector(selector);
             if (el && value !== undefined && value !== null) el.value = value;
@@ -858,10 +873,17 @@
         set('[data-config="imap.user"]', cfg.imap?.user);
         const mailboxSelect = document.querySelector('[data-config="imap.mailbox"]');
         if (mailboxSelect && Array.isArray(cfg.imap?.mailbox)) {
-            const selected = new Set(cfg.imap.mailbox);
-            Array.from(mailboxSelect.options).forEach((opt) => {
-                opt.selected = selected.has(opt.value);
-            });
+            const selected = cfg.imap.mailbox;
+            const known = new Set(Array.from(mailboxSelect.options).map((opt) => opt.value));
+            const missing = selected.filter((value) => value && !known.has(value));
+            if (missing.length > 0) {
+                setMailboxOptions(Array.from(known).concat(missing), selected);
+            } else {
+                const selSet = new Set(selected);
+                Array.from(mailboxSelect.options).forEach((opt) => {
+                    opt.selected = selSet.has(opt.value);
+                });
+            }
         }
         document.querySelectorAll('[data-config-check="imap.tls"]').forEach((el) => {
             el.classList.toggle('is-on', cfg.imap?.tls !== false);
@@ -897,8 +919,19 @@
         set('[data-config="ocr.ocrMode"]', cfg.ocr?.ocrMode || 'auto');
         set('[data-config="ocr.executionMode"]', cfg.ocr?.executionMode);
         set('[data-config="ocr.resultsCsv"]', cfg.ocr?.resultsCsv);
-        set('[data-config="ocr.credentials.tencentSecretId"]', cfg.ocr?.credentials?.tencentSecretId || cfg.ocr?.credentials?.secretId || '');
-        set('[data-config="ocr.credentials.tencentSecretKey"]', cfg.ocr?.credentials?.tencentSecretKey || cfg.ocr?.credentials?.secretKey || '');
+        set('[data-config="ocr.serviceHost"]', cfg.ocr?.serviceHost);
+        set('[data-config="ocr.servicePort"]', cfg.ocr?.servicePort);
+        set('[data-config="ocr.serviceWorkers"]', cfg.ocr?.serviceWorkers);
+        set('[data-config="ocr.batchSize"]', cfg.ocr?.batchSize);
+        const setSecretPlaceholder = (selector, hasValue) => {
+            const el = document.querySelector(selector);
+            if (!el) return;
+            if (hasValue && !el.value) {
+                el.placeholder = '已保存（留空则不修改）';
+            }
+        };
+        setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretId"]', Boolean(cfg.ocr?.credentials?.tencentSecretId || cfg.ocr?.credentials?.secretId));
+        setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretKey"]', Boolean(cfg.ocr?.credentials?.tencentSecretKey || cfg.ocr?.credentials?.secretKey));
         set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || 'ap-shanghai');
         set('[data-config="playwright.browserManagement"]', cfg.playwright?.browserManagement || 'app-managed');
         set('[data-config="playwright.timeoutMs"]', cfg.playwright?.timeoutMs);
@@ -967,9 +1000,10 @@
             return;
         }
         if (name === 'test-connection') { await testConnection(); return; }
+        if (name === 'reload-mailboxes') { await reloadMailboxes(); return; }
         if (name === 'discard-config') { window.location.reload(); return; }
         if (name === 'developer-reset') { await developerReset(); return; }
-        if (name === 'pending-primary') { handlePendingAction(action); return; }
+        if (name === 'pending-primary') { await handlePendingAction(action); return; }
     }
 
     function selectedOcrConcurrency() {
@@ -1083,7 +1117,7 @@
     async function openRowFile(action) {
         const value = action.dataset.filePath || '';
         if (!value) {
-            showToast('打开失败', '这条记录没有对应文件路径。', 'err');
+            showToast('打开失败', '这条记录没有对应文件路径，请先归档源文件。', 'err');
             return;
         }
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
@@ -1106,6 +1140,37 @@
         }
         const result = await fn(payload);
         showToast(result?.ok ? '邮箱连接正常' : '邮箱连接失败', result?.message || '', result?.ok ? 'ok' : 'err');
+        if (result?.ok) await reloadMailboxes({ silent: true });
+    }
+
+    function setMailboxOptions(mailboxes, selected) {
+        const select = document.querySelector('[data-config="imap.mailbox"]');
+        if (!select) return;
+        const chosen = new Set(selected || Array.from(select.selectedOptions).map((opt) => opt.value));
+        const list = Array.isArray(mailboxes) && mailboxes.length > 0 ? mailboxes : ['INBOX'];
+        for (const value of chosen) {
+            if (value && !list.includes(value)) list.push(value);
+        }
+        select.innerHTML = list
+            .map((name) => `<option value="${escapeHtml(name)}"${chosen.has(name) ? ' selected' : ''}>${escapeHtml(name)}</option>`)
+            .join('');
+    }
+
+    async function reloadMailboxes(opts = {}) {
+        const fn = window.mfhBridge?.listMailboxes;
+        const statusEl = document.querySelector('[data-mailbox-status]');
+        if (!fn) { if (!opts.silent) bridgeUnavailable(); return; }
+        const payload = typeof window.collectConfigPayload === 'function' ? window.collectConfigPayload() : undefined;
+        if (statusEl) statusEl.textContent = '正在读取…';
+        const result = await fn(payload);
+        if (result?.ok && Array.isArray(result.mailboxes)) {
+            setMailboxOptions(result.mailboxes);
+            if (statusEl) statusEl.textContent = `已读取 ${result.mailboxes.length} 个文件夹`;
+            if (!opts.silent) showToast('已读取邮箱文件夹', `共 ${result.mailboxes.length} 个，可在列表中多选`);
+        } else {
+            if (statusEl) statusEl.textContent = result?.message || '读取失败';
+            if (!opts.silent) showToast('读取失败', result?.message || '请先填写邮箱主机、账号和授权码。', 'err');
+        }
     }
 
     async function developerReset() {
@@ -1117,32 +1182,79 @@
         showToast('已重置本机数据', `删除 ${fmtInt(result?.removed?.length || 0)} 个位置。`);
     }
 
-    function handlePendingAction(action) {
+    async function handlePendingAction(action) {
         const kind = action.dataset.actionKind;
+        const hash = action.dataset.hash || '';
         if (kind === 'retry') {
-            runBridgeAction('runPipeline', { onlyMail: action.dataset.hash }, '已重新尝试', '这封邮件已重新处理。');
+            runBridgeAction('runPipeline', { onlyMail: hash }, '已重新尝试', '这封邮件已重新处理。');
             return;
         }
         if (kind === 'refresh_link') {
-            showToast('需要重新授权', '请打开原邮件或对应平台刷新下载链接，再重新抓取。', 'warn');
+            const fn = window.mfhBridge?.pendingRefreshLink;
+            if (!fn) { bridgeUnavailable(); return; }
+            const result = await fn({ hash });
+            showToast(result?.ok ? '已打开原始邮件' : '没有找到原始邮件', result?.message || '', result?.ok ? 'ok' : 'err');
             return;
         }
         if (kind === 'ignore') {
-            showToast('尚未确认忽略', '当前版本会保留原始邮件；后续将加入单封忽略状态。', 'warn');
+            const confirmed = window.confirm('确认把这封邮件从待确认队列中移除吗？原始邮件仍会保留在邮件缓存里。');
+            if (!confirmed) return;
+            const fn = window.mfhBridge?.pendingIgnore;
+            if (!fn) { bridgeUnavailable(); return; }
+            const result = await fn({ hash });
+            if (result?.summary) applySummary(result.summary);
+            showToast(result?.ok ? '已忽略' : '忽略失败', result?.message || '', result?.ok ? 'ok' : 'warn');
             return;
         }
-        showToast('请选择文件', '当前版本请先把文件放入归档目录，再运行“开始识别”。', 'warn');
+        const fn = window.mfhBridge?.pendingManualArchive;
+        if (!fn) { bridgeUnavailable(); return; }
+        const result = await fn({ hash });
+        if (result?.summary) applySummary(result.summary);
+        if (result?.canceled) {
+            showToast('已取消归档', '没有选择文件，待确认队列保持不变。', 'warn');
+            return;
+        }
+        showToast(result?.ok ? '已归档' : '归档失败', result?.message || '', result?.ok ? 'ok' : 'err');
     }
 
     function showFetchPreview() {
         const from = document.getElementById('date-from')?.value || '开始日期';
         const to = document.getElementById('date-to')?.value || '结束日期';
-        showToast('将要执行', `搜索 ${from} 至 ${to} 的邮件，并保存命中的原始邮件。`);
+        const matchSubject = document.querySelector('[data-fetch-check="matchSubject"]')?.classList.contains('is-on');
+        const matchBody = document.querySelector('[data-fetch-check="matchBody"]')?.classList.contains('is-on');
+        const dryRun = document.querySelector('[data-fetch-check="dryRun"]')?.classList.contains('is-on');
+        const cfg = window.FPH.configPayload?.config || {};
+        const keywords = Array.isArray(cfg.filter?.keywords) && cfg.filter.keywords.length > 0
+            ? cfg.filter.keywords.join('、')
+            : '发票';
+        const mailboxes = Array.isArray(cfg.imap?.mailbox) && cfg.imap.mailbox.length > 0
+            ? cfg.imap.mailbox.join('、')
+            : '所有文件夹';
+        const matchParts = [];
+        if (matchSubject) matchParts.push('主题');
+        if (matchBody) matchParts.push('正文');
+        const matchText = matchParts.length > 0 ? matchParts.join(' + ') : '关键词不匹配';
+        const lines = [
+            `日期：${from} 至 ${to}`,
+            `关键词：${keywords}`,
+            `匹配范围：${matchText}`,
+            `邮箱文件夹：${mailboxes}`,
+            dryRun ? '模式：只预览，不保存原件' : '模式：保存命中邮件到本机',
+        ];
+        showToast('将要执行的抓取', lines.join(' · '));
     }
 
     function exportVisibleLog() {
         const text = Array.from(document.querySelectorAll('#console-out .console__line')).map((line) => line.textContent.trim()).join('\n');
-        copyText(text || '暂无实时日志', '日志');
+        copyText(text || '暂无实时日志', '获取邮件日志');
+    }
+
+    function tableSourceLabel() {
+        const page = document.body.dataset.page;
+        if (page === 'inbox') return '收件箱';
+        if (page === 'library') return '发票库';
+        if (page === 'pending') return '待确认队列';
+        return '当前表格';
     }
 
     function exportVisibleTable(action) {
@@ -1151,7 +1263,7 @@
         const csv = Array.from(table.querySelectorAll('tr')).map((tr) => (
             Array.from(tr.children).map((cell) => `"${cell.textContent.trim().replace(/"/g, '""')}"`).join(',')
         )).join('\n');
-        copyText(csv, 'CSV');
+        copyText(csv, `${tableSourceLabel()} CSV`);
     }
 
     function shortSender(value) {
