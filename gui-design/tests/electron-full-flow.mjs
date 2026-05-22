@@ -1,5 +1,5 @@
 import { _electron as electron } from 'playwright';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -42,7 +42,9 @@ async function main() {
   config.output.pendingDir = join(tmp, 'pending');
   config.output.csv = join(tmp, 'invoices.csv');
   config.ocr.resultsCsv = join(tmp, 'invoices', 'ocr', 'ocr-results.csv');
+  config.ocr.ocrMode = 'auto';
   config.rename.organizedDir = join(tmp, 'invoices', 'organized');
+  config.playwright.browserManagement = 'app-managed';
   await mkdir(config.paths.samples, { recursive: true });
   await mkdir(config.paths.invoices, { recursive: true });
   await mkdir(config.paths.pending, { recursive: true });
@@ -71,17 +73,34 @@ async function main() {
     await page.getByRole('link', { name: '已有配置，开始处理' }).click();
     await page.waitForURL(/dashboard\.html/);
     await expectText(page, '运行控制台');
+    await expectText(page, '获取发票文件实时日志');
+    await expectText(page, '识别发票文件实时日志');
+    await expectText(page, '获取邮件实时日志');
+    await expectText(page, '最多显示最近 6 条记录');
     await expectNoHorizontalOverflow(page, '运行控制台');
 
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (initialProgress !== '0%') fail(`初始进度应为 0%，实际为 ${initialProgress}`);
+    const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('.page h3')).map((el) => el.textContent.trim()).slice(0, 8));
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    for (let i = 0; i < expectedOrder.length; i++) {
+      if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
+    }
+    const logHeights = await page.evaluate(() => ({
+      mail: getComputedStyle(document.querySelector('#console-out')).height,
+      files: getComputedStyle(document.querySelector('[data-file-log]')).height,
+      ocr: getComputedStyle(document.querySelector('[data-ocr-log]')).height,
+    }));
+    if (logHeights.mail !== logHeights.files || logHeights.files !== logHeights.ocr || parseFloat(logHeights.ocr) > 180) {
+      fail(`日志窗口高度未统一缩短：${JSON.stringify(logHeights)}`);
+    }
 
     await page.getByRole('button', { name: '本周以来' }).click();
     await expectText(page, '2026-05-18 至 2026-05-21');
     await page.getByRole('button', { name: '查看将要执行的操作' }).click();
     await expectToast(page, '将要执行');
 
-    await page.getByRole('button', { name: '开始抓取' }).click();
+    await page.getByRole('button', { name: '开始获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 10000 });
     await expectText(page, '已保存 2 封新邮件');
     await expectText(page, '国家电网电子发票通知');
@@ -94,27 +113,47 @@ async function main() {
       itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
       supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
     }));
-    if (afterFetch.cached !== '2' || afterFetch.invoice !== '1' || afterFetch.itinerary !== '1' || afterFetch.supporting !== '1') {
-      fail(`抓取/处理后首页统计不正确：${JSON.stringify(afterFetch)}`);
+    if (afterFetch.cached !== '2' || afterFetch.invoice !== '0' || afterFetch.itinerary !== '0' || afterFetch.supporting !== '0') {
+      fail(`获取邮件后不应已经生成发票文件统计：${JSON.stringify(afterFetch)}`);
     }
 
-    await page.getByRole('button', { name: '开始识别' }).first().click();
+    await page.getByRole('button', { name: '开始获取发票文件' }).click();
+    await expectToast(page, '获取完成');
+    await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
+    const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (fileProgress !== '100%') fail(`获取发票文件后进度应为 100%，实际为 ${fileProgress}`);
+    const afterFiles = await page.evaluate(() => ({
+      invoice: document.querySelector('[data-dash="invoice-like"]')?.textContent?.trim(),
+      itinerary: document.querySelector('[data-dash="itinerary"]')?.textContent?.trim(),
+      supporting: document.querySelector('[data-dash="supporting"]')?.textContent?.trim(),
+    }));
+    if (afterFiles.invoice !== '1' || afterFiles.itinerary !== '1' || afterFiles.supporting !== '1') {
+      fail(`获取发票文件后首页统计不正确：${JSON.stringify(afterFiles)}`);
+    }
+    const archivedFiles = await readdir(config.paths.invoices);
+    if (!archivedFiles.includes('0001.pdf') || !archivedFiles.includes('0002.pdf')) {
+      fail(`获取发票文件后应先按数字顺序重命名，实际：${JSON.stringify(archivedFiles)}`);
+    }
+    await page.getByRole('button', { name: '开始识别发票文件' }).click();
     await expectToast(page, '识别完成');
     await expectText(page, '已扫描 3 个文件，识别成功 2 个');
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (ocrProgress !== '100%') fail(`识别后进度应为 100%，实际为 ${ocrProgress}`);
+    const ocrArgs = await page.evaluate(() => window.__mfhLastOcrArgs || []);
+    if (!ocrArgs.includes('--concurrency') || !ocrArgs.includes('4') || ocrArgs.includes('--force')) {
+      fail(`Electron OCR 应按选择的并行数运行，实际：${JSON.stringify(ocrArgs)}`);
+    }
     const afterOcr = await page.evaluate(() => ({
       recognized: document.querySelector('[data-dash="recognized"]')?.textContent?.trim(),
-      pending: document.querySelector('[data-dash="pending-total"]')?.textContent?.trim(),
+      historyCards: document.querySelectorAll('[data-run-history] .history-item').length,
     }));
-    if (afterOcr.recognized !== '2' || afterOcr.pending !== '1 封') {
+    if (afterOcr.recognized !== '2' || afterOcr.historyCards > 6) {
       fail(`识别后统计不正确：${JSON.stringify(afterOcr)}`);
     }
 
-    await page.getByRole('button', { name: '整理输出' }).first().click();
+    await page.getByRole('button', { name: '整理识别结果' }).click();
     await expectToast(page, '整理完成');
-    await page.getByRole('button', { name: '刷新列表' }).click();
-    await expectToast(page, '已刷新');
-    await page.getByRole('button', { name: '导出结果' }).click();
-    await expectToast(page, '已复制');
     await page.getByRole('button', { name: '导出日志' }).click();
     await expectToast(page, '已复制');
 
@@ -144,11 +183,12 @@ async function main() {
     await page.getByRole('button', { name: '行程单' }).click();
     await expectText(page, '没有找到匹配结果');
     await page.locator('[data-search="library"]').fill('');
-    await page.locator('[data-library-rows]').getByText('行程单.pdf', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
+    await page.locator('[data-library-rows]').getByText('0002.pdf', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
     await page.getByRole('button', { name: '打开归档目录' }).click();
     await expectToast(page, '已打开文件夹');
     await page.getByRole('button', { name: '开始识别' }).click();
     await expectToast(page, '识别完成');
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
     await page.getByRole('button', { name: '整理输出' }).click();
     await expectToast(page, '整理完成');
 
@@ -172,14 +212,27 @@ async function main() {
     await page.waitForURL(/config\.html/);
     await expectText(page, '配置');
     await expectNoHorizontalOverflow(page, '配置');
-    await page.getByRole('button', { name: '测试配置' }).click();
-    await expectToast(page, '配置可用');
+    await page.getByRole('button', { name: '测试邮箱连接' }).click();
+    await expectToast(page, '邮箱连接正常');
+    await expectText(page, '这里只设置要找什么内容');
+    await expectText(page, '{seller}');
+    await expectText(page, '{invoiceNo}');
+    const modeHelp = await page.locator('body').evaluate((body) => body.innerText.includes('默认“规则优先，必要时调用 OCR”'));
+    if (!modeHelp) fail('设置页缺少 efapiao 识别模式说明');
+    await expectText(page, '当前版本不会调用 LLM');
+    await expectText(page, '桌面版会随应用准备浏览器');
+    const removedConfigText = await page.locator('body').evaluate((body) => /自定义日期范围|最近多少天|匹配范围|npx playwright install chromium/.exec(body.innerText)?.[0] || '');
+    if (removedConfigText) fail(`设置页仍显示应移除的配置项：${removedConfigText}`);
     await page.getByLabel('上游识别引擎').selectOption('efapiao');
+    await page.getByLabel('识别模式').selectOption('disabled');
     await page.locator('#tencent-region').fill('ap-guangzhou');
     await expectText(page, '已保存到本机');
     const savedConfig = JSON.parse(await readFile(configPath, 'utf8'));
     if (savedConfig.ocr.credentials.tencentRegion !== 'ap-guangzhou') {
       fail(`配置自动保存未写入腾讯云区域：${savedConfig.ocr.credentials.tencentRegion}`);
+    }
+    if (savedConfig.ocr.ocrMode !== 'disabled' || savedConfig.filter.since || savedConfig.filter.until) {
+      fail(`配置自动保存未正确写入识别模式或未收敛过滤项：${JSON.stringify(savedConfig.ocr)} ${JSON.stringify(savedConfig.filter)}`);
     }
     page.once('dialog', async (dialog) => dialog.accept());
     await page.getByRole('button', { name: '删除本机缓存' }).click();

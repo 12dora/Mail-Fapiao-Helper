@@ -102,6 +102,10 @@ function hintFor(format: DocumentFormat): string {
   return format === 'ofd' ? 'ofd' : 'pdf';
 }
 
+function ocrModeFor(cfg: Config): string {
+  return cfg.ocr.ocrMode ?? 'auto';
+}
+
 function documentTypeFromEfapiao(value: string, fallback: DocumentType): DocumentType {
   if (value.includes('itinerary') || value.includes('rail')) return 'itinerary';
   if (value.includes('fapiao')) return 'invoice';
@@ -223,7 +227,7 @@ async function runService(
   const form = new FormData();
   form.set('file', new Blob([data]), meta.filename);
   form.set('hint_type', hintFor(meta.format));
-  form.set('ocr_mode', 'auto');
+  form.set('ocr_mode', ocrModeFor(cfg));
 
   const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse`, {
     method: 'POST',
@@ -255,7 +259,7 @@ async function runServiceBatch(
     form.append('files', new Blob([item.data]), item.meta.filename);
   }
   form.set('hint_type', 'auto');
-  form.set('ocr_mode', 'auto');
+  form.set('ocr_mode', ocrModeFor(cfg));
 
   const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse-batch`, {
     method: 'POST',
@@ -301,7 +305,7 @@ function runBinary(
       '--hint',
       hintFor(meta.format),
       '--ocr-mode',
-      'auto',
+      ocrModeFor(cfg),
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: efapiaoEnv(cfg),

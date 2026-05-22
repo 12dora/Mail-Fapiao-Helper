@@ -69,11 +69,29 @@ function compactReason(reason: string): string {
   return reason;
 }
 
+function resultKey(row: Record<string, string>): string {
+  return `${row.hash ?? ''}\0${row.source ?? row.filename ?? ''}`;
+}
+
+function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
+  const index = new Map<string, Record<string, string>>();
+  for (const row of rows) {
+    const key = resultKey(row);
+    const existing = index.get(key);
+    const status = (row.status ?? '').toLowerCase();
+    const existingStatus = (existing?.status ?? '').toLowerCase();
+    if (existing && existingStatus === 'success' && status !== 'success') continue;
+    index.set(key, row);
+  }
+  return Array.from(index.values());
+}
+
 export function summarizeOcr(cfg: Config): OcrSummary {
   const pendingCsv = path.join(path.resolve(cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
   const resultsCsv = path.resolve(cfg.ocr.resultsCsv);
   const pendingRows = readCsvRows(pendingCsv);
-  const resultRows = readCsvRows(resultsCsv);
+  const resultRows = currentResultRows(readCsvRows(resultsCsv));
+  const currentResults = new Map(resultRows.map((row) => [resultKey(row), row]));
   const byDocumentType = new Map<string, OcrSummaryGroup>();
   const bySupportingReason = new Map<string, OcrSummaryGroup>();
   const byFailureReason = new Map<string, OcrSummaryGroup>();
@@ -84,10 +102,12 @@ export function summarizeOcr(cfg: Config): OcrSummary {
   let pending = 0;
 
   for (const row of pendingRows) {
-    const status = (row.status ?? '').toLowerCase();
-    const documentType = row.documentType ?? '';
-    const reason = row.reason ?? '';
-    const example = exampleFromRow(row, reason);
+    const result = currentResults.get(resultKey(row));
+    const resultStatus = (result?.status ?? '').toLowerCase();
+    const status = resultStatus === 'success' ? 'recognized' : (row.status ?? '').toLowerCase();
+    const documentType = result?.documentType || row.documentType || '';
+    const reason = resultStatus === 'success' ? '' : (row.reason ?? '');
+    const example = exampleFromRow({ ...row, documentType, status }, reason);
     bump(byDocumentType, documentType || 'unknown', example);
 
     if (status === 'recognized') {

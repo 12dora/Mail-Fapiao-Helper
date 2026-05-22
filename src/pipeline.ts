@@ -360,7 +360,9 @@ export async function processMail(
     return { ...baseResult, outcome: 'manual', reason: result.reason };
   }
 
-  const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log);
+  const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log, {
+    avoidConflictBeforeOcr: cfg.rename.avoidConflictBeforeOcr,
+  });
 
   const csvPath = path.resolve(cfg.output.csv);
   const ocrPendingCsvPath = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');

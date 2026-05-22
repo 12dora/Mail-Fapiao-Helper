@@ -72,7 +72,7 @@
                 </div>
 
                 <div class="row gap-8 mt-16">
-                    <button class="btn" data-action="test-connection">测试配置</button>
+                    <button class="btn" data-action="test-connection">测试邮箱连接</button>
                     <span class="pill"><span class="pill__dot"></span>保存后即可抓取</span>
                 </div>
             </div>
@@ -80,49 +80,12 @@
             <!-- 过滤条件 -->
             <div class="card">
                 <h3 class="card__title">过滤条件</h3>
-                <p class="card__sub">用于邮箱搜索。多个关键词会一起匹配；主题与正文可独立开启</p>
+                <p class="card__sub">这里只设置要找什么内容。日期范围请在“开始处理”页每次运行前选择</p>
 
                 <div class="field">
                     <label class="field__label">关键词 <span class="field__hint">用逗号分隔</span></label>
                     <input class="input" data-config="filter.keywords" value="发票, 票据, 电子发票">
-                </div>
-
-                <div class="field">
-                    <label class="field__label">自定义日期范围</label>
-                    <div class="field-row">
-                        <div class="field">
-                            <label class="field__label">开始日期</label>
-                            <input class="input" data-config="filter.since" type="date" value="2026-04-20" placeholder="YYYY-MM-DD">
-                        </div>
-                        <div class="field">
-                            <label class="field__label">结束日期</label>
-                            <input class="input" data-config="filter.until" type="date" value="2026-05-20" placeholder="YYYY-MM-DD">
-                        </div>
-                    </div>
-                    <div class="field__hint" style="margin-top: 8px;">
-                        <svg class="ic ic--sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                        如果填写了起止日期，将优先使用这个范围。留空则使用下面的最近天数
-                    </div>
-                </div>
-
-                <div class="field-row">
-                    <div class="field">
-                        <label class="field__label">最近多少天 <span class="field__hint">0 表示全部</span></label>
-                        <input class="input" data-config="filter.sinceDays" value="30" placeholder="30">
-                    </div>
-                    <div class="field">
-                        <label class="field__label">匹配范围</label>
-                        <div class="row gap-12" style="padding-top: 8px;">
-                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                                <div class="check is-on"></div>
-                                匹配主题
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                                <div class="check is-on"></div>
-                                匹配正文
-                            </label>
-                        </div>
-                    </div>
+                    <div class="field__hint">会同时搜索邮件标题和正文。建议保留“发票”“票据”“行程单”等常用词。</div>
                 </div>
             </div>
 
@@ -134,6 +97,7 @@
                 <div class="field">
                     <label class="field__label">归档目录</label>
                     <input class="input input--mono" data-config="paths.invoices" value="./invoices">
+                    <div class="field__hint">相对路径会自动保存在本应用目录下；绝对路径可使用 macOS/Linux 的 <code class="code-inline">/Users/...</code> 或 Windows 的 <code class="code-inline">D:\...</code>。</div>
                 </div>
                 <div class="field">
                     <label class="field__label">邮件缓存目录</label>
@@ -153,6 +117,14 @@
             <div class="card">
                 <h3 class="card__title">命名规则</h3>
                 <p class="card__sub">先用不会冲突的文件名保存。识别成功后，可以按开票方、金额、日期等信息自动改名</p>
+
+                <div class="field">
+                    <label class="field__label">获取发票后先重命名</label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
+                        <div class="check is-on" data-config-check="rename.avoidConflictBeforeOcr"></div>
+                        按数字顺序保存，避免同名文件冲突
+                    </label>
+                </div>
 
                 <div class="field">
                     <label class="field__label">主规则</label>
@@ -183,6 +155,25 @@
                     <div class="small muted" style="margin-bottom: 4px;">实时预览</div>
                     <div class="mono strong">国家电网-318.42.pdf</div>
                 </div>
+
+                <div class="template-fields">
+                    <div class="small muted mb-12">可用字段</div>
+                    <span class="template-token">{seller}<small>销售方</small></span>
+                    <span class="template-token">{amount}<small>金额</small></span>
+                    <span class="template-token">{date}<small>日期</small></span>
+                    <span class="template-token">{invoiceNo}<small>票号</small></span>
+                    <span class="template-token">{invoiceType}<small>票据类型</small></span>
+                    <span class="template-token">{documentType}<small>文件类型</small></span>
+                    <span class="template-token">{format}<small>PDF/OFD</small></span>
+                    <span class="template-token">{filename}<small>原文件名</small></span>
+                    <span class="template-token">{messageId}<small>邮件编号</small></span>
+                    <span class="template-token">{hash}<small>防重编号</small></span>
+                    <span class="template-token">{from}<small>发件人</small></span>
+                    <span class="template-token">{subject}<small>邮件标题</small></span>
+                    <span class="template-token">{source}<small>来源</small></span>
+                    <span class="template-token">{status}<small>识别状态</small></span>
+                    <span class="template-token">{error}<small>失败原因</small></span>
+                </div>
             </div>
 
             <!-- 识别服务 -->
@@ -191,13 +182,6 @@
                 <p class="card__sub">用于从已归档发票或行程单解析销售方、金额、票号、日期和类型。未启用时原文件仍完整保留</p>
 
                 <div class="field-row field-row--3">
-                    <div class="field">
-                        <label class="field__label">启用自动识别</label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check is-on"></div>
-                            已启用
-                        </label>
-                    </div>
                     <div class="field">
                         <label class="field__label">上游识别引擎</label>
                         <select class="select" id="ocr-vendor" data-config="ocr.provider" aria-label="上游识别引擎">
@@ -213,6 +197,15 @@
                             <option value="cli">单次调用</option>
                             <option value="serve">只使用本机服务</option>
                         </select>
+                    </div>
+                    <div class="field">
+                        <label class="field__label">识别模式</label>
+                        <select class="select" data-config="ocr.ocrMode" aria-label="识别模式">
+                            <option value="auto">规则优先，必要时调用 OCR</option>
+                            <option value="disabled">仅本地规则，不调用 OCR</option>
+                            <option value="required">直接调用 OCR</option>
+                        </select>
+                        <div class="field__hint">默认“规则优先，必要时调用 OCR”。选择“仅本地规则”时不会调用腾讯云等 OCR 服务。</div>
                     </div>
                 </div>
 
@@ -241,53 +234,54 @@
             <!-- 智能查找兜底 -->
             <div class="card">
                 <h3 class="card__title">智能查找兜底</h3>
-                <p class="card__sub">当普通规则找不到发票时，可让智能查找根据邮件正文和链接判断下一步。但默认不启用</p>
+                <p class="card__sub">这是给未来 LLM 邮件理解接口预留的能力，目前还没有开发完成，所以暂不可用</p>
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">启用智能查找</label>
+                        <label class="field__label">当前状态</label>
                         <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
                             <div class="check"></div>
-                            未启用
+                            未开放
                         </label>
                     </div>
                     <div class="field">
                         <label class="field__label">服务来源</label>
-                        <select class="select">
-                            <option>本地智能服务</option>
-                            <option>云端智能服务</option>
+                        <select class="select" disabled aria-label="智能查找服务来源">
+                            <option>LLM 接口预留</option>
                         </select>
                     </div>
                     <div class="field">
                         <label class="field__label">模型</label>
-                        <input class="input input--mono" value="默认快速模型">
+                        <input class="input input--mono" value="暂未启用" disabled>
                     </div>
                 </div>
 
                 <div class="field">
                     <label class="field__label">访问密钥</label>
-                    <input class="input input--mono" type="password" placeholder="只保存在本机">
+                    <input class="input input--mono" type="password" placeholder="功能开放后可填写" disabled>
+                    <div class="field__hint">当前版本不会调用 LLM，也不会上传邮件正文给智能模型。</div>
                 </div>
             </div>
 
             <!-- 网页自动下载 -->
             <div class="card">
                 <h3 class="card__title">网页自动下载</h3>
-                <p class="card__sub">用于第三方开票站点。首次使用前请运行 <code class="code-inline">npx playwright install chromium</code></p>
+                <p class="card__sub">用于第三方开票站点。桌面版会随应用准备浏览器，不需要用户手动运行命令</p>
 
                 <div class="field-row">
                     <div class="field">
-                        <label class="field__label">无头模式</label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted); padding-top: 8px;">
-                            <div class="check is-on"></div>
-                            已启用
-                        </label>
+                        <label class="field__label">浏览器准备方式</label>
+                        <select class="select" data-config="playwright.browserManagement" aria-label="浏览器准备方式">
+                            <option value="app-managed">应用自动准备</option>
+                            <option value="system">使用系统已有浏览器</option>
+                        </select>
                     </div>
                     <div class="field">
                         <label class="field__label">超时时间（毫秒）</label>
-                        <input class="input input--mono" value="30000">
+                        <input class="input input--mono" data-config="playwright.timeoutMs" value="30000">
                     </div>
                 </div>
+                <div class="field__hint" style="margin-top: 8px;">打包时会把可用浏览器随应用一起发布；如果浏览器缺失，桌面端会给出修复提示，而不是要求用户安装开发工具。</div>
             </div>
 
             <!-- 网络重试 -->
@@ -347,9 +341,8 @@ function collectConfigPayload() {
         },
         filter: {
             keywords: keywords.length ? keywords : ['发票'],
-            since: value('filter.since') || undefined,
-            until: value('filter.until') || undefined,
-            sinceDays: numberValue('filter.sinceDays'),
+            matchSubject: true,
+            matchBody: true,
         },
         paths: {
             samples: value('paths.samples'),
@@ -360,6 +353,7 @@ function collectConfigPayload() {
             csv: value('output.csv'),
         },
         rename: {
+            avoidConflictBeforeOcr: document.querySelector('[data-config-check="rename.avoidConflictBeforeOcr"]')?.classList.contains('is-on') !== false,
             rule: value('rename.rule'),
             fallback: value('rename.fallback'),
             typeDirRule: value('rename.typeDirRule'),
@@ -367,6 +361,7 @@ function collectConfigPayload() {
         ocr: {
             enabled: document.getElementById('ocr-vendor')?.value !== 'none',
             provider: document.getElementById('ocr-vendor')?.value === 'none' ? 'efapiao' : document.getElementById('ocr-vendor')?.value,
+            ocrMode: value('ocr.ocrMode'),
             executionMode: value('ocr.executionMode'),
             resultsCsv: value('ocr.resultsCsv'),
             credentials: {
@@ -374,6 +369,10 @@ function collectConfigPayload() {
                 tencentSecretKey: document.getElementById('tencent-secret-key')?.value,
                 tencentRegion: document.getElementById('tencent-region')?.value,
             },
+        },
+        playwright: {
+            browserManagement: value('playwright.browserManagement'),
+            timeoutMs: numberValue('playwright.timeoutMs'),
         },
     };
 }
@@ -416,6 +415,9 @@ function wireAutoSave() {
     document.querySelectorAll('[data-config]').forEach((el) => {
         el.addEventListener('input', scheduleConfigSave);
         el.addEventListener('change', scheduleConfigSave);
+    });
+    document.querySelectorAll('[data-config-check]').forEach((el) => {
+        el.addEventListener('click', () => window.setTimeout(scheduleConfigSave, 0));
     });
 }
 

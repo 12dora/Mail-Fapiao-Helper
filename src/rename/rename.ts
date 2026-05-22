@@ -160,7 +160,16 @@ function resultIsUsable(row: OcrResultRow): boolean {
 }
 
 export function readOcrResults(csvPath: string): OcrResultRow[] {
-  return readCsvRows(csvPath).map(resultRow);
+  const index = new Map<string, OcrResultRow>();
+  for (const row of readCsvRows(csvPath).map(resultRow)) {
+    const key = `${row.hash}\0${row.source || row.filename}`;
+    const existing = index.get(key);
+    const status = row.status.toLowerCase();
+    const existingStatus = existing?.status.toLowerCase() ?? '';
+    if (existing && existingStatus === 'success' && status !== 'success') continue;
+    index.set(key, row);
+  }
+  return Array.from(index.values());
 }
 
 export function writeOrganizeAudit(csvPath: string, row: OcrResultRow, outputPath: string, status: string, reason: string): void {

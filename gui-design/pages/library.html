@@ -67,7 +67,15 @@
 
                 <div class="spacer"></div>
                 <button class="btn btn--sm" data-action="open-invoices-folder">打开归档目录</button>
-                <button class="btn btn--sm btn--primary" data-action="run-ocr" data-force="true">开始识别</button>
+                <button class="btn btn--sm btn--primary" data-action="run-ocr">开始识别</button>
+                <button class="btn btn--sm" data-action="rerun-ocr">重新识别</button>
+                <button class="btn btn--sm" data-action="stop-ocr" disabled>停止识别</button>
+                <select class="select" data-ocr-parallel style="width: 120px;">
+                    <option value="1">1 个并行</option>
+                    <option value="2">2 个并行</option>
+                    <option value="4" selected>4 个并行</option>
+                    <option value="8">8 个并行</option>
+                </select>
                 <button class="btn btn--sm" data-action="organize">整理输出</button>
             </div>
 
@@ -92,6 +100,27 @@
                         <span class="mono strong" data-lib="pending">0</span>
                     </div>
                     <div class="small muted mt-12">结账单与堂食明细</div>
+                </div>
+            </div>
+
+            <div class="card card--tight" data-ocr-runner>
+                <div class="row row--between">
+                    <div>
+                        <div class="strong" data-ocr-phase>识别进度</div>
+                        <div class="small muted mt-12">点击“开始识别”后，会实时显示当前处理情况</div>
+                    </div>
+                    <span class="mono small muted" data-ocr-counts>0 / 0</span>
+                </div>
+                <div class="progress is-idle mt-12" data-ocr-progress>
+                    <div class="progress__bar" data-ocr-bar style="--p: 0%"></div>
+                </div>
+                <div class="row gap-12 mt-12 mono small muted">
+                    <span>成功 <strong class="strong" data-ocr-parsed>0</strong></span>
+                    <span>跳过 <strong class="strong" data-ocr-skipped>0</strong></span>
+                    <span>失败 <strong style="color: var(--err);" data-ocr-failed>0</strong></span>
+                </div>
+                <div class="ocr-log mt-12" data-ocr-log>
+                    <div class="ocr-log__line">暂无识别日志。</div>
                 </div>
             </div>
 

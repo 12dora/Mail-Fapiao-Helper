@@ -29,6 +29,7 @@ async function writeConfig(tmp, overrides = {}) {
       enabled: true,
       provider: 'efapiao',
       binaryPath: 'auto',
+      ocrMode: 'auto',
       executionMode: 'cli',
       serviceUrl: 'http://127.0.0.1:8000',
       serviceHost: '127.0.0.1',
@@ -41,7 +42,7 @@ async function writeConfig(tmp, overrides = {}) {
       credentials: { tencentRegion: 'ap-shanghai' },
     },
     llm: { enabled: false, provider: 'anthropic', model: 'claude-haiku-4-5-20251001', apiKey: '' },
-    playwright: { headless: true, timeoutMs: 30000 },
+    playwright: { headless: true, timeoutMs: 30000, browserManagement: 'app-managed' },
     network: { retries: 0, retryDelayMs: 0 },
     ...overrides,
   };
@@ -93,9 +94,10 @@ function manualMail(subject, messageId = '') {
   ].join('\n');
 }
 
-async function runMfh(args) {
+async function runMfh(args, env = {}) {
   return execFileAsync('node', ['dist/index.js', ...args], {
     cwd: new URL('../..', import.meta.url),
+    env: { ...process.env, ...env },
     maxBuffer: 1024 * 1024,
   });
 }
@@ -159,7 +161,117 @@ async function testCsvStateRecovery() {
   }
 }
 
+async function testOcrSingleItemResume() {
+  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-single-'));
+  const { cfg, path: configPath } = await writeConfig(tmp, {
+    ocr: {
+      enabled: true,
+      provider: 'mock',
+      binaryPath: 'auto',
+      executionMode: 'cli',
+      serviceUrl: 'http://127.0.0.1:8000',
+      serviceHost: '127.0.0.1',
+      servicePort: 8000,
+      serviceWorkers: 1,
+      serviceStartupMs: 30000,
+      batchSize: 16,
+      timeoutMs: 120000,
+      resultsCsv: join(tmp, 'ocr-results.csv'),
+      credentials: { tencentRegion: 'ap-shanghai' },
+    },
+  });
+  const ocrDir = join(cfg.paths.invoices, 'ocr');
+  await mkdir(ocrDir, { recursive: true });
+  await writeFile(join(cfg.paths.invoices, 'already.pdf'), '%PDF-1.4\n%EOF\n');
+  await writeFile(join(cfg.paths.invoices, 'todo.pdf'), '%PDF-1.4\n%EOF\n');
+  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+    'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,pending,',
+    'hash-todo,<todo@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,todo.pdf,todo.pdf,pdf,invoice,pending,',
+    '',
+  ].join('\n'));
+  await writeFile(cfg.ocr.resultsCsv, [
+    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
+    'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,电子发票,已识别销售方,1.00,2026-05-21,EXISTING,http,text_layer,mock,,success,',
+    '',
+  ].join('\n'));
+
+  const { stdout } = await runMfh(['ocr', 'run', '--config', configPath, '--single-item', '--allow-parse-failures'], {
+    MFH_MOCK_OCR_FAIL_BATCH: '1',
+  });
+  if (!stdout.includes('OCR complete: scanned=2, parsed=1, skipped=1, failed=0')) {
+    fail(`single-item OCR summary did not show resume behavior:\n${stdout}`);
+  }
+  if (stdout.includes('mock batch parser should not be used')) {
+    fail('single-item OCR invoked parseBatch');
+  }
+
+  const pendingCsv = await readFile(join(ocrDir, 'ocr-pending.csv'), 'utf8');
+  if (!pendingCsv.includes('already.pdf,already.pdf,pdf,invoice,recognized,already_in_results')) {
+    fail(`single-item OCR did not keep existing successful row as resumed:\n${pendingCsv}`);
+  }
+  if (!pendingCsv.includes('todo.pdf,todo.pdf,pdf,invoice,recognized,')) {
+    fail(`single-item OCR did not checkpoint newly parsed row:\n${pendingCsv}`);
+  }
+
+  const resultsCsv = await readFile(cfg.ocr.resultsCsv, 'utf8');
+  const resultRows = resultsCsv.trim().split(/\r?\n/);
+  if (resultRows.length !== 3 || !resultsCsv.includes('hash-todo')) {
+    fail(`single-item OCR should append only the new result row:\n${resultsCsv}`);
+  }
+}
+
+async function testOcrSuccessBeatsLaterFailure() {
+  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-dedupe-'));
+  const { cfg, path: configPath } = await writeConfig(tmp);
+  const ocrDir = join(cfg.paths.invoices, 'ocr');
+  await mkdir(ocrDir, { recursive: true });
+  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,failed,efapiao timeout after 120000ms',
+    '',
+  ].join('\n'));
+  await writeFile(cfg.ocr.resultsCsv, [
+    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
+    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,电子发票,上海德玺楼餐饮有限公司,188.00,2026-05-21,26312000002724191086,cli,text_layer,0.1.0,,success,',
+    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,,,,,,,,,,error,efapiao timeout after 120000ms',
+    '',
+  ].join('\n'));
+
+  const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
+  if (!stdout.includes('recognized=1 failed=0 ignored=0 pending=0')) {
+    fail(`OCR summary should prefer an existing success over a later failure:\n${stdout}`);
+  }
+}
+
+async function testOcrDedupeFallsBackToFilename() {
+  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-filename-key-'));
+  const { cfg, path: configPath } = await writeConfig(tmp);
+  const ocrDir = join(cfg.paths.invoices, 'ocr');
+  await mkdir(ocrDir, { recursive: true });
+  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+    'hash-a,<a@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,a.pdf,a.pdf,pdf,invoice,recognized,',
+    'hash-b,<b@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,行程单,b.pdf,b.pdf,pdf,itinerary,recognized,',
+    '',
+  ].join('\n'));
+  await writeFile(cfg.ocr.resultsCsv, [
+    '﻿filename,dateValue,date,seller,invoiceNo,amount,transport,status,documentType,invoiceType,error',
+    'a.pdf,2026-05-21,2026-05-21,国家电网有限公司,1234567890,318.42,http,ok,invoice,电子发票,',
+    'b.pdf,2026-05-21,2026-05-21,差旅平台,TRIP-20260521,88.00,http,ok,itinerary,行程单,',
+    '',
+  ].join('\n'));
+
+  const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
+  if (!stdout.includes('recognized=2 failed=0 ignored=0 pending=0')) {
+    fail(`OCR summary should not collapse legacy result rows without hash/source:\n${stdout}`);
+  }
+}
+
 await testOutputCsvAndPendingRaw();
 await testPendingWithoutMessageId();
 await testCsvStateRecovery();
+await testOcrSingleItemResume();
+await testOcrSuccessBeatsLaterFailure();
+await testOcrDedupeFallsBackToFilename();
 console.log('CLI regression tests passed');

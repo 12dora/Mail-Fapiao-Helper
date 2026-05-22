@@ -42,8 +42,12 @@ async function main() {
 
     const progress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (progress !== '0%') fail(`页面打开时进度条不应启动，实际为 ${progress}`);
-    await page.getByRole('button', { name: '开始识别' }).click();
-    await page.getByText('没有待识别文件', { exact: false }).waitFor({ state: 'visible', timeout: 10000 });
+    const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (fileProgress !== '0%') fail(`发票文件进度条不应启动，实际为 ${fileProgress}`);
+    await page.getByRole('button', { name: '开始识别发票文件' }).click();
+    await page.locator('[data-ocr-log]').getByText('没有待识别文件', { exact: false }).waitFor({ state: 'visible', timeout: 10000 });
+    const ocrProgress = await page.locator('[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
+    if (ocrProgress !== '100%') fail(`没有待识别文件时识别进度应结束，实际为 ${ocrProgress}`);
 
     await page.getByRole('link', { name: '邮箱与保存' }).click();
     await page.waitForURL(/config\.html/);
