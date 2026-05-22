@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultConfigPath, historyPath, loadAppSummary, loadGuiConfig, readRunHistory, type RunHistoryEntry } from './summary.js';
+import { readCsvRows } from '../util/csv.js';
 
 interface DateRangePayload {
   from?: string;
@@ -825,16 +826,29 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
   }
   const args = ['--config', configPath, '--state', statePath, '--concurrency', String(concurrency)];
   if (typeof raw.onlyMail === 'string' && raw.onlyMail) args.push('--only-mail', raw.onlyMail);
+  if (raw.force === true) args.push('--force');
   const startedAt = Date.now();
   const result = await runCli('run', args, { operation: 'files' });
   historyEntry('pipeline', raw.onlyMail ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
   return { ok: result.code === 0, ...result, summary: loadAppSummary(configPath, rootDir) };
 });
 
+function pendingOcrWorkCount(summary = loadAppSummary(configPath, rootDir)): number {
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  const invoicesDir = path.resolve(rootDir, typeof paths.invoices === 'string' ? paths.invoices : './invoices');
+  const pendingCsv = path.join(invoicesDir, 'ocr', 'ocr-pending.csv');
+  const rows = readCsvRows(pendingCsv);
+  if (rows.length === 0) return 0;
+  if (summary.library.total > 0) return summary.library.total;
+  return rows.filter((row) => row.status !== 'ignored' && row.documentType !== 'supporting').length;
+}
+
 ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const summary = loadAppSummary(configPath, rootDir);
-  if (summary.library.total === 0) {
+  const pendingTotal = pendingOcrWorkCount(summary);
+  if (pendingTotal === 0) {
     sendOperationProgress({
       operation: 'ocr',
       phase: '没有文件',
@@ -876,14 +890,14 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     operation: 'ocr',
     phase: '开始识别',
     percent: 5,
-    total: summary.library.total,
+    total: pendingTotal,
     processed: 0,
     parsed: 0,
     skipped: 0,
     failed: 0,
-    message: `发现 ${summary.library.total} 个待识别文件，正在启动识别。当前并行数：${concurrency}。`,
+    message: `发现 ${pendingTotal} 个待识别文件，正在启动识别。当前并行数：${concurrency}。`,
   });
-  const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: summary.library.total });
+  const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal });
   historyEntry('ocr', raw.force === true ? '开始识别文件' : '识别文件', startedAt, result);
   const stopped = activeOcrStopRequested || result.code === 130;
   if (stopped) {
@@ -911,7 +925,12 @@ ipcMain.handle('mfh:stop-ocr', () => {
 ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const target = typeof raw.path === 'string' ? raw.path : rootDir;
-  const error = await shell.openPath(path.resolve(rootDir, target));
+  const resolved = path.resolve(rootDir, target);
+  if (raw.reveal === true) {
+    shell.showItemInFolder(resolved);
+    return { ok: true, error: '' };
+  }
+  const error = await shell.openPath(resolved);
   return { ok: !error, error };
 });
 

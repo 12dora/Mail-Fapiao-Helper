@@ -32,6 +32,7 @@ export interface InvoiceRow {
   amount: string;
   source: string;
   filename: string;
+  filePath: string;
   status: string;
   documentType: string;
   invoiceType: string;
@@ -166,6 +167,7 @@ export function summarizeLibrary(cfg: Config): LibrarySummary {
       amount: money(row.amount || ''),
       source: row.transport === 'http' ? '本机识别' : row.transport || '归档文件',
       filename: row.filename || '',
+      filePath: row.filename ? path.resolve(cfg.paths.invoices, row.filename) : '',
       status: (row.status ?? '').toLowerCase() === 'error'
         ? '识别失败'
         : row.invoiceNo ? '完整' : '待补充',

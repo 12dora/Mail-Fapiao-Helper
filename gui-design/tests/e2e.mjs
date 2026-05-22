@@ -202,7 +202,7 @@ async function main() {
         },
         async runPipeline(payload) {
           record('runPipeline', payload);
-          if (payload?.avoidConflictBeforeOcr !== true) throw new Error(`runPipeline should receive rename setting, got ${JSON.stringify(payload)}`);
+          if (payload?.avoidConflictBeforeOcr !== true || payload?.force !== true) throw new Error(`runPipeline should receive rename and force settings, got ${JSON.stringify(payload)}`);
           window.__fileProgress?.({ operation: 'files', phase: '开始获取', percent: 10, processed: 0, skipped: 0, failed: 0, message: '正在从本地邮件中获取发票文件。' });
           window.__fileProgress?.({ operation: 'files', phase: '正在获取', percent: 60, processed: 1, skipped: 0, failed: 0, message: '已获取：国家电网电子发票通知', kind: 'ok' });
           window.__fileProgress?.({ operation: 'files', phase: '获取完成', percent: 100, processed: 2, skipped: 0, failed: 0, message: '获取完成：处理 2 封，跳过 0 封，失败 0 封。', kind: 'ok', done: true });
@@ -278,7 +278,7 @@ async function main() {
     await expectText(page, '选择日期范围后，点击“开始获取邮件”才会运行');
 
     const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('.page h3')).map((el) => el.textContent.trim()));
-    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
     for (let i = 0; i < expectedOrder.length; i++) {
       if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
     }
@@ -317,6 +317,7 @@ async function main() {
     }
     await page.getByRole('button', { name: '开始获取发票文件' }).click();
     await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
+    await page.getByRole('button', { name: '打开文件位置' }).click();
     const fileProgress = await page.locator('[data-file-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (fileProgress !== '100%') fail(`获取发票文件进度应到 100%，实际为 ${fileProgress}`);
     const logStyles = await page.evaluate(() => {
@@ -347,7 +348,7 @@ async function main() {
     if (ocrProgress !== '100%') fail(`识别进度应到 100%，实际为 ${ocrProgress}`);
     await page.getByRole('button', { name: '查看将要执行的操作' }).click();
     const dashboardCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
-    for (const expected of ['startFetch', 'runPipeline', 'organize', 'runOcr']) {
+    for (const expected of ['startFetch', 'runPipeline', 'openPath', 'organize', 'runOcr']) {
       if (!dashboardCalls.includes(expected)) fail(`控制台按钮没有调用 ${expected}: ${dashboardCalls.join(',')}`);
     }
     const historyCards = await page.locator('[data-run-history] .history-item').count();
@@ -376,6 +377,7 @@ async function main() {
     await page.locator('[data-search="library"]').fill('');
     await page.getByRole('button', { name: '失败' }).click();
     await expectText(page, 'bad.pdf');
+    await page.locator('[data-library-rows]').getByRole('button', { name: '打开' }).first().click();
     const rerunClass = await page.getByRole('button', { name: '重新识别' }).evaluate((el) => el.className);
     if (!String(rerunClass).includes('btn--primary')) fail(`发票库重新识别按钮不是蓝色主按钮：${rerunClass}`);
     page.once('dialog', (dialog) => dialog.accept());
