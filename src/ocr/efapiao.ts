@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +34,7 @@ interface ServiceState {
   failed: boolean;
   child?: ChildProcess;
   failureReason?: string;
+  startup?: Promise<void>;
 }
 
 const EFAPIAO_VERSION = '0.1.3';
@@ -169,7 +171,21 @@ function serviceBaseUrl(cfg: Config): string {
 }
 
 function serviceKey(cfg: Config): string {
-  return `${binaryPath(cfg)}\0${cfg.ocr.serviceHost}\0${cfg.ocr.servicePort}\0${cfg.ocr.serviceWorkers}`;
+  // Fold a fingerprint of the effective vendor/credentials into the key so that
+  // a credential or vendor change forces a fresh service rather than silently
+  // reusing one started with different secrets.
+  const env = efapiaoEnv(cfg);
+  const fp = createHash('sha1').update([
+    env.EFAPIAO_OCR_VENDOR ?? '',
+    env.EFAPIAO_API_KEY ?? '',
+    env.TENCENTCLOUD_SECRET_ID ?? '',
+    env.TENCENTCLOUD_SECRET_KEY ?? '',
+    env.TENCENTCLOUD_REGION ?? '',
+    env.EFAPIAO_CNOCR_MODEL_PROFILE ?? '',
+    env.EFAPIAO_CNOCR_DET_MODEL ?? '',
+    env.EFAPIAO_CNOCR_REC_MODEL ?? '',
+  ].join('\0')).digest('hex').slice(0, 12);
+  return `${binaryPath(cfg)}\0${cfg.ocr.serviceHost}\0${cfg.ocr.servicePort}\0${cfg.ocr.serviceWorkers}\0${fp}`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -238,30 +254,61 @@ async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceSta
 }
 
 async function ensureService(cfg: Config): Promise<void> {
-  if (await healthOk(cfg)) return;
-
   const key = serviceKey(cfg);
   const existing = serviceStates.get(key);
-  if (existing?.ready) return;
-  if (existing?.failed) throw new Error(existing.failureReason || 'efapiao_serve_failed');
+  if (existing) {
+    if (existing.ready) return;
+    if (existing.failed) throw new Error(existing.failureReason || 'efapiao_serve_failed');
+    // A startup is already in flight for this key; await the SAME promise so we
+    // never spawn a second `efapiao serve` under concurrency.
+    if (existing.startup) return existing.startup;
+  }
 
   const state: ServiceState = { ready: false, failed: false };
+  // Register synchronously (no await before this) so concurrent callers observe
+  // the in-flight startup and join it instead of racing another spawn.
   serviceStates.set(key, state);
-  const child = spawn(binaryPath(cfg), [
-    'serve',
-    '--host',
-    cfg.ocr.serviceHost,
-    '--port',
-    String(cfg.ocr.servicePort),
-    '--workers',
-    String(cfg.ocr.serviceWorkers),
-  ], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: efapiaoEnv(cfg),
-  });
-  state.child = child;
-  child.unref();
-  await waitForHealth(cfg, child, state);
+  state.startup = (async () => {
+    if (await healthOk(cfg)) {
+      state.ready = true;
+      return;
+    }
+    const child = spawn(binaryPath(cfg), [
+      'serve',
+      '--host',
+      cfg.ocr.serviceHost,
+      '--port',
+      String(cfg.ocr.servicePort),
+      '--workers',
+      String(cfg.ocr.serviceWorkers),
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: efapiaoEnv(cfg),
+    });
+    state.child = child;
+    child.unref();
+    await waitForHealth(cfg, child, state);
+  })();
+  return state.startup;
+}
+
+/**
+ * Terminate any `efapiao serve` children this process started. Serve children
+ * are unref()'d so they would otherwise outlive the CLI as orphans holding the
+ * port; callers must invoke this before the process exits.
+ */
+export function stopEfapiaoServices(): void {
+  for (const state of serviceStates.values()) {
+    const child = state.child;
+    if (child && !child.killed) {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // best-effort
+      }
+    }
+  }
+  serviceStates.clear();
 }
 
 async function runService(
@@ -381,6 +428,9 @@ function runBinary(
       });
     });
 
+    // Swallow EPIPE/ECONNRESET on stdin (e.g. the child exits or is killed on
+    // timeout before consuming input); the failure is reported via 'error'/'close'.
+    child.stdin.on('error', () => { /* ignore broken-pipe on stdin */ });
     child.stdin.end(data);
   });
 }

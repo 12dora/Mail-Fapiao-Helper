@@ -224,9 +224,11 @@ export function loadConfig(path: string): Config {
         if (v === 'auto' || v === 'serve' || v === 'cli') return v;
         throw new Error('config.ocr.executionMode must be one of auto, serve, cli');
       })(),
+      // Empty by default so serviceHost/servicePort stay authoritative; only a
+      // non-empty serviceUrl points OCR at an externally managed service.
       serviceUrl: typeof (raw as { ocr?: { serviceUrl?: unknown } }).ocr?.serviceUrl === 'string'
         ? ((raw as { ocr: { serviceUrl: string } }).ocr.serviceUrl).replace(/\/+$/, '')
-        : 'http://127.0.0.1:8000',
+        : '',
       serviceHost: typeof (raw as { ocr?: { serviceHost?: unknown } }).ocr?.serviceHost === 'string'
         ? ((raw as { ocr: { serviceHost: string } }).ocr.serviceHost)
         : '127.0.0.1',
@@ -308,6 +310,9 @@ export function loadConfig(path: string): Config {
   }
   if (cfg.ocr.timeoutMs <= 0) {
     throw new Error('config.ocr.timeoutMs must be > 0');
+  }
+  if (cfg.playwright.timeoutMs <= 0) {
+    throw new Error('config.playwright.timeoutMs must be > 0');
   }
 
   return cfg;

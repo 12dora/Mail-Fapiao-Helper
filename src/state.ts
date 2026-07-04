@@ -5,6 +5,18 @@ export interface State {
   fetchedHashes: string[];
 }
 
+/**
+ * Thrown when persisting state.json fails. Per the IRON RULE this is one of the
+ * only two conditions that must abort the whole run, so callers can distinguish
+ * it from ordinary per-email failures and rethrow instead of swallowing.
+ */
+export class StateWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StateWriteError';
+  }
+}
+
 export function loadState(path: string): State {
   if (!existsSync(path)) {
     return { processedHashes: [], fetchedHashes: [] };
@@ -30,6 +42,10 @@ export function loadState(path: string): State {
 
 export function saveState(path: string, state: State): void {
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
-  renameSync(tmp, path);
+  try {
+    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    renameSync(tmp, path);
+  } catch (e) {
+    throw new StateWriteError(`failed to persist state at ${path}: ${(e as Error).message}`);
+  }
 }

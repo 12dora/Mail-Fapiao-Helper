@@ -3,6 +3,14 @@ import path from 'node:path';
 import AdmZip from 'adm-zip';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
+import { MAX_DOC_BYTES } from '../util/net.js';
+
+// Bound how much attachment data one email can pull into memory. A single
+// oversized document, an aggregate over the cap, or an archive with an absurd
+// entry count degrades to manual instead of risking an OOM (ARCHITECTURE R4).
+const PER_DOC_CAP = MAX_DOC_BYTES;
+const PER_EMAIL_CAP = MAX_DOC_BYTES;
+const MAX_ZIP_ENTRIES = 512;
 
 function isPdfAttachment(att: { contentType?: string; filename?: string }): boolean {
   if (att.contentType === 'application/pdf') return true;
@@ -129,8 +137,28 @@ const attachmentExtractor: Extractor = {
       return { kind: 'manual', reason: 'no_attachments' };
     }
 
+    let totalBytes = 0;
+    let skippedOversize = false;
+    // Returns false (and marks the skip) when adding `size` bytes would breach
+    // the per-document or cumulative per-email cap.
+    const admit = (size: number, label: string): boolean => {
+      if (size > PER_DOC_CAP) {
+        skippedOversize = true;
+        ctx.log.warn(`Skip oversized document ${label}: ${size} > ${PER_DOC_CAP} bytes`);
+        return false;
+      }
+      if (totalBytes + size > PER_EMAIL_CAP) {
+        skippedOversize = true;
+        ctx.log.warn(`Skip document ${label}: per-email ${PER_EMAIL_CAP} byte cap exceeded`);
+        return false;
+      }
+      totalBytes += size;
+      return true;
+    };
+
     for (const att of mail.attachments) {
       if (isPdfAttachment(att)) {
+        if (!admit(att.content.length, att.filename || 'unnamed.pdf')) continue;
         pdfs.push({
           data: att.content,
           source: att.filename || 'unnamed.pdf',
@@ -139,6 +167,7 @@ const attachmentExtractor: Extractor = {
           documentType: 'invoice',
         });
       } else if (isOfdAttachment(att)) {
+        if (!admit(att.content.length, att.filename || 'unnamed.ofd')) continue;
         pdfs.push({
           data: att.content,
           source: att.filename || 'unnamed.ofd',
@@ -153,11 +182,22 @@ const attachmentExtractor: Extractor = {
         try {
           const zip = new AdmZip(att.content);
           const entries = zip.getEntries();
+          let entryCount = 0;
           for (const entry of entries) {
             if (entry.isDirectory) continue;
             const entryName = entry.name.toLowerCase();
             const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(entryName);
             if (!entryName.endsWith('.pdf') && !entryName.endsWith('.ofd') && !isImage) continue;
+            if (++entryCount > MAX_ZIP_ENTRIES) {
+              skippedOversize = true;
+              ctx.log.warn(`ZIP ${att.filename} exceeds ${MAX_ZIP_ENTRIES} entries; stopping extraction`);
+              break;
+            }
+
+            const label = `${att.filename || 'unnamed.zip'}/${entry.name}`;
+            // Guard against decompression bombs using the DECLARED uncompressed
+            // size before ever calling getData() (which allocates the buffer).
+            if (!admit(entry.header.size, label)) continue;
 
             const content = entry.getData();
             const isOfd = entryName.endsWith('.ofd');
@@ -179,6 +219,7 @@ const attachmentExtractor: Extractor = {
           ctx.log.warn(`Failed to extract ZIP ${att.filename}: ${err}`);
         }
       } else if (isImageAttachment(att)) {
+        if (!admit(att.content.length, att.filename || 'unnamed-image')) continue;
         pdfs.push({
           data: att.content,
           source: att.filename || 'unnamed-image',
@@ -193,7 +234,10 @@ const attachmentExtractor: Extractor = {
     }
 
     if (pdfs.length === 0) {
-      return { kind: 'manual', reason: 'no_supported_documents_in_attachments' };
+      return { kind: 'manual', reason: skippedOversize ? 'doc_size_cap_exceeded' : 'no_supported_documents_in_attachments' };
+    }
+    if (skippedOversize) {
+      ctx.log.warn(`Archived ${pdfs.length} document(s); some attachments were skipped for exceeding the size cap`);
     }
 
     return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log, mail.subject) };

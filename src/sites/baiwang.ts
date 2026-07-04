@@ -1,14 +1,14 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename } from './common.js';
+import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function filenameFromDisposition(value: string | null): string {
   const encoded = value?.match(/filename\*=UTF-8''([^;\s]+)/i);
-  if (encoded?.[1]) return safeFilename(decodeURIComponent(encoded[1]), 'baiwang-invoice.pdf');
+  if (encoded?.[1]) return safeFilename(tryDecodeURIComponent(encoded[1]), 'baiwang-invoice.pdf');
   const match = value?.match(/filename=([^;\s]+)/i);
   if (!match?.[1]) return 'baiwang-invoice.pdf';
-  return safeFilename(decodeURIComponent(match[1].replace(/^"|"$/g, '')), 'baiwang-invoice.pdf');
+  return safeFilename(tryDecodeURIComponent(match[1].replace(/^"|"$/g, '')), 'baiwang-invoice.pdf');
 }
 
 async function pdfFromUrl(url: string, ctx: Ctx, referer?: string): Promise<PdfArtifact> {

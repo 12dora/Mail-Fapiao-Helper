@@ -6,6 +6,7 @@ import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import type { State } from './state.js';
 import { msgIdHash as msgIdHashFn } from './util/hash.js';
+import { csvCell, parseCsv } from './util/csv.js';
 import { extractors } from './extract/registry.js';
 import type { Ctx } from './extract/types.js';
 import { downloadDocuments } from './download/downloader.js';
@@ -18,6 +19,7 @@ interface CsvRow {
   subject: string;
   filename: string;
   source: string;
+  contentHash: string;
 }
 
 interface OcrPendingRow extends CsvRow {
@@ -52,50 +54,37 @@ function ensureDir(dir: string): void {
   }
 }
 
-function csvCell(v: string): string {
-  if (/[",\r\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === ',') {
-      out.push(cur);
-      cur = '';
-    } else {
-      cur += ch;
+/**
+ * Retry a synchronous CSV write when the file is transiently locked (Windows /
+ * Excel keeps it open): EBUSY / EPERM / EACCES. Backs off 100ms -> 1s. Any
+ * other error, or exhausted retries, is rethrown so the caller can degrade.
+ */
+function withCsvRetry(fn: () => void): void {
+  const delays = [100, 300, 1000];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fn();
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const retryable = code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+      if (!retryable || attempt >= delays.length) throw err;
+      sleepSync(delays[attempt] ?? 1000);
     }
   }
-  out.push(cur);
-  return out;
 }
 
 function csvContainsDocument(csvPath: string, row: CsvRow): boolean {
   if (!fs.existsSync(csvPath)) return false;
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = content.split(/\r?\n/);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const cols = parseCsvLine(line);
-    if ((cols[0] ?? '') === row.messageId && (cols[5] ?? '') === row.source) {
+  const records = parseCsv(content);
+  for (let i = 1; i < records.length; i++) {
+    const cols = records[i] ?? [];
+    if ((cols[0] ?? '') === row.messageId && (cols[6] ?? '') === row.contentHash) {
       return true;
     }
   }
@@ -104,7 +93,7 @@ function csvContainsDocument(csvPath: string, row: CsvRow): boolean {
 
 function appendCsv(csvPath: string, row: CsvRow): void {
   const exists = fs.existsSync(csvPath);
-  const header = 'messageId,date,from,subject,filename,source\n';
+  const header = 'messageId,date,from,subject,filename,source,contentHash\n';
   const line = [
     row.messageId,
     row.date,
@@ -112,28 +101,27 @@ function appendCsv(csvPath: string, row: CsvRow): void {
     row.subject,
     row.filename,
     row.source,
+    row.contentHash,
   ].map(csvCell).join(',') + '\n';
 
   ensureDir(path.dirname(csvPath));
   if (!exists) {
-    fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
+    withCsvRetry(() => fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8'));
   } else {
     if (csvContainsDocument(csvPath, row)) {
       return;
     }
-    fs.appendFileSync(csvPath, line, 'utf8');
+    withCsvRetry(() => fs.appendFileSync(csvPath, line, 'utf8'));
   }
 }
 
 function ocrPendingContainsDocument(csvPath: string, row: OcrPendingRow): boolean {
   if (!fs.existsSync(csvPath)) return false;
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = content.split(/\r?\n/);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const cols = parseCsvLine(line);
-    if ((cols[0] ?? '') === row.hash && (cols[6] ?? '') === row.source) {
+  const records = parseCsv(content);
+  for (let i = 1; i < records.length; i++) {
+    const cols = records[i] ?? [];
+    if ((cols[0] ?? '') === row.hash && (cols[11] ?? '') === row.contentHash) {
       return true;
     }
   }
@@ -142,7 +130,7 @@ function ocrPendingContainsDocument(csvPath: string, row: OcrPendingRow): boolea
 
 function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
   const exists = fs.existsSync(csvPath);
-  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason\n';
+  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash\n';
   const line = [
     row.hash,
     row.messageId,
@@ -155,16 +143,17 @@ function appendOcrPendingCsv(csvPath: string, row: OcrPendingRow): void {
     row.documentType,
     row.status,
     row.reason,
+    row.contentHash,
   ].map(csvCell).join(',') + '\n';
 
   ensureDir(path.dirname(csvPath));
   if (!exists) {
-    fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
+    withCsvRetry(() => fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8'));
   } else {
     if (ocrPendingContainsDocument(csvPath, row)) {
       return;
     }
-    fs.appendFileSync(csvPath, line, 'utf8');
+    withCsvRetry(() => fs.appendFileSync(csvPath, line, 'utf8'));
   }
 }
 
@@ -182,11 +171,9 @@ function writePendingEml(raw: Buffer | undefined, pendingDir: string, hash: stri
 function pendingCsvContainsRow(csvPath: string, row: { messageId: string; date: string; from: string; subject: string }): boolean {
   if (!fs.existsSync(csvPath)) return false;
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = content.split(/\r?\n/);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const cols = parseCsvLine(line);
+  const records = parseCsv(content);
+  for (let i = 1; i < records.length; i++) {
+    const cols = records[i] ?? [];
     if (
       (cols[0] ?? '') === row.messageId
       && (cols[1] ?? '') === row.date
@@ -204,18 +191,19 @@ function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): vo
   const header = 'messageId,date,from,subject,reason\n';
   const messageId = mail.messageId || '';
   const date = mail.date?.toISOString() || '';
-  const from = mail.from?.text || '';
-  const subject = mail.subject || '';
+  const from = (mail.from?.text || '').replace(/[\r\n]+/g, ' ');
+  const subject = (mail.subject || '').replace(/[\r\n]+/g, ' ');
   const row = { messageId, date, from, subject };
   const line = [messageId, date, from, subject, reason].map(csvCell).join(',') + '\n';
 
+  ensureDir(path.dirname(csvPath));
   if (!exists) {
-    fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8');
+    withCsvRetry(() => fs.writeFileSync(csvPath, '﻿' + header + line, 'utf8'));
   } else {
     if (pendingCsvContainsRow(csvPath, row)) {
       return;
     }
-    fs.appendFileSync(csvPath, line, 'utf8');
+    withCsvRetry(() => fs.appendFileSync(csvPath, line, 'utf8'));
   }
 }
 
@@ -360,44 +348,65 @@ export async function processMail(
     return { ...baseResult, outcome: 'manual', reason: result.reason };
   }
 
-  const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log, {
-    avoidConflictBeforeOcr: cfg.rename.avoidConflictBeforeOcr,
-  });
-
-  const csvPath = path.resolve(cfg.output.csv);
-  const ocrPendingCsvPath = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  for (let i = 0; i < downloads.length; i++) {
-    const dl = downloads[i];
-    const pdf = result.pdfs[i];
-    if (!dl || !pdf) continue;
-
-    appendCsv(csvPath, {
-      messageId,
-      date: mail.date?.toISOString() || '',
-      from: mail.from?.text || '',
-      subject: mail.subject || '',
-      filename: dl.filename,
-      source: pdf.source,
+  let downloadsCount = 0;
+  try {
+    const downloads = await downloadDocuments(result.pdfs, hash, cfg.paths.invoices, log, {
+      avoidConflictBeforeOcr: cfg.rename.avoidConflictBeforeOcr,
     });
+    downloadsCount = downloads.length;
 
-    appendOcrPendingCsv(ocrPendingCsvPath, {
-      hash,
-      messageId,
-      date: mail.date?.toISOString() || '',
-      from: mail.from?.text || '',
-      subject: mail.subject || '',
-      filename: dl.filename,
-      source: pdf.source,
-      format: dl.format,
-      documentType: dl.documentType,
-      status: dl.requiresOcr ? 'pending' : 'ignored',
-      reason: dl.requiresOcr
-        ? (dl.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr')
-        : supportingReason({ ...pdf, format: dl.format, documentType: dl.documentType }),
-    });
+    const csvPath = path.resolve(cfg.output.csv);
+    const ocrPendingCsvPath = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    for (let i = 0; i < downloads.length; i++) {
+      const dl = downloads[i];
+      const pdf = result.pdfs[i];
+      if (!dl || !pdf) continue;
+
+      appendCsv(csvPath, {
+        messageId,
+        date: mail.date?.toISOString() || '',
+        from: mail.from?.text || '',
+        subject: mail.subject || '',
+        filename: dl.filename,
+        source: pdf.source,
+        contentHash: dl.contentHash,
+      });
+
+      appendOcrPendingCsv(ocrPendingCsvPath, {
+        hash,
+        messageId,
+        date: mail.date?.toISOString() || '',
+        from: mail.from?.text || '',
+        subject: mail.subject || '',
+        filename: dl.filename,
+        source: pdf.source,
+        format: dl.format,
+        documentType: dl.documentType,
+        status: dl.requiresOcr ? 'pending' : 'ignored',
+        reason: dl.requiresOcr
+          ? (dl.format === 'ofd' ? 'ofd_itinerary_requires_ocr' : 'document_requires_ocr')
+          : supportingReason({ ...pdf, format: dl.format, documentType: dl.documentType }),
+        contentHash: dl.contentHash,
+      });
+    }
+  } catch (err) {
+    // Iron rule: a filesystem / CSV-lock failure during download or archive must
+    // NOT abort the run. Degrade this email to the manual queue and continue.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const reason = `download_or_csv:${errMsg}`;
+    log.warn(`Archive failed for ${hash}: ${reason}`);
+    try {
+      writePendingEml(opts.raw, cfg.paths.pending, hash);
+      appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, reason);
+    } catch (pendErr) {
+      log.warn(`Pending write also failed for ${hash}: ${pendErr instanceof Error ? pendErr.message : String(pendErr)}`);
+    }
+    if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
+    saveState();
+    return { ...baseResult, outcome: 'manual', reason };
   }
 
-  log.info(`Processed ${hash}: ${downloads.length} documents`);
+  log.info(`Processed ${hash}: ${downloadsCount} documents`);
   if (!state.processedHashes.includes(hash)) state.processedHashes.push(hash);
   saveState();
   return { ...baseResult, outcome: 'pdf' };

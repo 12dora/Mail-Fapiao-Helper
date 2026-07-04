@@ -74,6 +74,9 @@ function buildSearch(cfg: Config): SearchObject {
 function listAllMailboxPaths(client: ImapFlow): Promise<string[]> {
   return client.list().then((boxes) => boxes
     .filter((box) => box.listed !== false)
+    // Skip non-selectable containers (e.g. Gmail's "[Gmail]" parent); opening
+    // them with getMailboxLock throws and would abort the whole fetch.
+    .filter((box) => !(box.flags instanceof Set && (box.flags.has('\\Noselect') || box.flags.has('\\NonExistent'))))
     .map((box) => box.path)
     .filter((path) => path.length > 0));
 }
@@ -110,7 +113,16 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
     log.info(`IMAP mailboxes: ${JSON.stringify(mailboxes)}`);
 
     for (const mailbox of mailboxes) {
-      const lock = await client.getMailboxLock(mailbox);
+      let lock;
+      try {
+        lock = await client.getMailboxLock(mailbox);
+      } catch (e) {
+        // Connection-level loss must still honor the IRON RULE and abort;
+        // a folder-scoped open failure only skips that folder.
+        if (!client.usable) throw e;
+        log.warn(`IMAP mailbox="${mailbox}" open failed, skipping: ${(e as Error).message}`);
+        continue;
+      }
       try {
         log.info(`IMAP SEARCH mailbox="${mailbox}" ${JSON.stringify(search)}`);
         const uids = await client.search(search, { uid: true });
@@ -167,6 +179,11 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
             bodyLinkCount,
           };
         }
+      } catch (e) {
+        // A SELECT/SEARCH/FETCH failure scoped to one folder must not abort the
+        // iteration over the remaining mailboxes; a lost connection still does.
+        if (!client.usable) throw e;
+        log.warn(`IMAP mailbox="${mailbox}" search/fetch failed, skipping remaining messages: ${(e as Error).message}`);
       } finally {
         lock.release();
       }

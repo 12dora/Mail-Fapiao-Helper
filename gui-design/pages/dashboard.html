@@ -380,13 +380,25 @@ function updatePreview() {
     }
 }
 
+const ALLOWED_LOG_KINDS = new Set(['', 'ok', 'warn', 'err']);
 function appendLog(tag, message, kind = '') {
     consoleOut.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
     const line = document.createElement('div');
     line.className = 'console__line';
     const now = new Date();
     const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-    line.innerHTML = `<span class="console__time">${time}</span><span class="console__tag ${kind}">${tag}</span><span class="console__msg">${message}</span>`;
+    const safeKind = ALLOWED_LOG_KINDS.has(kind) ? kind : '';
+    // Build with textContent so raw subprocess/CLI output can never inject markup.
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'console__time';
+    timeSpan.textContent = time;
+    const tagSpan = document.createElement('span');
+    tagSpan.className = `console__tag ${safeKind}`;
+    tagSpan.textContent = String(tag);
+    const msgSpan = document.createElement('span');
+    msgSpan.className = 'console__msg';
+    msgSpan.textContent = String(message);
+    line.append(timeSpan, tagSpan, msgSpan);
     consoleOut.appendChild(line);
     consoleOut.scrollTop = consoleOut.scrollHeight;
 }

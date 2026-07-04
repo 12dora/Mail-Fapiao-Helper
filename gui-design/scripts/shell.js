@@ -239,7 +239,11 @@
             }
 
             const action = e.target.closest('[data-action]');
-            if (action && !t && !action.closest('.tabs') && !action.closest('#date-preset-buttons')) handleAction(action);
+            if (action && !t && !action.closest('.tabs') && !action.closest('#date-preset-buttons')) {
+                // Catch here so any action handler that rejects (e.g. an IPC error)
+                // shows feedback instead of becoming a silent unhandled rejection.
+                Promise.resolve(handleAction(action)).catch((err) => showToast('运行失败', err?.message || '请重试。', 'err'));
+            }
         });
 
         document.body.addEventListener('click', (e) => {
@@ -389,7 +393,7 @@
     }
 
     function pill(label, kind = '') {
-        return `<span class="pill ${kind ? `pill--${kind}` : ''}">${label}</span>`;
+        return `<span class="pill ${kind ? `pill--${kind}` : ''}">${escapeHtml(label)}</span>`;
     }
 
     function sourceLabel(source) {
@@ -1633,7 +1637,8 @@
         }
         const toast = document.createElement('div');
         toast.className = `toast ${kind}`;
-        toast.innerHTML = `<div>${title}</div><div class="toast__sub">${sub}</div>`;
+        // title/sub often carry backend result.message / stderr / paths — escape both.
+        toast.innerHTML = `<div>${escapeHtml(title)}</div><div class="toast__sub">${escapeHtml(sub)}</div>`;
         stack.appendChild(toast);
         window.setTimeout(() => toast.remove(), Math.max(1500, Number(duration) || 2600));
     }
