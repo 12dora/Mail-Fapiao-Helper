@@ -40,7 +40,7 @@
     "binaryPath": "auto",
     "ocrMode": "auto",
     "executionMode": "auto",
-    "serviceUrl": "http://127.0.0.1:8000",
+    "serviceUrl": "",
     "serviceHost": "127.0.0.1",
     "servicePort": 8000,
     "serviceWorkers": 1,

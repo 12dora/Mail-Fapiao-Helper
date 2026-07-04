@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename } from './common.js';
+import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function idFromUrl(url: string): string {
   const id = new URL(url).searchParams.get('id');
@@ -12,7 +12,7 @@ function idFromUrl(url: string): string {
 function filenameFromDisposition(value: string | null, fallback: string): string {
   const match = value?.match(/filename="?([^";]+)"?/i);
   if (!match?.[1]) return fallback;
-  return safeFilename(decodeURIComponent(match[1]), fallback);
+  return safeFilename(tryDecodeURIComponent(match[1]), fallback);
 }
 
 const taxPreviewHandler: SiteHandler = {

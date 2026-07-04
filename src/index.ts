@@ -7,15 +7,16 @@ import { loadConfig, type Config } from './config.js';
 import { fetchMails, type RawMail } from './mail/fetcher.js';
 import { nonInvoiceReason } from './mail/exclude.js';
 import { log } from './log.js';
-import { loadState, saveState, type State } from './state.js';
+import { loadState, saveState, StateWriteError, type State } from './state.js';
 import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
 import { organizeFromOcrResults } from './rename/rename.js';
 import { runOcrPending } from './ocr/runner.js';
+import { stopEfapiaoServices } from './ocr/efapiao.js';
 import { summarizeOcr } from './ocr/summary.js';
 import { pendingEmlExists, summarizePending } from './pending/summary.js';
-import { readCsvRows } from './util/csv.js';
+import { readCsvRows, csvCell, parseCsvLine } from './util/csv.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -260,11 +261,6 @@ function requireValue(argv: string[], i: number, flag: string): string {
   return v;
 }
 
-function csvCell(v: string): string {
-  if (/[",\r\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
-}
-
 const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
 
 function ensureIndexCsv(path: string): void {
@@ -276,15 +272,13 @@ function ensureIndexCsv(path: string): void {
 
 function indexContainsMessageId(path: string, messageId: string): boolean {
   if (!existsSync(path) || messageId.length === 0) return false;
-  const text = readFileSync(path, 'utf8');
-  const needle = csvCell(messageId);
+  const text = readFileSync(path, 'utf8').replace(/^﻿/, '');
   const lines = text.split(/\r?\n/);
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
-    const firstComma = line.indexOf(',');
-    const first = firstComma === -1 ? line : line.slice(0, firstComma);
-    if (first === needle) return true;
+    const first = parseCsvLine(line)[0] ?? '';
+    if (first === messageId) return true;
   }
   return false;
 }
@@ -544,7 +538,10 @@ async function cmdRun(argv: string[]): Promise<number> {
       mail.date?.toISOString() ?? '',
       mail.subject ?? '',
     );
-    const messageId = mail.messageId ?? '';
+    // Use the same identity the writer commits to invoices.csv (messageId,
+    // falling back to hash) so the archived-message self-heal recognizes emails
+    // that have no Message-Id header on restart.
+    const messageId = mail.messageId || hash;
 
     if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
       return;
@@ -610,13 +607,21 @@ async function cmdRun(argv: string[]): Promise<number> {
     const workerCount = Math.min(opts.concurrency, Math.max(emlPaths.length, 1));
     log.info(`Queued ${emlPaths.length} cached emails with concurrency=${workerCount}`);
 
+    let aborted = false;
     const worker = async (): Promise<void> => {
       while (true) {
+        if (aborted) return;
         const emlPath = emlPaths[next++];
         if (!emlPath) return;
         try {
           await handleEml(emlPath);
         } catch (err) {
+          // Iron rule: a state.json write failure is one of the only two
+          // conditions that must abort the whole run.
+          if (err instanceof StateWriteError) {
+            aborted = true;
+            throw err;
+          }
           failed++;
           log.warn(`Failed to process ${emlPath}: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -788,6 +793,9 @@ async function cmdOcr(argv: string[]): Promise<number> {
   } catch (e) {
     log.error((e as Error).message);
     return 1;
+  } finally {
+    // Kill any efapiao serve child we started so it does not outlive the CLI.
+    stopEfapiaoServices();
   }
 }
 

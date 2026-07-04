@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { handlers } from '../sites/registry.js';
 import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
+import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
 
 function cleanLink(url: string): string {
   let cleaned = url
@@ -98,6 +99,8 @@ function isProbeNoise(url: string): boolean {
 
 async function probePdfContentType(url: string, ctx: Ctx): Promise<boolean> {
   try {
+    // SSRF guard: reject non-http(s) and private/loopback targets before probing.
+    await assertPublicUrl(url);
     const response = await ctx.http(url, { method: 'HEAD' });
     const contentType = response.headers.get('content-type');
     return contentType?.includes('application/pdf') ?? false;
@@ -105,19 +108,30 @@ async function probePdfContentType(url: string, ctx: Ctx): Promise<boolean> {
     if (err instanceof Error && err.message.includes('network_retry_failed')) {
       throw err;
     }
-    ctx.log.debug(`HEAD probe failed for ${url}: ${err}`);
+    ctx.log.debug(`HEAD probe skipped/failed for ${url}: ${err}`);
     return false;
   }
 }
 
 async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer | null> {
+  try {
+    await assertPublicUrl(url);
+  } catch (err) {
+    ctx.log.warn(`Blocked unsafe URL ${url}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
   const response = await ctx.http(url);
   if (!response.ok) {
     ctx.log.debug(`GET ${url} failed: ${response.status}`);
     return null;
   }
-  const arrayBuffer = await response.arrayBuffer();
-  const data = Buffer.from(arrayBuffer);
+  let data: Buffer;
+  try {
+    data = await readCappedBuffer(response);
+  } catch (err) {
+    ctx.log.warn(`GET ${url} body rejected: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('pdf') && data.subarray(0, 4).toString('latin1') !== '%PDF') {
     ctx.log.debug(`GET ${url} was not PDF: ${contentType || 'unknown'}`);

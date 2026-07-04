@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DocumentFormat, PdfArtifact } from '../extract/types.js';
 import { withDocumentClassification } from '../extract/classify.js';
+import { contentHash } from '../util/hash.js';
 import type { Logger } from '../log.js';
 
 export interface DownloadResult {
@@ -10,6 +11,7 @@ export interface DownloadResult {
   format: DocumentFormat;
   documentType: NonNullable<PdfArtifact['documentType']>;
   requiresOcr: boolean;
+  contentHash: string;
 }
 
 export interface DownloadOptions {
@@ -137,6 +139,7 @@ export async function downloadPdfs(
       format: pdf.format ?? formatForExt(ext),
       documentType: pdf.documentType ?? 'invoice',
       requiresOcr: pdf.requiresOcr ?? true,
+      contentHash: contentHash(pdf.data),
     });
   }
 

@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename } from './common.js';
+import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function extractInvoiceUrl(html: string): string | null {
   const match = html.match(/invoiceUrl\s*=\s*'([^']+)'/);
@@ -11,7 +11,7 @@ function extractInvoiceUrl(html: string): string | null {
 function filenameFromDisposition(value: string | null): string {
   const match = value?.match(/filename="?([^";]+)"?/i);
   if (!match?.[1]) return 'pingan-invoice.pdf';
-  return safeFilename(decodeURIComponent(match[1]), 'pingan-invoice.pdf');
+  return safeFilename(tryDecodeURIComponent(match[1]), 'pingan-invoice.pdf');
 }
 
 async function resolveToken(url: string, ctx: Ctx): Promise<string> {

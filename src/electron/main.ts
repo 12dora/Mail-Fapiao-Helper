@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultConfigPath, historyPath, loadAppSummary, loadGuiConfig, readRunHistory, type RunHistoryEntry } from './summary.js';
-import { readCsvRows } from '../util/csv.js';
+import { readCsvRows, csvCell, parseCsv } from '../util/csv.js';
 import { msgIdHash } from '../util/hash.js';
 
 interface DateRangePayload {
@@ -95,6 +95,9 @@ const statePath = process.env.MFH_STATE_PATH
 let mainWindow: BrowserWindowType | undefined;
 let activeOcrProcess: ChildProcess | undefined;
 let activeOcrStopRequested = false;
+// Every CLI subprocess we spawn, so they can be terminated on app quit instead
+// of being orphaned (they can in turn hold an efapiao serve child / a port).
+const activeChildren = new Set<ChildProcess>();
 
 function uiPath(...parts: string[]): string {
   return path.join(rootDir, 'gui-design', ...parts);
@@ -213,7 +216,11 @@ function numberField(value: unknown): number {
 function writeConfig(payload: unknown): void {
   const current = readMutableConfig();
   mergeDefined(current, normalizeSavePayload(payload));
-  fs.writeFileSync(configPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  // Atomic tmp+rename so a crash mid-write can never leave a truncated
+  // config.json (which holds the IMAP password) on disk.
+  const tmpPath = `${configPath}.tmp`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(tmpPath, configPath);
   try {
     fs.chmodSync(configPath, 0o600);
   } catch {
@@ -251,11 +258,6 @@ function sendFileProgress(data: Record<string, unknown>): void {
   mainWindow?.webContents.send('mfh:file-progress', data);
 }
 
-function csvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
-  return value;
-}
-
 function readFakeConfigPaths(): { samples: string; invoices: string; pending: string; resultsCsv: string; organizedDir: string } {
   const cfg = readConfigForPaths();
   const paths = asObject(cfg.paths);
@@ -273,36 +275,6 @@ function readFakeConfigPaths(): { samples: string; invoices: string; pending: st
 function writeFakeE2eFile(file: string, body: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, body, 'utf8');
-}
-
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === ',') {
-      out.push(cur);
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur);
-  return out;
 }
 
 function pendingDirPath(): string {
@@ -328,15 +300,14 @@ function rewritePendingCsv(filter: (row: Record<string, string>) => boolean): { 
   if (!fs.existsSync(pendingCsv)) return { removed: 0, remaining: 0 };
   const text = fs.readFileSync(pendingCsv, 'utf8');
   const bom = text.startsWith('﻿') ? '﻿' : '';
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
-  const header = parseCsvLine(lines[0] ?? '');
+  const records = parseCsv(text.replace(/^﻿/, ''));
+  const header = records[0] ?? [];
   if (header.length === 0) return { removed: 0, remaining: 0 };
   const out = [`${bom}${header.map(csvCell).join(',')}`];
   let removed = 0;
   let remaining = 0;
-  for (const line of lines.slice(1)) {
-    if (!line) continue;
-    const cols = parseCsvLine(line);
+  for (let r = 1; r < records.length; r++) {
+    const cols = records[r] ?? [];
     const row: Record<string, string> = {};
     for (let i = 0; i < header.length; i++) {
       const key = header[i];
@@ -403,17 +374,16 @@ function clearOcrResultsAndResetQueue(): void {
 
   const text = fs.readFileSync(pendingCsv, 'utf8');
   const bom = text.startsWith('\uFEFF') ? '\uFEFF' : '';
-  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
-  const header = parseCsvLine(lines[0] ?? '');
+  const records = parseCsv(text.replace(/^\uFEFF/, ''));
+  const header = records[0] ?? [];
   const statusIndex = header.indexOf('status');
   const reasonIndex = header.indexOf('reason');
   const documentTypeIndex = header.indexOf('documentType');
   if (statusIndex === -1) return;
 
   const out = [`${bom}${header.map(csvCell).join(',')}`];
-  for (const line of lines.slice(1)) {
-    if (!line) continue;
-    const cols = parseCsvLine(line);
+  for (let r = 1; r < records.length; r++) {
+    const cols = records[r] ?? [];
     const docType = cols[documentTypeIndex] ?? '';
     if (docType === 'supporting') {
       cols[statusIndex] = 'ignored';
@@ -768,6 +738,7 @@ function runCli(command: string, args: string[], opts: { progress?: boolean; ope
       cwd: dataDir,
       env,
     });
+    activeChildren.add(child);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     const current: FetchProgressState = { seen: 0, saved: 0, skipped: 0 };
@@ -806,8 +777,13 @@ function runCli(command: string, args: string[], opts: { progress?: boolean; ope
         if (opts.operation === 'files') parseFileLine(line, fileCurrent);
       }
     });
-    child.on('error', reject);
+    child.on('error', (err) => {
+      activeChildren.delete(child);
+      if (activeOcrProcess === child) activeOcrProcess = undefined;
+      reject(err);
+    });
     child.on('close', (code) => {
+      activeChildren.delete(child);
       if (opts.operation === 'ocr' && activeOcrProcess === child) {
         activeOcrProcess = undefined;
       }
@@ -927,22 +903,25 @@ ipcMain.handle('mfh:get-config', () => {
   const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
   // Redact secrets so they never reach the renderer process. We still report whether each
   // secret is populated so the UI can show "已保存（留空则不修改）" placeholders.
-  const redactedImap = { ...cfg.imap, pass: cfg.imap?.pass ? '' : '' };
+  const redactedImap = { ...cfg.imap, pass: '' };
   const ocrSrc = (cfg as { ocr?: Record<string, unknown> }).ocr ?? {};
   const credsSrc = asObject((ocrSrc as Record<string, unknown>).credentials);
-  const redactedCreds = {
-    ...credsSrc,
-    tencentSecretId: '',
-    tencentSecretKey: '',
-    secretId: '',
-    secretKey: '',
-  };
+  // Redact by pattern rather than a fixed blocklist so any secret-like key
+  // (apiKey, *SecretKey, *token, *pass, …) is blanked before reaching the renderer.
+  const isSecretKey = (k: string): boolean => /secret|key|token|pass/i.test(k);
+  const redactedCreds = Object.fromEntries(
+    Object.entries(credsSrc).map(([k, v]) => [k, isSecretKey(k) ? '' : v]),
+  );
   const redactedOcr = { ...ocrSrc, credentials: redactedCreds };
-  const redactedConfig = { ...cfg, imap: redactedImap, ocr: redactedOcr };
+  const llmSrc = asObject((cfg as { llm?: unknown }).llm);
+  const redactedLlm = { ...llmSrc, apiKey: '' };
+  const redactedConfig = { ...cfg, imap: redactedImap, ocr: redactedOcr, llm: redactedLlm };
   const secrets = {
     imapPass: Boolean(cfg.imap?.pass),
     tencentSecretId: Boolean(credsSrc.tencentSecretId || credsSrc.secretId),
     tencentSecretKey: Boolean(credsSrc.tencentSecretKey || credsSrc.secretKey),
+    ocrApiKey: Boolean(credsSrc.apiKey),
+    llmApiKey: Boolean(llmSrc.apiKey),
   };
   return { configPath, configExists: fs.existsSync(configPath), configError: error, config: redactedConfig, secrets, dataDir };
 });
@@ -1054,7 +1033,18 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     failed: 0,
     message: `发现 ${pendingTotal} 个待识别文件，正在启动识别。当前并行数：${concurrency}。`,
   });
-  const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal });
+  let result;
+  try {
+    result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal });
+  } finally {
+    // ocrConfigPath is a plaintext copy of the full config (IMAP password +
+    // OCR secrets). Delete it as soon as the child exits so it does not linger.
+    try {
+      fs.rmSync(ocrConfigPath, { force: true });
+    } catch {
+      // best-effort
+    }
+  }
   historyEntry('ocr', raw.force === true ? '开始识别文件' : '识别文件', startedAt, result);
   const stopped = activeOcrStopRequested || result.code === 130;
   if (stopped) {
@@ -1097,10 +1087,24 @@ ipcMain.handle('mfh:stop-ocr', () => {
   return { ok: true, message: '正在停止识别。' };
 });
 
+function isContainedPath(resolved: string, bases: string[]): boolean {
+  return bases.some((base) => {
+    const rel = path.relative(path.resolve(base), resolved);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  });
+}
+
 ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const target = typeof raw.path === 'string' ? raw.path : dataDir;
   const resolved = path.resolve(dataDir, target);
+  // Containment: only reveal/open paths inside our managed directories, so a
+  // crafted target cannot make the app launch an arbitrary file on disk.
+  // path.relative (not startsWith) avoids prefix-spoofing like /data-evil.
+  const allowedBases = [dataDir, invoicesDirPath(), pendingDirPath(), samplesDirPath()];
+  if (!isContainedPath(resolved, allowedBases)) {
+    return { ok: false, error: '路径不在允许的目录范围内。' };
+  }
   if (raw.reveal === true) {
     // shell.showItemInFolder silently does nothing when the path is missing, which
     // leaves the renderer thinking the operation succeeded. Verify first.
@@ -1148,29 +1152,33 @@ ipcMain.handle('mfh:test-connection', async (_event, payload: unknown) => {
       logger: false,
     });
     await client.connect();
-    const configured = asObject(cfg.imap).mailbox;
-    const mailbox = Array.isArray(configured) && typeof configured[0] === 'string' && configured[0]
-      ? configured[0]
-      : 'INBOX';
-    let fallbackMailbox = '';
     try {
-      await client.mailboxOpen(mailbox);
-    } catch {
-      const boxes = await client.list();
-      if (boxes.length > 0) {
-        fallbackMailbox = boxes[0]!.path;
-        await client.mailboxOpen(fallbackMailbox);
+      const configured = asObject(cfg.imap).mailbox;
+      const mailbox = Array.isArray(configured) && typeof configured[0] === 'string' && configured[0]
+        ? configured[0]
+        : 'INBOX';
+      let fallbackMailbox = '';
+      try {
+        await client.mailboxOpen(mailbox);
+      } catch {
+        const boxes = await client.list();
+        if (boxes.length > 0) {
+          fallbackMailbox = boxes[0]!.path;
+          await client.mailboxOpen(fallbackMailbox);
+        }
       }
+      if (fallbackMailbox) {
+        return {
+          ok: true,
+          kind: 'warn',
+          message: `邮箱连接正常，但找不到配置的文件夹「${mailbox}」，已临时打开「${fallbackMailbox}」。请在配置中重新选择目标文件夹。`,
+        };
+      }
+      return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
+    } finally {
+      // Always tear down the socket + keepalive timers, even on a secondary failure.
+      await client.logout().catch(() => { try { client.close(); } catch { /* ignore */ } });
     }
-    await client.logout().catch(() => undefined);
-    if (fallbackMailbox) {
-      return {
-        ok: true,
-        kind: 'warn',
-        message: `邮箱连接正常，但找不到配置的文件夹「${mailbox}」，已临时打开「${fallbackMailbox}」。请在配置中重新选择目标文件夹。`,
-      };
-    }
-    return { ok: true, message: '邮箱连接正常，可以获取邮件。' };
   } catch (err) {
     return { ok: false, message: `邮箱连接失败：${err instanceof Error ? err.message : String(err)}` };
   }
@@ -1198,10 +1206,13 @@ ipcMain.handle('mfh:list-mailboxes', async (_event, payload: unknown) => {
     }
     const client = new ImapFlow({ host, port, secure: tls, auth: { user, pass }, logger: false });
     await client.connect();
-    const boxes = await client.list();
-    await client.logout().catch(() => undefined);
-    const mailboxes = boxes.map((b) => b.path).filter(Boolean);
-    return { ok: true, mailboxes };
+    try {
+      const boxes = await client.list();
+      const mailboxes = boxes.map((b) => b.path).filter(Boolean);
+      return { ok: true, mailboxes };
+    } finally {
+      await client.logout().catch(() => { try { client.close(); } catch { /* ignore */ } });
+    }
   } catch (err) {
     return { ok: false, message: `读取文件夹失败：${err instanceof Error ? err.message : String(err)}`, mailboxes: [] };
   }
@@ -1309,13 +1320,18 @@ ipcMain.handle('mfh:developer-reset', () => {
     rename.organizedDir,
     statePath,
     historyPath(dataDir),
+    '.mfh-cache',
   ];
   const removed: string[] = [];
+  // A real path-boundary check (trailing separator) so a candidate that resolves
+  // to the userData root or a sibling like `${dataDir}-evil` is never deleted.
+  const base = dataDir.endsWith(path.sep) ? dataDir : dataDir + path.sep;
   for (const value of candidates) {
     if (typeof value !== 'string' || value.length === 0) continue;
     const target = path.resolve(dataDir, value);
-    if (!target.startsWith(dataDir)) continue;
-    if (target === configPath) continue;
+    if (target === dataDir) continue;        // never delete the userData root
+    if (!target.startsWith(base)) continue;  // strict descendant only, blocks siblings
+    if (target === configPath) continue;     // never delete config.json (holds the password)
     fs.rmSync(target, { recursive: true, force: true });
     removed.push(path.relative(dataDir, target) || target);
   }
@@ -1326,6 +1342,19 @@ ipcMain.handle('mfh:developer-reset', () => {
 app.whenReady().then(() => {
   ensureUserDataConfig();
   createWindow();
+});
+
+app.on('before-quit', () => {
+  // Terminate any CLI subprocess still running so it (and its efapiao serve
+  // grandchild) does not outlive the app as an orphan.
+  for (const child of activeChildren) {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // best-effort
+    }
+  }
+  activeChildren.clear();
 });
 
 app.on('window-all-closed', () => {

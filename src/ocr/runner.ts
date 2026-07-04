@@ -5,6 +5,7 @@ import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
 import type { OcrResult } from './types.js';
+import { csvCell, parseCsvLine, readCsvRows } from '../util/csv.js';
 
 interface PendingRow {
   hash: string;
@@ -18,6 +19,7 @@ interface PendingRow {
   documentType: DocumentType;
   status: string;
   reason: string;
+  contentHash: string;
 }
 
 interface ParseJob {
@@ -32,60 +34,6 @@ export interface OcrRunSummary {
   skipped: number;
   failed: number;
   updated: number;
-}
-
-function csvCell(v: string): string {
-  if (/[",\r\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
-  return v;
-}
-
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let quoted = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (quoted) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        cur += ch;
-      }
-    } else if (ch === '"') {
-      quoted = true;
-    } else if (ch === ',') {
-      out.push(cur);
-      cur = '';
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur);
-  return out;
-}
-
-function readCsv(csvPath: string): Record<string, string>[] {
-  if (!fs.existsSync(csvPath)) return [];
-  const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = text.split(/\r?\n/).filter((line) => line.length > 0);
-  const header = parseCsvLine(lines[0] ?? '');
-  const rows: Record<string, string>[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = parseCsvLine(lines[i] ?? '');
-    const row: Record<string, string> = {};
-    for (let c = 0; c < header.length; c++) {
-      const key = header[c];
-      if (!key) continue;
-      row[key] = cols[c] ?? '';
-    }
-    rows.push(row);
-  }
-  return rows;
 }
 
 function asFormat(value: string): DocumentFormat {
@@ -111,6 +59,7 @@ function pendingRow(raw: Record<string, string>): PendingRow {
     documentType: asDocumentType(raw.documentType ?? ''),
     status: raw.status ?? '',
     reason: raw.reason ?? '',
+    contentHash: raw.contentHash ?? '',
   };
 }
 
@@ -125,8 +74,10 @@ interface ResultStatus {
 
 function readResultIndex(csvPath: string): Map<string, ResultStatus> {
   const index = new Map<string, ResultStatus>();
-  for (const row of readCsv(csvPath)) {
-    const key = `${row.hash ?? ''}\0${row.source ?? row.filename ?? ''}`;
+  for (const row of readCsvRows(csvPath)) {
+    // Key on the unique numbered filename, not the (possibly non-unique) source,
+    // so two same-named documents from one email are tracked separately.
+    const key = `${row.hash ?? ''}\0${row.filename ?? row.source ?? ''}`;
     const existing = index.get(key);
     const status = row.status ?? '';
     if (existing?.status === 'success' && status !== 'success') continue;
@@ -151,12 +102,13 @@ function pendingLine(row: PendingRow): string {
     row.documentType,
     row.status,
     row.reason,
+    row.contentHash,
   ].map(csvCell).join(',') + '\n';
 }
 
 function writePendingCsv(csvPath: string, rows: PendingRow[]): void {
   ensureDir(path.dirname(csvPath));
-  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason\n';
+  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash\n';
   const tmpPath = `${csvPath}.tmp`;
   fs.writeFileSync(tmpPath, '﻿' + header + rows.map(pendingLine).join(''), 'utf8');
   fs.renameSync(tmpPath, csvPath);
@@ -285,7 +237,7 @@ export async function runOcrPending(
 
   const pendingCsv = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
   const resultCsv = cfg.ocr.resultsCsv;
-  const rows = readCsv(pendingCsv).map(pendingRow);
+  const rows = readCsvRows(pendingCsv).map(pendingRow);
   const nextRows = rows.map((row) => ({ ...row }));
   const seenResults = opts.force ? new Map<string, ResultStatus>() : readResultIndex(resultCsv);
   const provider = getOcrProvider(cfg);
@@ -394,7 +346,7 @@ export async function runOcrPending(
       checkpoint();
       continue;
     }
-    const key = `${row.hash}\0${row.source}`;
+    const key = `${row.hash}\0${row.filename}`;
     if (seenResults.has(key)) {
       await flushBatch();
       const existing = seenResults.get(key);

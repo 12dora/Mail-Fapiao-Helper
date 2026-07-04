@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename } from './common.js';
+import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 interface HuaweiTravelResponse {
   resultCode?: string;
@@ -24,9 +24,9 @@ function tokenParamName(url: string): 'token' | 'invoiceId' {
 
 function filenameFromDisposition(value: string | null, fallback: string): string {
   const encoded = value?.match(/filename\*=UTF-8''([^;\s]+)/i);
-  if (encoded?.[1]) return safeFilename(decodeURIComponent(encoded[1]), fallback);
+  if (encoded?.[1]) return safeFilename(tryDecodeURIComponent(encoded[1]), fallback);
   const plain = value?.match(/filename=([^;\s]+)/i);
-  if (plain?.[1]) return safeFilename(decodeURIComponent(plain[1].replace(/^"|"$/g, '')), fallback);
+  if (plain?.[1]) return safeFilename(tryDecodeURIComponent(plain[1].replace(/^"|"$/g, '')), fallback);
   return fallback;
 }
 

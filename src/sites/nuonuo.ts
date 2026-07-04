@@ -1,6 +1,15 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
+import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
+
+function isNuonuoHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === 'nnfp.jss.com.cn'
+    || h === 'nnfp.nuonuo.com'
+    || h.endsWith('.nuonuo.com')
+    || h.endsWith('.jss.com.cn');
+}
 
 interface NuonuoDetailResponse {
   status?: string;
@@ -24,7 +33,19 @@ function extractParamList(url: string): string | null {
 function invoiceEntryUrl(url: string): string | null {
   const parsed = new URL(url);
   if (parsed.pathname === '/allow/service/getEwmImg.do') {
-    return parsed.searchParams.get('content');
+    // The `content` param is an attacker-controlled URL from the email. Only
+    // follow it if it is an http(s) nuonuo host, otherwise this is an SSRF.
+    const content = parsed.searchParams.get('content');
+    if (!content) return null;
+    let target: URL;
+    try {
+      target = new URL(content);
+    } catch {
+      return null;
+    }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return null;
+    if (!isNuonuoHost(target.hostname)) return null;
+    return target.toString();
   }
   if (parsed.pathname.startsWith('/scan-invoice/printQrcode')) {
     return url;
@@ -79,6 +100,7 @@ async function fetchDetail(url: string, paramList: string, ctx: Ctx): Promise<Nu
 }
 
 async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer> {
+  await assertPublicUrl(url);
   const response = await ctx.http(url, {
     headers: {
       Accept: 'application/pdf,*/*',
@@ -96,7 +118,7 @@ async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer> {
     throw new Error(`nuonuo_pdf_content_type_${contentType || 'unknown'}`);
   }
 
-  return Buffer.from(await response.arrayBuffer());
+  return readCappedBuffer(response);
 }
 
 const nuonuoHandler: SiteHandler = {
