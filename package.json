@@ -39,6 +39,7 @@
   "build": {
     "appId": "com.mailfapiao.helper",
     "productName": "发票助手",
+    "artifactName": "${name}-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -94,6 +95,7 @@
       ]
     },
     "nsis": {
+      "artifactName": "${name}-setup-${version}-${arch}.${ext}",
       "installerIcon": "icon/icon.ico",
       "uninstallerIcon": "icon/icon.ico",
       "oneClick": false,
