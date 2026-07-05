@@ -38,6 +38,27 @@ function isImageAttachment(att: { contentType?: string; filename?: string }): bo
   return false;
 }
 
+type AttachmentMeta = { contentType?: string; filename?: string; related?: boolean; contentDisposition?: string; cid?: string; contentId?: string };
+
+/**
+ * True for an image that mailparser reports as embedded in the HTML body
+ * (a signature logo / tracking pixel), not a real document. mailparser sets
+ * `related=true` on CID-referenced parts and uses an `inline` disposition for
+ * embedded content. Archiving these as invoices both pollutes the library and
+ * — because the attachment extractor runs first — shadows the directLink /
+ * thirdParty extractors so the email's genuine invoice link is never followed.
+ */
+function isInlineImage(att: AttachmentMeta): boolean {
+  if (!isImageAttachment(att)) return false;
+  return att.related === true || att.contentDisposition === 'inline';
+}
+
+/** An attachment that should make the attachment extractor claim the email. */
+function isArchivableAttachment(att: AttachmentMeta): boolean {
+  if (isPdfAttachment(att) || isOfdAttachment(att) || isZipAttachment(att)) return true;
+  return isImageAttachment(att) && !isInlineImage(att);
+}
+
 function basename(value: string): string {
   try {
     const parsed = new URL(value);
@@ -77,10 +98,6 @@ function looksLikeOfdItinerary(artifact: PdfArtifact): boolean {
   return looksLikeOfdItineraryText(text);
 }
 
-function subjectLooksLikeItinerary(subject: string | undefined): boolean {
-  return looksLikeItineraryText(subject);
-}
-
 function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
   const aNo = invoiceNoKey(a);
   const bNo = invoiceNoKey(b);
@@ -91,7 +108,7 @@ function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
   return aKey.length > 0 && aKey === bKey;
 }
 
-function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], log: Ctx['log'], subject: string | undefined): PdfArtifact[] {
+function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], log: Ctx['log']): PdfArtifact[] {
   const pdfs = artifacts.filter((item) => (item.format ?? 'pdf') === 'pdf');
   const out: PdfArtifact[] = [];
 
@@ -106,14 +123,13 @@ function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], log: Ctx['log'], su
       continue;
     }
 
+    // Only drop the OFD when a PDF in the SAME email is demonstrably the same
+    // document (matching 20-digit invoice number or normalized name). Dropping
+    // an OFD merely because *some* unrelated PDF (e.g. a supporting statement or
+    // a different invoice) is present loses a genuine invoice.
     const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf));
     if (duplicatePdf) {
       log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source}`);
-      continue;
-    }
-
-    if (pdfs.length > 0 && !subjectLooksLikeItinerary(subject)) {
-      log.debug(`Filtered likely duplicate OFD invoice ${artifact.source}; keeping PDF from same mail`);
       continue;
     }
 
@@ -127,7 +143,10 @@ const attachmentExtractor: Extractor = {
   name: 'attachment',
 
   canHandle(mail: ParsedMail): boolean {
-    return mail.attachments !== undefined && mail.attachments.length > 0;
+    // Only claim the email when it carries a real document attachment. An email
+    // whose only "attachments" are embedded signature logos must fall through to
+    // the directLink / thirdParty extractors so its real invoice link is followed.
+    return (mail.attachments ?? []).some(isArchivableAttachment);
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
@@ -219,6 +238,8 @@ const attachmentExtractor: Extractor = {
           ctx.log.warn(`Failed to extract ZIP ${att.filename}: ${err}`);
         }
       } else if (isImageAttachment(att)) {
+        // Skip signature logos / embedded images; only real image attachments archive.
+        if (isInlineImage(att)) continue;
         if (!admit(att.content.length, att.filename || 'unnamed-image')) continue;
         pdfs.push({
           data: att.content,
@@ -240,7 +261,7 @@ const attachmentExtractor: Extractor = {
       ctx.log.warn(`Archived ${pdfs.length} document(s); some attachments were skipped for exceeding the size cap`);
     }
 
-    return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log, mail.subject) };
+    return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log) };
   },
 };
 

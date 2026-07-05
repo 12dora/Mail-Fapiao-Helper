@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { handlers } from '../sites/registry.js';
 import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
-import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
+import { assertPublicUrl, assertPublicResponse, readCappedBuffer } from '../util/net.js';
 
 function cleanLink(url: string): string {
   let cleaned = url
@@ -99,9 +99,10 @@ function isProbeNoise(url: string): boolean {
 
 async function probePdfContentType(url: string, ctx: Ctx): Promise<boolean> {
   try {
-    // SSRF guard: reject non-http(s) and private/loopback targets before probing.
+    // SSRF guard: reject non-http(s) and private/loopback targets before probing,
+    // and re-check the final URL in case a public link redirected to an internal host.
     await assertPublicUrl(url);
-    const response = await ctx.http(url, { method: 'HEAD' });
+    const response = await assertPublicResponse(await ctx.http(url, { method: 'HEAD' }));
     const contentType = response.headers.get('content-type');
     return contentType?.includes('application/pdf') ?? false;
   } catch (err) {
@@ -120,7 +121,17 @@ async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer | null> {
     ctx.log.warn(`Blocked unsafe URL ${url}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
-  const response = await ctx.http(url);
+  let response: Response;
+  try {
+    response = await assertPublicResponse(await ctx.http(url));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.startsWith('blocked_url:')) {
+      ctx.log.warn(`Blocked unsafe redirect ${url}: ${msg}`);
+      return null;
+    }
+    throw err; // network_retry_failed etc. propagate to the caller's retry accounting
+  }
   if (!response.ok) {
     ctx.log.debug(`GET ${url} failed: ${response.status}`);
     return null;

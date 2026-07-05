@@ -19,16 +19,60 @@ function ipv4Blocked(ip: string): boolean {
   return false;
 }
 
+/** Expand any valid IPv6 literal (including `::` compression and an embedded
+ *  IPv4 tail) to its 16 raw bytes, or null if it cannot be parsed. */
+function ipv6ToBytes(ip: string): number[] | null {
+  let s = ip.toLowerCase();
+  const zone = s.indexOf('%');
+  if (zone >= 0) s = s.slice(0, zone); // drop scope id (fe80::1%eth0)
+  // Convert a trailing dotted-quad (::ffff:127.0.0.1, ::127.0.0.1) to two hex words.
+  const v4 = s.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (v4 && v4[1]) {
+    const octs = v4[1].split('.').map(Number);
+    if (octs.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    const hex = `${((octs[0]! << 8) | octs[1]!).toString(16)}:${((octs[2]! << 8) | octs[3]!).toString(16)}`;
+    s = s.slice(0, s.length - v4[1].length) + hex;
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : [];
+  let words: string[];
+  if (halves.length === 2) {
+    const missing = 8 - (head.length + tail.length);
+    if (missing < 0) return null;
+    words = [...head, ...Array<string>(missing).fill('0'), ...tail];
+  } else {
+    words = head;
+  }
+  if (words.length !== 8) return null;
+  const bytes: number[] = [];
+  for (const w of words) {
+    if (!/^[0-9a-f]{1,4}$/.test(w)) return null;
+    const n = parseInt(w, 16);
+    bytes.push((n >> 8) & 0xff, n & 0xff);
+  }
+  return bytes;
+}
+
 /** True if an IP literal falls in a loopback / private / link-local / reserved range. */
 export function isBlockedIp(ip: string): boolean {
   if (net.isIPv4(ip)) return ipv4Blocked(ip);
   if (net.isIPv6(ip)) {
-    const low = ip.toLowerCase();
-    if (low === '::1' || low === '::') return true;
-    const mapped = low.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (mapped && mapped[1]) return ipv4Blocked(mapped[1]);
-    if (low.startsWith('fe8') || low.startsWith('fe9') || low.startsWith('fea') || low.startsWith('feb')) return true; // fe80::/10 link-local
-    if (low.startsWith('fc') || low.startsWith('fd')) return true; // fc00::/7 unique-local
+    const bytes = ipv6ToBytes(ip);
+    if (!bytes) return true; // unparseable but net.isIPv6 accepted it -> block defensively
+    if (bytes.every((b) => b === 0)) return true;                                    // :: unspecified
+    if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return true;     // ::1 loopback (any form)
+    const first10Zero = bytes.slice(0, 10).every((b) => b === 0);
+    if (first10Zero && bytes[10] === 0xff && bytes[11] === 0xff) {
+      return ipv4Blocked(bytes.slice(12).join('.'));                                  // ::ffff:a.b.c.d (mapped, incl. hex form)
+    }
+    if (bytes.slice(0, 12).every((b) => b === 0)) {
+      return ipv4Blocked(bytes.slice(12).join('.'));                                  // ::a.b.c.d (IPv4-compatible)
+    }
+    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true;                 // fe80::/10 link-local
+    if ((bytes[0]! & 0xfe) === 0xfc) return true;                                      // fc00::/7 unique-local
+    if (bytes[0] === 0xff) return true;                                                // ff00::/8 multicast
     return false;
   }
   return true; // not a recognizable IP -> treat as blocked
@@ -69,6 +113,27 @@ export async function assertPublicUrl(urlStr: string): Promise<URL> {
 }
 
 /**
+ * Defense-in-depth against redirect-based SSRF: after a redirect-following fetch,
+ * reject when the FINAL resolved URL (`response.url`) landed on a private /
+ * loopback / link-local host that `assertPublicUrl` would have blocked up front.
+ * undici's `redirect:'manual'` yields an opaque, unreadable response, so per-hop
+ * validation isn't possible with global fetch; this at least guarantees the body
+ * is never consumed from an internal host reached via a public URL's redirect.
+ */
+export async function assertPublicResponse(response: Response): Promise<Response> {
+  const finalUrl = response.url;
+  if (finalUrl) {
+    try {
+      await assertPublicUrl(finalUrl);
+    } catch (err) {
+      await response.body?.cancel().catch(() => {});
+      throw err;
+    }
+  }
+  return response;
+}
+
+/**
  * Read a fetch Response body into a Buffer while enforcing a hard byte cap.
  * Short-circuits on an oversized Content-Length, then streams the body and
  * aborts once the running total exceeds the cap. Throws `response_too_large:*`.
@@ -78,6 +143,8 @@ export async function readCappedBuffer(response: Response, cap = MAX_DOC_BYTES):
   if (lenHeader) {
     const len = Number(lenHeader);
     if (Number.isFinite(len) && len > cap) {
+      // Release the socket instead of leaking the unread oversized body.
+      await response.body?.cancel().catch(() => {});
       throw new Error(`response_too_large:content_length:${len}`);
     }
   }

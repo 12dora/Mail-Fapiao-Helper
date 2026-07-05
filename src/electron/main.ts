@@ -246,16 +246,26 @@ function writeOcrRunConfig(concurrency: number): string {
   return tmpPath;
 }
 
+function sendToRenderer(channel: string, data: Record<string, unknown>): void {
+  // A CLI subprocess keeps streaming progress after the user closes the window
+  // (on macOS the app stays alive). Sending to a destroyed webContents throws
+  // "Object has been destroyed" from inside a stream 'data' listener and would
+  // crash the main process, so guard every send.
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  win.webContents.send(channel, data);
+}
+
 function sendProgress(data: Record<string, unknown>): void {
-  mainWindow?.webContents.send('mfh:fetch-progress', data);
+  sendToRenderer('mfh:fetch-progress', data);
 }
 
 function sendOperationProgress(data: Record<string, unknown>): void {
-  mainWindow?.webContents.send('mfh:operation-progress', data);
+  sendToRenderer('mfh:operation-progress', data);
 }
 
 function sendFileProgress(data: Record<string, unknown>): void {
-  mainWindow?.webContents.send('mfh:file-progress', data);
+  sendToRenderer('mfh:file-progress', data);
 }
 
 function readFakeConfigPaths(): { samples: string; invoices: string; pending: string; resultsCsv: string; organizedDir: string } {
@@ -369,7 +379,12 @@ function clearOcrResultsAndResetQueue(): void {
     'ocr',
     'ocr-pending.csv',
   );
-  fs.rmSync(target, { force: true });
+  // Containment: never delete outside the app's data dir even if a config value
+  // (ocr.resultsCsv) resolves elsewhere. Mirrors the developer-reset guard.
+  const dataBase = dataDir.endsWith(path.sep) ? dataDir : dataDir + path.sep;
+  if (target.startsWith(dataBase)) {
+    fs.rmSync(target, { force: true });
+  }
   if (!fs.existsSync(pendingCsv)) return;
 
   const text = fs.readFileSync(pendingCsv, 'utf8');

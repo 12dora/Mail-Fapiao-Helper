@@ -81,6 +81,13 @@ function listAllMailboxPaths(client: ImapFlow): Promise<string[]> {
     .filter((path) => path.length > 0));
 }
 
+/** Coerce a Date or date-string to a real, finite Date; otherwise undefined. */
+function validDate(d: string | Date | null | undefined): Date | undefined {
+  if (d == null) return undefined;
+  const date = d instanceof Date ? d : new Date(d);
+  return Number.isFinite(date.getTime()) ? date : undefined;
+}
+
 function countLinks(html: string | false | undefined, text: string | undefined): number {
   let n = 0;
   if (typeof html === 'string' && html.length > 0) {
@@ -132,24 +139,32 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
         }
         log.info(`IMAP SEARCH mailbox="${mailbox}": ${uids.length} matches`);
 
-        for await (const msg of client.fetch(uids, { source: true, envelope: true }, { uid: true })) {
+        for await (const msg of client.fetch(uids, { source: true, envelope: true, internalDate: true }, { uid: true })) {
           if (!msg.source) continue;
           const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
-          let parsed;
+          let parsed: Awaited<ReturnType<typeof simpleParser>> | undefined;
           try {
             parsed = await simpleParser(raw);
           } catch (e) {
-            log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}: ${(e as Error).message}`);
-            continue;
+            // Degrade instead of dropping: the raw bytes and envelope are still in
+            // hand, so cache the .eml (it can be reprocessed later) rather than
+            // losing a real invoice email to a MIME-parse failure.
+            log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}, falling back to envelope: ${(e as Error).message}`);
+            parsed = undefined;
           }
           const env = msg.envelope;
-          const from = parsed.from?.text
+          const from = parsed?.from?.text
             ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
-          const subject = parsed.subject ?? env?.subject ?? '';
-          const date = parsed.date ?? env?.date ?? new Date(0);
-          const messageId = parsed.messageId ?? env?.messageId ?? undefined;
-          const hasAttachment = (parsed.attachments?.length ?? 0) > 0;
-          const bodyLinkCount = countLinks(parsed.html, parsed.text);
+          const subject = parsed?.subject ?? env?.subject ?? '';
+          // Prefer a real header date for filtering; fall back to the server
+          // INTERNALDATE (which the SINCE search already matched) for storage so a
+          // missing/unparseable Date header can no longer collapse to epoch (1970)
+          // and get silently discarded by the window filter below.
+          const headerDate = validDate(parsed?.date) ?? validDate(env?.date);
+          const date = headerDate ?? validDate(msg.internalDate) ?? new Date(0);
+          const messageId = parsed?.messageId ?? env?.messageId ?? undefined;
+          const hasAttachment = (parsed?.attachments?.length ?? 0) > 0;
+          const bodyLinkCount = parsed ? countLinks(parsed.html, parsed.text) : 0;
           const excludeReason = nonInvoiceReason({ from, subject });
           if (excludeReason) {
             log.info(`exclude mailbox="${mailbox}" uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
@@ -158,12 +173,14 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
 
           // Defensive header-date filter: some servers return messages outside the
           // IMAP SEARCH window (mismatch between INTERNALDATE and the Date header).
-          if (date.getTime() < win.since.getTime()) {
-            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${date.toISOString()} < since=${win.since.toISOString()}`);
+          // Only applied when a real header date exists — an absent/invalid header
+          // date means we trust the server's INTERNALDATE match and keep the mail.
+          if (headerDate && headerDate.getTime() < win.since.getTime()) {
+            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${headerDate.toISOString()} < since=${win.since.toISOString()}`);
             continue;
           }
-          if (win.before && date.getTime() >= win.before.getTime()) {
-            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${date.toISOString()} >= before=${win.before.toISOString()}`);
+          if (headerDate && win.before && headerDate.getTime() >= win.before.getTime()) {
+            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${headerDate.toISOString()} >= before=${win.before.toISOString()}`);
             continue;
           }
 

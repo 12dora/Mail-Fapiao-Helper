@@ -1,6 +1,6 @@
 import AdmZip from 'adm-zip';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
-import { assertPublicUrl, readCappedBuffer, MAX_DOC_BYTES } from '../util/net.js';
+import { assertPublicUrl, assertPublicResponse, readCappedBuffer, MAX_DOC_BYTES } from '../util/net.js';
 
 const MAX_ZIP_ENTRIES = 512;
 
@@ -43,16 +43,17 @@ export function safeFilename(name: string, fallback: string): string {
 }
 
 export async function fetchBuffer(url: string, ctx: Ctx, referer?: string): Promise<{ data: Buffer; contentType: string; contentDisposition: string }> {
-  // SSRF guard: reject non-http(s) and private/loopback targets before fetching.
+  // SSRF guard: reject non-http(s) and private/loopback targets before fetching,
+  // then re-validate the final URL after any redirects.
   await assertPublicUrl(url);
-  const response = await ctx.http(url, {
+  const response = await assertPublicResponse(await ctx.http(url, {
     redirect: 'follow',
     headers: {
       Accept: 'application/pdf,application/zip,application/octet-stream,*/*',
       'User-Agent': 'Mozilla/5.0 Mail-Fapiao-Helper',
       ...(referer ? { Referer: referer } : {}),
     },
-  });
+  }));
 
   if (!response.ok) {
     throw new Error(`http_${response.status}`);
