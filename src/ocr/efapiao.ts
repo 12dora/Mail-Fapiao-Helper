@@ -224,6 +224,10 @@ async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceSta
   const deadline = Date.now() + cfg.ocr.serviceStartupMs;
   const stderr: Buffer[] = [];
   const onStderr = (chunk: Buffer) => stderr.push(chunk);
+  // Drain stdout too: if efapiao serve is chatty on stdout during startup and we
+  // never read it, the OS pipe buffer fills, the child blocks on write, and it
+  // never becomes healthy — a deadlock that only breaks at the startup timeout.
+  const onStdout = () => {};
   const onExit = (code: number | null) => {
     if (!state.ready) {
       state.failed = true;
@@ -231,12 +235,14 @@ async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceSta
     }
   };
   child.stderr?.on('data', onStderr);
+  child.stdout?.on('data', onStdout);
   child.on('exit', onExit);
 
   while (Date.now() < deadline) {
     if (await healthOk(cfg)) {
       state.ready = true;
       child.stderr?.off('data', onStderr);
+      child.stdout?.off('data', onStdout);
       child.off('exit', onExit);
       child.stdout?.destroy();
       child.stderr?.destroy();
@@ -336,10 +342,12 @@ async function runService(
     throw new Error(`efapiao_http_invalid_json:http_${res.status}:${compactError(text)}`);
   }
   if (res.ok) return payload;
+  // A non-2xx response is always an error. Keep status:'error' last so an error
+  // body that happens to carry status:'ok' cannot be misread as success.
   return {
-    status: 'error',
     ...(payload as Record<string, unknown>),
     ...nestedRecord(payload, 'detail'),
+    status: 'error',
   };
 }
 
@@ -480,7 +488,21 @@ function errorResult(payload: EfapiaoPayload, fallbackError: string, transport: 
 }
 
 async function parseViaCli(cfg: Config, data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<OcrResult> {
-  const result = await runBinary(cfg, data, meta);
+  let result: { code: number | null; stdout: string; stderr: string };
+  try {
+    result = await runBinary(cfg, data, meta);
+  } catch (err) {
+    // A spawn error or per-item timeout must degrade to a single failed result,
+    // not reject — otherwise Promise.all in the batch/concurrent paths discards
+    // every sibling document that parsed fine alongside it.
+    return {
+      status: 'error',
+      fields: {},
+      error: err instanceof Error ? err.message : String(err),
+      transport: 'cli',
+      raw: null,
+    };
+  }
   const rawJson = result.code === 0 ? result.stdout : result.stderr || result.stdout;
   let payload: EfapiaoPayload;
   try {

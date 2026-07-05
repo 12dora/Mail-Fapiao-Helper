@@ -39,6 +39,11 @@ export function classifyDocument(artifact: PdfArtifact, format: DocumentFormat):
       : { documentType: 'invoice' };
   }
 
+  // A flight e-ticket itinerary (航空运输电子客票行程单) is a reimbursable document
+  // and must reach OCR. It contains "行程单", which supportingTypeForPdf would
+  // otherwise classify as a non-reimbursable travel detail, so check it first.
+  if (/航空运输电子客票/.test(text)) return { documentType: 'itinerary' };
+
   const supportType = supportingTypeForPdf(text);
   if (supportType) return { documentType: 'supporting', supportType };
   return { documentType: 'invoice' };

@@ -5,7 +5,7 @@ import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
 import type { OcrResult } from './types.js';
-import { csvCell, parseCsvLine, readCsvRows } from '../util/csv.js';
+import { csvCell, parseCsv, readCsvRows } from '../util/csv.js';
 
 interface PendingRow {
   hash: string;
@@ -166,16 +166,18 @@ const RESULT_HEADER = [
 function migrateResultCsvIfNeeded(csvPath: string): void {
   if (!fs.existsSync(csvPath)) return;
   const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
-  const lines = text.split(/\r?\n/);
-  const oldHeader = parseCsvLine(lines[0] ?? '');
+  // Quote-aware parse: a cell whose quoted value contains an embedded newline
+  // (e.g. a seller/subject/error string) would otherwise be shredded by a naive
+  // newline split, corrupting every row after it in the migrated CSV.
+  const records = parseCsv(text);
+  const oldHeader = records[0] ?? [];
   if (oldHeader.join('\0') === RESULT_HEADER.join('\0')) return;
   if (!oldHeader.includes('hash') || !oldHeader.includes('status')) return;
 
   const tmpPath = `${csvPath}.tmp`;
   const out: string[] = ['﻿' + RESULT_HEADER.join(',') + '\n'];
-  for (const line of lines.slice(1)) {
-    if (!line) continue;
-    const cols = parseCsvLine(line);
+  for (let r = 1; r < records.length; r++) {
+    const cols = records[r] ?? [];
     const raw: Record<string, string> = {};
     for (let i = 0; i < oldHeader.length; i++) {
       const key = oldHeader[i];

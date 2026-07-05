@@ -124,19 +124,6 @@ function renderTargetDir(row: OcrResultRow, cfg: Config, organizedDir: string): 
   return path.join(organizedDir, safeRelativeDir(rendered));
 }
 
-function resolveConflict(targetPath: string): string {
-  if (!fs.existsSync(targetPath)) return targetPath;
-  const dir = path.dirname(targetPath);
-  const ext = path.extname(targetPath);
-  const base = path.basename(targetPath, ext);
-  let counter = 1;
-  while (true) {
-    const candidate = path.join(dir, `${base}-${counter}${ext}`);
-    if (!fs.existsSync(candidate)) return candidate;
-    counter++;
-  }
-}
-
 function sameFileContent(left: string, right: string): boolean {
   const leftStat = fs.statSync(left);
   const rightStat = fs.statSync(right);
@@ -146,12 +133,23 @@ function sameFileContent(left: string, right: string): boolean {
 
 function copyFileConflictSafe(src: string, dest: string): { finalPath: string; copied: boolean; reason: string } {
   ensureDir(path.dirname(dest));
-  if (fs.existsSync(dest) && sameFileContent(src, dest)) {
-    return { finalPath: dest, copied: false, reason: 'already_exists_same_content' };
+  const dir = path.dirname(dest);
+  const ext = path.extname(dest);
+  const base = path.basename(dest, ext);
+  // Walk dest, dest-1, dest-2 … : copy into the first free slot, but if any
+  // existing variant already holds this exact content, treat it as
+  // already-organized. Otherwise two distinct documents that render to the same
+  // name would spawn a brand-new -N duplicate on every re-run.
+  for (let counter = 0; ; counter++) {
+    const candidate = counter === 0 ? dest : path.join(dir, `${base}-${counter}${ext}`);
+    if (!fs.existsSync(candidate)) {
+      fs.copyFileSync(src, candidate, fs.constants.COPYFILE_EXCL);
+      return { finalPath: candidate, copied: true, reason: '' };
+    }
+    if (sameFileContent(src, candidate)) {
+      return { finalPath: candidate, copied: false, reason: 'already_exists_same_content' };
+    }
   }
-  const finalPath = resolveConflict(dest);
-  fs.copyFileSync(src, finalPath, fs.constants.COPYFILE_EXCL);
-  return { finalPath, copied: true, reason: '' };
 }
 
 function resultIsUsable(row: OcrResultRow): boolean {
@@ -219,7 +217,9 @@ export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { results
       continue;
     }
 
-    const src = path.join(invoicesDir, row.filename);
+    // basename() so a tampered/legacy CSV filename containing path segments can
+    // never make organize read a file outside the archive directory.
+    const src = path.join(invoicesDir, path.basename(row.filename));
     if (!fs.existsSync(src)) {
       summary.failed++;
       writeOrganizeAudit(auditCsv, row, '', 'failed', `missing_source:${src}`);

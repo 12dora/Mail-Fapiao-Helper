@@ -191,8 +191,12 @@ function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): vo
   const header = 'messageId,date,from,subject,reason\n';
   const messageId = mail.messageId || '';
   const date = mail.date?.toISOString() || '';
-  const from = (mail.from?.text || '').replace(/[\r\n]+/g, ' ');
-  const subject = (mail.subject || '').replace(/[\r\n]+/g, ' ');
+  // Store from/subject verbatim (csvCell quotes embedded newlines, parseCsv reads
+  // them back): stripping \r\n here would make the hash that pending/summary
+  // recomputes from these columns diverge from the pipeline's <hash>.eml filename
+  // for Message-Id-less mails, so their cached .eml could never be found again.
+  const from = mail.from?.text || '';
+  const subject = mail.subject || '';
   const row = { messageId, date, from, subject };
   const line = [messageId, date, from, subject, reason].map(csvCell).join(',') + '\n';
 
@@ -239,6 +243,9 @@ function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
           return response;
         }
         lastError = `http_${response.status}`;
+        // Drain the discarded error body so undici can release the socket back to
+        // the pool instead of leaking a connection on every retry.
+        await response.body?.cancel().catch(() => {});
         if (attempt === attempts) {
           throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
         }

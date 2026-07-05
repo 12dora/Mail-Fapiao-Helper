@@ -634,7 +634,11 @@ async function cmdRun(argv: string[]): Promise<number> {
     return 1;
   } finally {
     if (browserInstance) {
-      await browserInstance.close();
+      // Never let a browser-teardown failure turn a successful run into exit 1;
+      // the documents are already archived by this point.
+      await browserInstance.close().catch((err) => {
+        log.warn(`browser close failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
   }
 
@@ -822,6 +826,19 @@ async function main(): Promise<number> {
       process.stderr.write(ROOT_USAGE);
       return 2;
   }
+}
+
+// The GUI kills this CLI with SIGTERM (and users press Ctrl-C = SIGINT). A signal
+// terminates the process without running cmdOcr's `finally`, so an unref'd
+// `efapiao serve` child would be orphaned holding its port. Stop it explicitly.
+let shuttingDown = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopEfapiaoServices();
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  });
 }
 
 main().then(

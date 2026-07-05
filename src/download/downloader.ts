@@ -78,24 +78,33 @@ function finalizeNumbered(stagingPath: string, invoicesDir: string, ext: Artifac
   }
 }
 
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-function resolveConflict(targetPath: string): string {
-  if (!fs.existsSync(targetPath)) return targetPath;
-
+/**
+ * Move staging -> a named target, appending -1/-2 on collision. Uses an atomic
+ * exclusive create (COPYFILE_EXCL) rather than existsSync+rename so two workers
+ * racing on the same suggested name can never silently overwrite each other.
+ */
+function finalizeNamed(stagingPath: string, targetPath: string): string {
   const dir = path.dirname(targetPath);
   const ext = path.extname(targetPath);
   const base = path.basename(targetPath, ext);
-
-  let counter = 1;
+  let candidate = targetPath;
+  let counter = 0;
   while (true) {
-    const candidate = path.join(dir, `${base}-${counter}${ext}`);
-    if (!fs.existsSync(candidate)) return candidate;
-    counter++;
+    try {
+      fs.copyFileSync(stagingPath, candidate, fs.constants.COPYFILE_EXCL);
+      fs.unlinkSync(stagingPath);
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      counter++;
+      candidate = path.join(dir, `${base}-${counter}${ext}`);
+    }
+  }
+}
+
+function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
@@ -123,14 +132,13 @@ export async function downloadPdfs(
     log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
 
     const finalPath = opts.avoidConflictBeforeOcr === false
-      ? resolveConflict(path.join(invoicesDir, safeFilename(
+      ? finalizeNamed(stagingPath, path.join(invoicesDir, safeFilename(
           pdf.suggestedName || `${msgIdHash}-${i}.${ext}`,
           `${msgIdHash}-${i}.${ext}`,
           ext,
         )))
       : finalizeNumbered(stagingPath, invoicesDir, ext);
 
-    if (opts.avoidConflictBeforeOcr === false) fs.renameSync(stagingPath, finalPath);
     log.debug(`Finalized ${stagingPath} -> ${finalPath}`);
 
     results.push({

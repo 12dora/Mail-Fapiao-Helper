@@ -107,6 +107,20 @@ function optNumber(v: unknown, path: string, fallback: number): number {
   return asNumber(v, path);
 }
 
+/**
+ * Optional numeric field that tolerates a numeric string (the GUI may persist
+ * form inputs as strings) but still throws on genuinely non-numeric input rather
+ * than silently reverting to the default and masking a misconfiguration.
+ */
+function optNumericLike(v: unknown, path: string, fallback: number): number {
+  if (v === undefined || v === null || v === '') return fallback;
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  if (!Number.isFinite(n)) {
+    throw new Error(`config.${path} must be a number`);
+  }
+  return n;
+}
+
 function optDateString(v: unknown, path: string): string | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   if (typeof v !== 'string') {
@@ -232,25 +246,24 @@ export function loadConfig(path: string): Config {
       serviceHost: typeof (raw as { ocr?: { serviceHost?: unknown } }).ocr?.serviceHost === 'string'
         ? ((raw as { ocr: { serviceHost: string } }).ocr.serviceHost)
         : '127.0.0.1',
-      servicePort: typeof (raw as { ocr?: { servicePort?: unknown } }).ocr?.servicePort === 'number'
-        ? ((raw as { ocr: { servicePort: number } }).ocr.servicePort)
-        : 8000,
-      serviceWorkers: typeof (raw as { ocr?: { serviceWorkers?: unknown } }).ocr?.serviceWorkers === 'number'
-        ? ((raw as { ocr: { serviceWorkers: number } }).ocr.serviceWorkers)
-        : 1,
-      serviceStartupMs: typeof (raw as { ocr?: { serviceStartupMs?: unknown } }).ocr?.serviceStartupMs === 'number'
-        ? ((raw as { ocr: { serviceStartupMs: number } }).ocr.serviceStartupMs)
-        : 30000,
-      batchSize: typeof (raw as { ocr?: { batchSize?: unknown } }).ocr?.batchSize === 'number'
-        ? ((raw as { ocr: { batchSize: number } }).ocr.batchSize)
-        : 16,
-      timeoutMs: typeof (raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs === 'number'
-        ? ((raw as { ocr: { timeoutMs: number } }).ocr.timeoutMs)
-        : 120000,
+      servicePort: optNumericLike((raw as { ocr?: { servicePort?: unknown } }).ocr?.servicePort, 'ocr.servicePort', 8000),
+      serviceWorkers: optNumericLike((raw as { ocr?: { serviceWorkers?: unknown } }).ocr?.serviceWorkers, 'ocr.serviceWorkers', 1),
+      serviceStartupMs: optNumericLike((raw as { ocr?: { serviceStartupMs?: unknown } }).ocr?.serviceStartupMs, 'ocr.serviceStartupMs', 30000),
+      batchSize: optNumericLike((raw as { ocr?: { batchSize?: unknown } }).ocr?.batchSize, 'ocr.batchSize', 16),
+      timeoutMs: optNumericLike((raw as { ocr?: { timeoutMs?: unknown } }).ocr?.timeoutMs, 'ocr.timeoutMs', 120000),
       resultsCsv: typeof (raw as { ocr?: { resultsCsv?: unknown } }).ocr?.resultsCsv === 'string'
         ? ((raw as { ocr: { resultsCsv: string } }).ocr.resultsCsv)
         : './invoices/ocr/ocr-results.csv',
-      credentials: (requireField(raw, 'ocr.credentials') as Record<string, string>),
+      credentials: (() => {
+        // Optional everywhere it is consumed (cfg.ocr.credentials?.x), so default
+        // to {} rather than hard-failing a config that simply omits the block.
+        const v = (raw as { ocr?: { credentials?: unknown } }).ocr?.credentials;
+        if (v === undefined || v === null) return {};
+        if (typeof v !== 'object' || Array.isArray(v)) {
+          throw new Error('config.ocr.credentials must be an object');
+        }
+        return v as Record<string, string>;
+      })(),
     },
     llm: {
       enabled: asBool(requireField(raw, 'llm.enabled'), 'llm.enabled'),
