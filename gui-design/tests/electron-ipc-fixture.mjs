@@ -15,10 +15,20 @@
  */
 
 import { _electron as electron } from 'playwright';
-import { copyFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { assertFreshBuild, closeElectronApp, fail, repoRoot, runSuite, useTempDir, withCleanup } from './_shared.mjs';
+import {
+  NO_GUI_E2E_ENV,
+  assertFreshBuild,
+  closeElectronApp,
+  electronTestEnv,
+  fail,
+  repoRoot,
+  runSuite,
+  useTempDir,
+  withCleanup,
+} from './_shared.mjs';
 
 /* A fixed local instant. Everything the UI derives from "now" is computed from
    this constant with the same algorithm the renderer uses, so the suite is
@@ -134,6 +144,20 @@ async function main() {
     await mkdir(config.paths.invoices, { recursive: true });
     await mkdir(config.paths.pending, { recursive: true });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    const manualRollbackSource = join(tmp, 'manual-rollback-source.pdf');
+    await writeFile(manualRollbackSource, '%PDF-1.4\n%MANUAL-ROLLBACK\n%EOF\n');
+
+    const launchEnv = electronTestEnv({
+      MFH_CONFIG_PATH: configPath,
+      MFH_STATE_PATH: statePath,
+      MFH_E2E_FAKE_CLI: '1',
+      MFH_TEST_FAULT_TOKEN: 'mail-fapiao-helper-test-faults',
+      MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE: '1',
+      MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV: '1',
+      MFH_TEST_FAIL_CSV_TRUNCATE: '1',
+      MFH_TEST_MANUAL_ARCHIVE_SOURCES: manualRollbackSource,
+    });
+    if (launchEnv[NO_GUI_E2E_ENV] !== '1') fail('Electron IPC fixture must launch with MFH_E2E_NO_GUI=1');
 
     const app = await scope.use(
       'Electron 应用',
@@ -141,12 +165,7 @@ async function main() {
         cwd: repoRoot,
         args: ['.', `--user-data-dir=${userDataPath}`],
         timeout: LAUNCH_TIMEOUT_MS,
-        env: {
-          ...process.env,
-          MFH_CONFIG_PATH: configPath,
-          MFH_STATE_PATH: statePath,
-          MFH_E2E_FAKE_CLI: '1',
-        },
+        env: launchEnv,
       }),
       // app.close() only reaches the top process (and can wedge); the CLI/OCR
       // children it spawned must not survive an aborted suite either.
@@ -155,6 +174,9 @@ async function main() {
     );
 
     const page = await app.firstWindow({ timeout: LAUNCH_TIMEOUT_MS });
+    const browserWindow = await app.browserWindow(page);
+    const visible = await browserWindow.evaluate((win) => win.isVisible());
+    if (visible) fail('MFH_E2E_NO_GUI=1 should keep the Electron BrowserWindow hidden');
     await page.setViewportSize({ width: 1180, height: 780 });
     await page.waitForLoadState('domcontentloaded');
 
@@ -287,6 +309,8 @@ async function main() {
     await page.getByRole('button', { name: '打开归档目录' }).first().click();
     await expectToast(page, '已打开文件夹');
     await dismissToasts(page);
+    const noGuiOpenDir = await page.evaluate((target) => window.mfhBridge.openPath({ path: target }), config.paths.invoices);
+    if (!noGuiOpenDir?.ok) fail(`no-GUI open-path should return success without desktop side effects: ${JSON.stringify(noGuiOpenDir)}`);
     const fileProgress = await page.locator('[data-file-bar]').first().evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (fileProgress !== '100%') fail(`获取发票文件后进度应为 100%，实际为 ${fileProgress}`);
     const afterFiles = await page.evaluate(() => ({
@@ -324,6 +348,36 @@ async function main() {
     if (afterOcr.recognized !== '2' || afterOcr.historyCards > 6) {
       fail(`识别后统计不正确：${JSON.stringify(afterOcr)}`);
     }
+
+    const blockedJournalDir = join(config.paths.invoices, '.journal');
+    const blockedJournalPath = join(blockedJournalDir, 'electron-organize-blocked.json');
+    const blockedUnproven = join(config.paths.invoices, '0099.pdf');
+    await mkdir(blockedJournalDir, { recursive: true });
+    await writeFile(blockedUnproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
+    await writeFile(blockedJournalPath, `${JSON.stringify({
+      txId: 'electron-organize-blocked',
+      pid: 99999999,
+      startedAtMs: Date.now(),
+      stage: 'prepared',
+      files: [blockedUnproven],
+      csv: [
+        { path: config.output.csv, baseLength: 0 },
+        { path: join(config.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
+      ],
+    })}\n`);
+    const blockedOrganize = await page.evaluate(async () => window.mfhBridge.organize({ applyRename: false }));
+    if (blockedOrganize?.ok !== false || blockedOrganize?.code !== 'archive_recovery_blocked') {
+      fail(`organize IPC should block on unsafe archive recovery: ${JSON.stringify(blockedOrganize)}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(blockedOrganize, 'stdout') || Object.prototype.hasOwnProperty.call(blockedOrganize, 'stderr')) {
+      fail(`blocked organize IPC leaked raw subprocess fields: ${JSON.stringify(Object.keys(blockedOrganize))}`);
+    }
+    if (String(blockedOrganize.message ?? '').includes(config.paths.invoices) || String(blockedOrganize.detail ?? '').includes(config.paths.invoices)) {
+      fail(`blocked organize IPC leaked raw archive path: ${JSON.stringify(blockedOrganize)}`);
+    }
+    await rm(blockedJournalPath, { force: true });
+    await rm(blockedUnproven, { force: true });
+    await dismissToasts(page);
 
     /* COPY-01: no IPC reply may carry raw subprocess output. The renderer only
        gets a structured code, a sanitised detail and a diagnostics reference;
@@ -404,6 +458,8 @@ async function main() {
     await activeMain(page, '[data-library-rows]').getByRole('button', { name: '打开' }).first().click();
     await expectToast(page, '已打开文件位置');
     await dismissToasts(page);
+    const noGuiReveal = await page.evaluate((target) => window.mfhBridge.openPath({ path: target, reveal: true }), join(config.paths.invoices, '0001.pdf'));
+    if (!noGuiReveal?.ok) fail(`no-GUI reveal path should return success without desktop side effects: ${JSON.stringify(noGuiReveal)}`);
     await page.getByRole('button', { name: '打开归档目录' }).first().click();
     await expectToast(page, '已打开文件夹');
     await dismissToasts(page);
@@ -431,9 +487,33 @@ async function main() {
     if (manualGroups !== 0) fail(`「手动归档」Tab 不应包含 refresh_link 分组，实际 ${manualGroups} 组`);
     await activeMain(page, '[data-pending-tab="all"]').click();
 
+    const pendingHash = await activeMain(page, '[data-action="pending-primary"]').first().getAttribute('data-hash');
     await activeMain(page, '[data-action="pending-primary"]').first().click();
     await page.locator('.toast').first().waitFor({ state: 'visible', timeout: 8000 });
     await dismissToasts(page);
+    const noGuiPendingOpen = await page.evaluate((hash) => window.mfhBridge.pendingRefreshLink({ hash }), pendingHash);
+    if (!noGuiPendingOpen?.ok || !/^pending_mail_(opened|revealed|missing_local_copy)$/.test(noGuiPendingOpen.code || '')) {
+      fail(`no-GUI pending refresh/open path should return deterministic success: ${JSON.stringify(noGuiPendingOpen)}`);
+    }
+    const ledgerBeforeManualRollback = existsSync(config.output.csv) ? await readFile(config.output.csv, 'utf8') : undefined;
+    const ocrPendingPath = join(config.paths.invoices, 'ocr', 'ocr-pending.csv');
+    const ocrBeforeManualRollback = existsSync(ocrPendingPath) ? await readFile(ocrPendingPath, 'utf8') : undefined;
+    const manualBlocked = await page.evaluate(async (hash) => window.mfhBridge.pendingManualArchive({ hash }), pendingHash);
+    if (manualBlocked?.ok !== false || manualBlocked?.code !== 'archive_recovery_blocked') {
+      fail(`manual archive rollback failure should map to sanitized recovery-blocked response: ${JSON.stringify(manualBlocked)}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(manualBlocked, 'stdout') || Object.prototype.hasOwnProperty.call(manualBlocked, 'stderr')) {
+      fail(`manual archive blocked response leaked raw subprocess fields: ${JSON.stringify(Object.keys(manualBlocked))}`);
+    }
+    const manualText = `${manualBlocked.message ?? ''}\n${manualBlocked.detail ?? ''}`;
+    if (manualText.includes(config.paths.invoices) || manualText.includes(manualRollbackSource) || manualText.includes('forced_after_manual_queue_csv_failure')) {
+      fail(`manual archive blocked response leaked raw path/error details: ${JSON.stringify(manualBlocked)}`);
+    }
+    if (ledgerBeforeManualRollback === undefined) await rm(config.output.csv, { force: true });
+    else await writeFile(config.output.csv, ledgerBeforeManualRollback);
+    if (ocrBeforeManualRollback === undefined) await rm(ocrPendingPath, { force: true });
+    else await writeFile(ocrPendingPath, ocrBeforeManualRollback);
+    await rm(join(config.paths.invoices, '.journal'), { recursive: true, force: true });
     await page.getByRole('button', { name: '打开待确认文件夹' }).first().click();
     await expectToast(page, '已打开文件夹');
     await dismissToasts(page);

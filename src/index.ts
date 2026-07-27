@@ -25,6 +25,7 @@ import {
 } from './util/dataDirLock.js';
 import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
 import { msgIdHash } from './util/hash.js';
+import { ArchiveRecoveryError, assertArchiveTransactionsRecovered } from './download/archiveJournal.js';
 import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
 import { organizeFromOcrResults } from './rename/rename.js';
@@ -777,6 +778,13 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   if (!acquireCommandLock('pipeline', { statePath: opts.statePath, configPath: opts.configPath })) return 2;
 
+  try {
+    assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 1;
+  }
+
   const statePath = resolve(opts.statePath);
   let store: StateStore;
   try {
@@ -907,9 +915,9 @@ async function cmdRun(argv: string[]): Promise<number> {
         try {
           await handleEml(emlPath);
         } catch (err) {
-          // Iron rule: a state.json write failure is one of the only two
-          // conditions that must abort the whole run.
-          if (err instanceof StateWriteError) {
+          // Iron rule: state writes and unsafe archive recovery failures must
+          // abort the whole run before any later archive/CSV mutation proceeds.
+          if (err instanceof StateWriteError || err instanceof ArchiveRecoveryError) {
             aborted = true;
             throw err;
           }
@@ -1030,13 +1038,19 @@ async function cmdOrganize(argv: string[]): Promise<number> {
 
   if (!acquireCommandLock('organize', { configPath: parsed.configPath })) return 2;
 
-  const summary = organizeFromOcrResults(cfg, log, {
-    resultsCsv: parsed.resultsCsv,
-    outDir: parsed.outDir,
-    applyRename: parsed.applyRename,
-  });
-  log.info(`Organize complete: scanned=${summary.scanned}, copied=${summary.copied}, skipped=${summary.skipped}, failed=${summary.failed}`);
-  return summary.failed > 0 ? 1 : 0;
+  try {
+    assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
+    const summary = organizeFromOcrResults(cfg, log, {
+      resultsCsv: parsed.resultsCsv,
+      outDir: parsed.outDir,
+      applyRename: parsed.applyRename,
+    });
+    log.info(`Organize complete: scanned=${summary.scanned}, copied=${summary.copied}, skipped=${summary.skipped}, failed=${summary.failed}`);
+    return summary.failed > 0 ? 1 : 0;
+  } catch (e) {
+    log.error((e as Error).message);
+    return 1;
+  }
 }
 
 /**
@@ -1130,6 +1144,7 @@ async function cmdOcr(argv: string[]): Promise<number> {
       return 0;
     }
 
+    assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
     writeOcrRuntimePid(cfg);
     const summary = await runOcrPending(cfg, log, {
       force: parsed.force,

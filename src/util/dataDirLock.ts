@@ -248,6 +248,12 @@ function sameLock(a: DataDirLockPayload | undefined, b: DataDirLockPayload | und
   return a.pid === b.pid && a.jobId === b.jobId && a.startedAt === b.startedAt;
 }
 
+function sameObservedLock(a: LockSnapshot, b: LockSnapshot): boolean {
+  if (!a.present || !b.present) return a.present === b.present;
+  if (a.payload || b.payload) return sameLock(a.payload, b.payload);
+  return a.raw !== undefined && b.raw !== undefined && a.raw === b.raw;
+}
+
 /**
  * 继承租约判定：父进程通过 `MFH_LOCK_TOKEN` 下发凭证（见 `leaseEnvForChild()`），
  * 只有环境变量 token 与磁盘锁文件里的 token 一致才算继承。
@@ -332,12 +338,18 @@ function reclaimStaleLock(lockPath: string, observed: LockSnapshot, token: strin
   }
 
   const moved = readLockSnapshot(graveyard);
-  if (observed.payload && !sameLock(moved.payload, observed.payload)) {
+  if (!sameObservedLock(observed, moved)) {
     // 搬走的不是我们判定为陈旧的那一把（中途换了持有者）：原样放回去，并且只在
     // 锁路径仍然空闲时放回，绝不覆盖别人新建的锁。
     if (moved.raw !== undefined) {
       // 只在锁路径仍然空闲时放回（link 语义：已存在就 EEXIST），绝不覆盖别人新建的锁。
       createLockExclusive(lockPath, moved.raw, `restore-${token}`);
+    } else {
+      try {
+        renameSync(graveyard, lockPath);
+      } catch {
+        // best-effort：无法还原时宁可让获取失败重试，也不能把未知锁当成已回收。
+      }
     }
     try {
       rmSync(graveyard, { force: true });
