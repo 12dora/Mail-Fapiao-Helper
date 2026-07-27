@@ -34,7 +34,7 @@
                 </div>
                 <div class="stat">
                     <div class="stat__label">未识别</div>
-                    <div class="stat__value" style="color: var(--err);" data-dash="failed">0</div>
+                    <div class="stat__value" style="color: var(--err-text);" data-dash="failed">0</div>
                     <div class="stat__delta is-down">暂未识别</div>
                 </div>
                 <div class="stat">
@@ -115,7 +115,7 @@
 
                     <div class="row gap-12 mt-12 mono small muted">
                         <span>命中 <strong class="strong" id="m-matched">0</strong></span>
-                        <span>已存 <strong style="color: var(--ok);" id="m-saved">0</strong></span>
+                        <span>已存 <strong style="color: var(--ok-text);" id="m-saved">0</strong></span>
                         <span>跳过 <strong class="muted" id="m-skip">0</strong></span>
                         <div style="flex: 1;"></div>
                         <span id="run-status" role="status" aria-live="polite">
@@ -178,7 +178,7 @@
                         <div class="row gap-12 mt-12 mono small muted">
                             <span>处理 <strong class="strong" data-file-processed>0</strong></span>
                             <span>跳过 <strong class="strong" data-file-skipped>0</strong></span>
-                            <span>失败 <strong style="color: var(--err);" data-file-failed>0</strong></span>
+                            <span>失败 <strong style="color: var(--err-text);" data-file-failed>0</strong></span>
                         </div>
                     </div>
                 </div>
@@ -225,7 +225,7 @@
                         <div class="row gap-12 mt-12 mono small muted">
                             <span>成功 <strong class="strong" data-ocr-parsed>0</strong></span>
                             <span>跳过 <strong class="strong" data-ocr-skipped>0</strong></span>
-                            <span>失败 <strong style="color: var(--err);" data-ocr-failed>0</strong></span>
+                            <span>失败 <strong style="color: var(--err-text);" data-ocr-failed>0</strong></span>
                         </div>
                     </div>
                 </div>
@@ -566,6 +566,10 @@
         runBtn.dataset.busy = '';
         runBtn.disabled = false;
     }
+
+    // Lets shell.js re-apply the date-range validity after an op-state unlock,
+    // so releasing a mutex never enables a run with an invalid range.
+    window.MFH_DASHBOARD_REFRESH_RUN_BTN = updatePreview;
 
     rangePreset.addEventListener('change', () => {
         if (rangePreset.value !== 'custom') setRange(rangePreset.value);
