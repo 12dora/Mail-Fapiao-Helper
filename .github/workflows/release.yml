@@ -7,31 +7,146 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag, for example v0.1.0'
+        description: '已存在的发布 tag，例如 v0.1.0（必须已推送，且 semver 与 package.json 一致）'
         required: true
         type: string
 
+# Least privilege by default; only the publishing job gets write access.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  # Never let two runs race to publish the same tag.
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  # CODE-05B: resolve the requested tag to one immutable commit SHA *before*
+  # anything is built, and refuse the run if the tag does not already exist,
+  # already has a published release, or disagrees with package.json.
+  resolve:
+    name: Resolve and verify release ref
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      sha: ${{ steps.ref.outputs.sha }}
+      version: ${{ steps.ref.outputs.version }}
+    steps:
+      - name: Resolve tag to an immutable commit
+        id: ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+              echo "::error::Release runs must be triggered by a tag ref, got ref_type=${GITHUB_REF_TYPE}"
+              exit 1
+            fi
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if [ -z "${TAG}" ]; then
+            echo "::error::No release tag was provided"
+            exit 1
+          fi
+
+          # Strict semver, v-prefixed. Rejects branch names, arbitrary refs and
+          # anything that cannot be compared against package.json.
+          if ! printf '%s' "${TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '${TAG}' is not a v-prefixed semver tag (expected e.g. v0.1.0)"
+            exit 1
+          fi
+
+          # The tag must already exist on the remote. A dispatch can therefore
+          # never invent a tag, and can never attach binaries to a ref that does
+          # not resolve to real, pushed source.
+          if ! REF_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" 2>/dev/null)"; then
+            echo "::error::Tag '${TAG}' does not exist in ${GITHUB_REPOSITORY}. Push the tag first."
+            exit 1
+          fi
+
+          OBJ_TYPE="$(printf '%s' "${REF_JSON}" | jq -r '.object.type')"
+          OBJ_SHA="$(printf '%s' "${REF_JSON}" | jq -r '.object.sha')"
+          if [ "${OBJ_TYPE}" = "tag" ]; then
+            # Annotated tag: dereference to the commit it points at.
+            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJ_SHA}" --jq '.object.sha')"
+          else
+            SHA="${OBJ_SHA}"
+          fi
+
+          if ! printf '%s' "${SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Could not resolve tag '${TAG}' to a commit SHA (got '${SHA}')"
+            exit 1
+          fi
+
+          # On a tag push the resolved tag must still point at the commit this
+          # run was created for; otherwise the tag moved and the run is stale.
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${SHA}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Tag '${TAG}' now points at ${SHA} but this run was triggered on ${GITHUB_SHA}; the tag was moved."
+            exit 1
+          fi
+
+          # A tag that already produced a published release is treated as
+          # immutable: republishing would silently swap the binaries users have.
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::A release already exists for '${TAG}'. Delete it deliberately, or publish a new tag."
+            exit 1
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "sha=${SHA}"
+            echo "version=${TAG#v}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved ${TAG} -> ${SHA}"
+
+      - name: Checkout resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.sha }}
+          persist-credentials: false
+
+      - name: Enforce tag/package version agreement
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "${PKG_VERSION}" != "${{ steps.ref.outputs.version }}" ]; then
+            echo "::error::Tag ${{ steps.ref.outputs.tag }} implies version ${{ steps.ref.outputs.version }} but package.json at ${{ steps.ref.outputs.sha }} says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "package.json version ${PKG_VERSION} matches ${{ steps.ref.outputs.tag }}"
+
   build:
     name: Build ${{ matrix.name }}
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: macOS arm64
+            platform: mac
             os: macos-15
-            command: npm run dist:mac -- --publish never
           - name: Windows x64
+            platform: win
             os: windows-2025
-            command: npm run dist:win -- --publish never
 
     steps:
-      - name: Checkout
+      # Every matrix job builds the exact same resolved commit, not whatever
+      # the workflow file happened to be dispatched from.
+      - name: Checkout resolved commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -42,41 +157,112 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
 
-      - name: Build package
-        run: ${{ matrix.command }}
+      # CODE-01: the release gate. `npm test` = build + typecheck + test:cli +
+      # test:electron, each guarded by a pretest:* preflight that fails hard when
+      # a runtime prerequisite is missing.
+      - name: Test
+        run: npm test
+
+      - name: Prepare Apple API key
+        if: matrix.platform == 'mac'
+        shell: bash
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_API_KEY_BASE64}" ]; then
+            KEY_DIR="${RUNNER_TEMP}/apple-api-key"
+            mkdir -p "${KEY_DIR}"
+            printf '%s' "${APPLE_API_KEY_BASE64}" | base64 --decode > "${KEY_DIR}/AuthKey.p8"
+            chmod 600 "${KEY_DIR}/AuthKey.p8"
+            echo "APPLE_API_KEY=${KEY_DIR}/AuthKey.p8" >> "$GITHUB_ENV"
+            echo "Apple API key staged for notarization"
+          else
+            echo "No APPLE_API_KEY_BASE64 secret; notarization will fall back to APPLE_ID credentials if present"
+          fi
+
+      # CODE-05A: signing is driven entirely by secrets. When they are absent the
+      # build does not fail — it degrades to an explicitly labelled unsigned
+      # development build whose artifacts carry an `-unsigned` suffix.
+      - name: Build package
+        shell: bash
+        env:
+          MFH_RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          MFH_RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS Developer ID certificate (.p12, base64) — mac job only.
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.MACOS_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          # Notarization (App Store Connect API key preferred, Apple ID fallback).
+          APPLE_API_KEY_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ matrix.platform == 'mac' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+          # Windows Authenticode certificate (.pfx, base64) — win job only.
+          # Deliberately NOT called CSC_LINK: electron-builder would otherwise
+          # try to sign the Windows build with the macOS certificate.
+          WIN_CSC_LINK: ${{ matrix.platform == 'win' && secrets.WINDOWS_CERTIFICATE_PFX || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ matrix.platform == 'win' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+        run: npm run dist:${{ matrix.platform }}
+
+      # CODE-04 / CODE-06: no test code, no dev fake backend, and no
+      # cross-platform executables may ship inside a release package.
+      - name: Verify packaged artifacts
+        run: npm run verify:artifacts -- --platform ${{ matrix.platform }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.name }}
+          name: release-${{ matrix.platform }}
           path: |
             release/*.dmg
             release/*.zip
             release/*.exe
             release/*.blockmap
             release/latest*.yml
+            release/build-info-*.json
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Resolve tag
-        id: tag
+      - name: Checkout resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      # Re-check immutability at publish time: if the tag moved while the matrix
+      # was building, the binaries no longer match the tag and we must not ship.
+      - name: Re-verify tag still points at the built commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
+          EXPECTED="${{ needs.resolve.outputs.sha }}"
+          REF_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")"
+          OBJ_TYPE="$(printf '%s' "${REF_JSON}" | jq -r '.object.type')"
+          OBJ_SHA="$(printf '%s' "${REF_JSON}" | jq -r '.object.sha')"
+          if [ "${OBJ_TYPE}" = "tag" ]; then
+            CURRENT="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJ_SHA}" --jq '.object.sha')"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            CURRENT="${OBJ_SHA}"
           fi
+          if [ "${CURRENT}" != "${EXPECTED}" ]; then
+            echo "::error::Tag ${TAG} moved from ${EXPECTED} to ${CURRENT} during the build; refusing to publish."
+            exit 1
+          fi
+          echo "${TAG} still points at ${EXPECTED}"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -85,15 +271,34 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      # Fails if any build-info is missing or disagrees with the resolved ref,
+      # so the published notes can never overstate provenance or signing status.
+      - name: Compose release notes
+        run: |
+          node scripts/compose-release-notes.mjs \
+            --dir release-artifacts \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --sha "${{ needs.resolve.outputs.sha }}" \
+            --version "${{ needs.resolve.outputs.version }}" \
+            --out release-notes.md
+          cat release-notes.md
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: 发票助手 ${{ steps.tag.outputs.tag }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.sha }}
+          name: 发票助手 ${{ needs.resolve.outputs.tag }}
+          body_path: release-notes.md
           draft: false
           prerelease: false
-          files: release-artifacts/*
+          fail_on_unmatched_files: true
+          files: |
+            release-artifacts/*.dmg
+            release-artifacts/*.zip
+            release-artifacts/*.exe
+            release-artifacts/*.blockmap
+            release-artifacts/latest*.yml
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
