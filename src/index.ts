@@ -15,6 +15,13 @@ import {
   uniqueTempPath,
   type State,
 } from './state.js';
+import {
+  acquireDataDirLock,
+  resolveDataDir,
+  type DataDirHints,
+  type DataDirLease,
+  type DataOpKind,
+} from './util/dataDirLock.js';
 import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
 import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
@@ -313,6 +320,47 @@ function requireValue(argv: string[], i: number, flag: string): string {
   return v;
 }
 
+// ---------------------------------------------------------------------------
+// 数据目录跨进程锁（APP-05）
+// ---------------------------------------------------------------------------
+
+/**
+ * 本进程持有的数据目录租约。GUI 侧由 `OperationCoordinator` 持有同一把锁，
+ * 两侧共用 `src/util/dataDirLock.ts` 描述的同一套锁文件协议，因此
+ * 「GUI 挡住 CLI」「CLI 挡住 GUI」「两个 CLI 实例互斥」三条都成立。
+ */
+let activeDataDirLease: DataDirLease | undefined;
+
+/**
+ * 会写数据目录的命令入口统一走这里。拿不到锁时只打印中文提示，由调用方返回
+ * 退出码 2，不抛栈。只读命令与 `--dry-run` 不需要调用本函数。
+ */
+function acquireCommandLock(kind: DataOpKind, hints: DataDirHints): boolean {
+  const dataDir = resolveDataDir(hints);
+  const result = acquireDataDirLock(dataDir, kind);
+  if (!result.ok) {
+    log.error(result.message);
+    return false;
+  }
+  activeDataDirLease = result.lease;
+  if (result.lease.inherited) {
+    log.debug(`data dir lock inherited from parent process (${result.lease.lockPath})`);
+  }
+  return true;
+}
+
+/** 幂等释放；正常结束、异常与信号退出三条路径都会走到。 */
+function releaseDataDirLock(): void {
+  const lease = activeDataDirLease;
+  activeDataDirLease = undefined;
+  if (!lease) return;
+  try {
+    lease.release();
+  } catch {
+    // best-effort：释放失败会留下一把锁，下次由陈旧回收清理。
+  }
+}
+
 const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
 
 function ensureIndexCsv(path: string): void {
@@ -407,6 +455,8 @@ async function cmdFetch(argv: string[]): Promise<number> {
     log.error(`尚未配置邮箱：请先在设置中填写 ${missingCredentials.join('、')} 后再抓取邮件。`);
     return 2;
   }
+  // --dry-run 不写数据目录，因此不占锁。
+  if (!opts.dryRun && !acquireCommandLock('fetch', { statePath: opts.statePath, configPath: opts.configPath })) return 2;
 
   const outDir = resolve(opts.outDir ?? cfg.paths.samples);
   const indexCsv = join(outDir, 'INDEX.csv');
@@ -684,6 +734,7 @@ async function cmdRebuildState(argv: string[]): Promise<number> {
       log.info(`[dry-run] would rebuild ${statePath}: fetched=${new Set(rebuilt.fetchedHashes).size} processed=${new Set(rebuilt.processedHashes).size}`);
       return 0;
     }
+    if (!acquireCommandLock('pipeline', { statePath: parsed.statePath, configPath: parsed.configPath })) return 2;
     const store = StateStore.open(statePath);
     if (store.quarantine) log.warn(store.quarantine.message);
     // 已处理身份只做并集：重建不应让历史上已处理的邮件重新进入处理队列。
@@ -721,6 +772,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     log.error((e as Error).message);
     return 2;
   }
+
+  if (!acquireCommandLock('pipeline', { statePath: opts.statePath, configPath: opts.configPath })) return 2;
 
   const statePath = resolve(opts.statePath);
   let store: StateStore;
@@ -973,6 +1026,8 @@ async function cmdOrganize(argv: string[]): Promise<number> {
     return 2;
   }
 
+  if (!acquireCommandLock('organize', { configPath: parsed.configPath })) return 2;
+
   const summary = organizeFromOcrResults(cfg, log, {
     resultsCsv: parsed.resultsCsv,
     outDir: parsed.outDir,
@@ -1042,6 +1097,9 @@ async function cmdOcr(argv: string[]): Promise<number> {
     return 2;
   }
 
+  // `ocr summary` 只读队列与结果，不占锁；`ocr run` 会写结果 CSV 与队列。
+  if (parsed.command === 'run' && !acquireCommandLock('ocr', { configPath: parsed.configPath })) return 2;
+
   try {
     if (parsed.command === 'summary') {
       const summary = summarizeOcr(cfg);
@@ -1096,24 +1154,29 @@ async function main(): Promise<number> {
     return argv.length === 0 ? 1 : 0;
   }
   const [cmd, ...rest] = argv;
-  switch (cmd) {
-    case 'fetch':
-      return cmdFetch(rest);
-    case 'run':
-      return cmdRun(rest);
-    case 'ocr':
-      return cmdOcr(rest);
-    case 'pending':
-      return cmdPending(rest);
-    case 'organize':
-      return cmdOrganize(rest);
-    case 'rebuild-state':
-    case '--rebuild-state':
-      return cmdRebuildState(rest);
-    default:
-      process.stderr.write(`unknown command: ${cmd}\n\n`);
-      process.stderr.write(ROOT_USAGE);
-      return 2;
+  try {
+    switch (cmd) {
+      case 'fetch':
+        return await cmdFetch(rest);
+      case 'run':
+        return await cmdRun(rest);
+      case 'ocr':
+        return await cmdOcr(rest);
+      case 'pending':
+        return await cmdPending(rest);
+      case 'organize':
+        return await cmdOrganize(rest);
+      case 'rebuild-state':
+      case '--rebuild-state':
+        return await cmdRebuildState(rest);
+      default:
+        process.stderr.write(`unknown command: ${cmd}\n\n`);
+        process.stderr.write(ROOT_USAGE);
+        return 2;
+    }
+  } finally {
+    // 正常结束与异常都要放锁；信号退出由 shutdownManagedServices() 兜底。
+    releaseDataDirLock();
   }
 }
 
@@ -1131,6 +1194,8 @@ function shutdownManagedServices(): void {
   shuttingDown = true;
   stopEfapiaoServices();
   clearOcrRuntimePid();
+  // 数据目录锁必须在信号退出路径上也释放，否则会留下一把要等陈旧回收的锁。
+  releaseDataDirLock();
 }
 
 const SIGNAL_EXIT_CODES: Record<string, number> = {
