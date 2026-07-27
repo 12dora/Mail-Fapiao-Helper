@@ -89,15 +89,41 @@ function fakeMailHash(mail: (typeof FAKE_MAILS)[number]): string {
   return msgIdHash(mail.messageId, mail.from, mail.date, mail.subject);
 }
 
-function fakeFetch(ctx: FakeBackendContext): FakeCliResult {
+function monthDir(iso: string): string {
+  return iso.slice(0, 7);
+}
+
+function fakeFetch(ctx: FakeBackendContext, args: string[]): FakeCliResult {
   const paths = fakeConfigPaths(ctx);
+  const dryRun = args.includes('--dry-run');
+
+  if (dryRun) {
+    // 与真实 CLI 一致：预览不写缓存、不写 INDEX、不产生 `saved` 行，
+    // 因此 main 侧也不会回显 batch。
+    return {
+      code: 0,
+      stdout: [
+        ...FAKE_MAILS.map((mail) => {
+          const emlPath = path.join(paths.samples, monthDir(mail.date), `${fakeMailHash(mail)}.eml`);
+          return `[dry-run] would save ${emlPath} (subject="${mail.subject}")`;
+        }),
+        `done: seen=${FAKE_MAILS.length} saved=0 repaired=0 skippedKnown=0 dryRun=true`,
+        '',
+      ].join('\n'),
+      stderr: '',
+    };
+  }
+
   writeFile(path.join(paths.samples, 'INDEX.csv'), csvText([
     ['messageId', 'date', 'from', 'subject', 'mailbox', 'hasAttachment', 'bodyLinkCount'],
     ...FAKE_MAILS.map((mail) => [
       mail.messageId, mail.date, mail.from, mail.subject, mail.mailbox, mail.hasAttachment, mail.bodyLinkCount,
     ]),
   ]));
-  writeFile(path.join(paths.samples, '2026-05', `${fakeMailHash(FAKE_MAILS[0])}.eml`), 'Subject: 国家电网电子发票通知\n\nfake invoice mail\n');
+  writeFile(
+    path.join(paths.samples, monthDir(FAKE_MAILS[0].date), `${fakeMailHash(FAKE_MAILS[0])}.eml`),
+    'Subject: 国家电网电子发票通知\n\nfake invoice mail\n',
+  );
   return {
     code: 0,
     stdout: [
@@ -109,7 +135,9 @@ function fakeFetch(ctx: FakeBackendContext): FakeCliResult {
   };
 }
 
-function fakePipeline(ctx: FakeBackendContext): FakeCliResult {
+function fakePipeline(ctx: FakeBackendContext, args: string[]): FakeCliResult {
+  const onlyMailIndex = args.indexOf('--only-mail');
+  const onlyMail = onlyMailIndex >= 0 ? args[onlyMailIndex + 1] : undefined;
   const paths = fakeConfigPaths(ctx);
   writeFile(path.join(paths.invoices, 'ocr', 'ocr-pending.csv'), csvText([
     ['hash', 'date', 'from', 'subject', 'filename', 'format', 'documentType', 'status', 'reason'],
@@ -119,12 +147,17 @@ function fakePipeline(ctx: FakeBackendContext): FakeCliResult {
   ]));
   writeFile(path.join(paths.invoices, '0001.pdf'), '%PDF-1.4\n% fake\n');
   writeFile(path.join(paths.invoices, '0002.pdf'), '%PDF-1.4\n% fake\n');
+  // `--only-mail <hash>` 时真实 CLI 只处理这一封，fixture 也照做，
+  // 这样「本次运行」批次在两边是同一个语义。
+  const handled = onlyMail
+    ? FAKE_MAILS.filter((mail) => fakeMailHash(mail) === onlyMail)
+    : [...FAKE_MAILS];
+  const documents = [2, 1];
   return {
     code: 0,
     stdout: [
-      `Processed ${fakeMailHash(FAKE_MAILS[0])}: 2 documents`,
-      `Processed ${fakeMailHash(FAKE_MAILS[1])}: 1 documents`,
-      'Run complete: processed=2, partial=0, skipped=0, failed=0',
+      ...handled.map((mail, i) => `Processed ${fakeMailHash(mail)}: ${documents[i] ?? 1} documents`),
+      `Run complete: processed=${handled.length}, partial=0, skipped=0, failed=0`,
       '',
     ].join('\n'),
     stderr: '',
@@ -161,9 +194,13 @@ function fakeOcr(ctx: FakeBackendContext): FakeCliResult {
   };
 }
 
-export function runFakeCli(command: string, ctx: FakeBackendContext): FakeCliResult {
-  if (command === 'fetch') return fakeFetch(ctx);
-  if (command === 'run') return fakePipeline(ctx);
+/**
+ * @param args 真实传给 CLI 的 argv。fixture 必须按同一批参数分支（例如 `--dry-run`
+ *   不写盘也不产生 `saved` 行），否则 fixture 覆盖的就不是真实契约。
+ */
+export function runFakeCli(command: string, args: string[], ctx: FakeBackendContext): FakeCliResult {
+  if (command === 'fetch') return fakeFetch(ctx, args);
+  if (command === 'run') return fakePipeline(ctx, args);
   if (command === 'ocr') return fakeOcr(ctx);
   if (command === 'organize') {
     const paths = fakeConfigPaths(ctx);

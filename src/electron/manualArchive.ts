@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { csvCell, parseCsv } from '../util/csv.js';
 import { contentHash } from '../util/hash.js';
+import { beginArchiveTransaction } from '../download/archiveJournal.js';
 import { sanitizeText } from './sanitize.js';
 
 /**
@@ -10,10 +10,17 @@ import { sanitizeText } from './sanitize.js';
  *
  * 旧实现逐个 `copyFileSync` 到最终目录后直接重写 `pending.csv`，既不写归档台账
  * 也不写 `ocr-pending.csv`：UI 说归档成功，但「开始识别」认为没有文件，原待确认
- * 上下文却已经被删掉；中途失败还会留下部分副本。
+ * 上下文却已经被删掉。
  *
- * 现在的顺序是：校验格式 → 计算 contentHash → staging → 原子安装文件 →
- * 写归档台账 → 写 OCR 队列 → 全部成功后才移除 pending 行；任一步失败都回滚。
+ * 第一版改成了「内存快照 + try/catch 回滚」，但进程内 catch 不是事务：如果进程在
+ * 台账已提交、OCR 队列未提交之间退出，就会留下「文件 + 台账已提交、队列未提交」的
+ * 半成品，重试时又只按队列判重，于是再装一个新文件、台账保留旧文件名、队列写新
+ * 文件名——身份互相矛盾还多出孤儿文件。
+ *
+ * 现在与自动归档共用**持久事务日志**（`src/download/archiveJournal.ts`）：
+ * 校验格式 → 计算 contentHash → 规划最终文件名与 CSV 追加基线 → 开事务 →
+ * 安装文件 → 追加台账 → 追加队列 → commit；任一步失败 `rollback()`，进程崩溃则
+ * 由下次启动的 `recoverArchiveTransactions()` 回滚。
  */
 
 export type ArchiveFormat = 'pdf' | 'ofd' | 'image';
@@ -38,7 +45,7 @@ export interface ManualArchiveInput {
   pendingRow?: Record<string, string> | undefined;
   /**
    * 移除待确认行的回调（由 main 提供，内部是原子重写 pending.csv）。
-   * 只有归档台账和 OCR 队列都写成功之后才会被调用。
+   * 只有归档台账和 OCR 队列都提交成功之后才会被调用。
    */
   removePendingRow: () => number;
 }
@@ -63,76 +70,145 @@ const QUEUE_HEADER = [
   'hash', 'messageId', 'date', 'from', 'subject', 'filename',
   'source', 'format', 'documentType', 'status', 'reason', 'contentHash',
 ];
+/** 组合键分隔符：用转义序列书写，源码里不会出现真实的 0x00 字节。 */
+const SEP = '\u0000';
 
-interface DetectedFormat {
+// ---------------------------------------------------------------------------
+// 格式判定
+// ---------------------------------------------------------------------------
+
+type DetectResult =
+  | { kind: 'ok'; format: ArchiveFormat; ext: string }
+  /** PK 容器，但不是 OFD 包（就是一个普通压缩包）。 */
+  | { kind: 'archive' }
+  | { kind: 'unknown' };
+
+const EOCD_SIGNATURE = 0x06054b50;
+const CENTRAL_HEADER_SIGNATURE = 0x02014b50;
+/** 只读中央目录文件名，不解压任何条目；上限防止畸形包把主进程拖住。 */
+const MAX_ZIP_ENTRIES = 2000;
+
+/**
+ * 只解析 ZIP 中央目录里的**文件名**（不解压、不分配 entry 数据），用来判断这个 PK
+ * 容器到底是 OFD 包还是普通压缩包。刻意不使用 `adm-zip`：APP-09 记录了它可达的
+ * 4GB 分配 DoS，而这里只需要读几个定长字段。
+ */
+function zipEntryNames(data: Buffer): string[] | undefined {
+  const maxBack = Math.min(data.length, 66 * 1024);
+  let eocd = -1;
+  for (let i = data.length - 22; i >= data.length - maxBack && i >= 0; i--) {
+    if (data.readUInt32LE(i) === EOCD_SIGNATURE) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0 || eocd + 20 > data.length) return undefined;
+  const count = data.readUInt16LE(eocd + 10);
+  const cdOffset = data.readUInt32LE(eocd + 16);
+  // 0xFFFFFFFF 表示 ZIP64，这里不支持；返回 undefined 让调用方按「无法确认」处理。
+  if (cdOffset === 0xFFFFFFFF || cdOffset >= data.length) return undefined;
+
+  const names: string[] = [];
+  let p = cdOffset;
+  for (let i = 0; i < Math.min(count, MAX_ZIP_ENTRIES); i++) {
+    if (p + 46 > data.length) return undefined;
+    if (data.readUInt32LE(p) !== CENTRAL_HEADER_SIGNATURE) return undefined;
+    const nameLen = data.readUInt16LE(p + 28);
+    const extraLen = data.readUInt16LE(p + 30);
+    const commentLen = data.readUInt16LE(p + 32);
+    const nameStart = p + 46;
+    if (nameStart + nameLen > data.length) return undefined;
+    names.push(data.subarray(nameStart, nameStart + nameLen).toString('utf8'));
+    p = nameStart + nameLen + extraLen + commentLen;
+  }
+  return names;
+}
+
+/** OFD 包必须在根目录带 `OFD.xml`（GB/T 33190）。没有它的 PK 容器就是普通压缩包。 */
+function looksLikeOfdPackage(data: Buffer): boolean {
+  const names = zipEntryNames(data);
+  if (!names) return false;
+  return names.some((name) => name.replace(/^[./\\]+/, '').toLowerCase() === 'ofd.xml');
+}
+
+/** 只按 magic bytes（以及 OFD 的必需结构）判定格式，不相信用户文件的扩展名。 */
+function detectFormat(data: Buffer): DetectResult {
+  if (data.subarray(0, 4).toString('ascii') === '%PDF') return { kind: 'ok', format: 'pdf', ext: 'pdf' };
+  if (data.subarray(0, 2).toString('ascii') === 'PK') {
+    // 复核指出的问题：旧实现把任意 PK 容器都当成 OFD，用户选一个普通 ZIP 会被
+    // 改名成 NNNN.ofd 塞进识别队列，OCR 拿到的是无效 OFD。
+    return looksLikeOfdPackage(data) ? { kind: 'ok', format: 'ofd', ext: 'ofd' } : { kind: 'archive' };
+  }
+  if (data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { kind: 'ok', format: 'image', ext: 'png' };
+  }
+  if (data.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return { kind: 'ok', format: 'image', ext: 'jpg' };
+  if (data.subarray(0, 4).toString('ascii') === 'GIF8') return { kind: 'ok', format: 'image', ext: 'gif' };
+  if (data.subarray(0, 2).toString('ascii') === 'BM') return { kind: 'ok', format: 'image', ext: 'bmp' };
+  if (data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return { kind: 'ok', format: 'image', ext: 'webp' };
+  }
+  return { kind: 'unknown' };
+}
+
+// ---------------------------------------------------------------------------
+// CSV 追加（与自动归档一致：只 append，回滚靠 journal 截断回 baseLength）
+// ---------------------------------------------------------------------------
+
+function ensureCsvHeader(file: string, header: string[]): void {
+  if (fs.existsSync(file) && fs.statSync(file).size > 0) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // UTF-8 BOM 与 CLI 写出的台账保持一致，Excel 才能正确显示中文。
+  fs.writeFileSync(file, `﻿${header.map(csvCell).join(',')}\n`, { encoding: 'utf8', mode: 0o600 });
+}
+
+function csvLine(values: string[]): string {
+  return `${values.map(csvCell).join(',')}\n`;
+}
+
+function bodyRows(file: string): string[][] {
+  if (!fs.existsSync(file)) return [];
+  const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+  return parseCsv(text).slice(1);
+}
+
+/**
+ * 一次性规划整批文件的最终名字。逐个调用「找下一个空号」会让同一批里的多个文件
+ * 拿到同一个名字，因此这里统一扫描并在内存里占位。
+ */
+function planNumberedNames(dir: string, exts: string[]): string[] {
+  const taken = new Set<string>();
+  try {
+    for (const entry of fs.readdirSync(dir)) taken.add(entry.toLowerCase());
+  } catch {
+    // 目录还不存在，等价于没有任何占用。
+  }
+  const out: string[] = [];
+  let counter = 1;
+  for (const ext of exts) {
+    let name = '';
+    while (counter < 100000) {
+      const candidate = `${String(counter).padStart(4, '0')}.${ext}`;
+      counter++;
+      if (taken.has(candidate.toLowerCase())) continue;
+      taken.add(candidate.toLowerCase());
+      name = candidate;
+      break;
+    }
+    if (!name) throw new Error('invoices directory is full of numbered files');
+    out.push(name);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+
+interface StagedSource {
+  source: string;
+  data: Buffer;
   format: ArchiveFormat;
   ext: string;
-}
-
-/** 只按 magic bytes 判定格式，不相信用户文件的扩展名。 */
-function detectFormat(data: Buffer): DetectedFormat | undefined {
-  if (data.subarray(0, 4).toString('ascii') === '%PDF') return { format: 'pdf', ext: 'pdf' };
-  // OFD 与 ZIP 同为 PK 容器，沿用 downloader 的判定：PK -> ofd。
-  if (data.subarray(0, 2).toString('ascii') === 'PK') return { format: 'ofd', ext: 'ofd' };
-  if (data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return { format: 'image', ext: 'png' };
-  }
-  if (data.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return { format: 'image', ext: 'jpg' };
-  if (data.subarray(0, 4).toString('ascii') === 'GIF8') return { format: 'image', ext: 'gif' };
-  if (data.subarray(0, 2).toString('ascii') === 'BM') return { format: 'image', ext: 'bmp' };
-  if (data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP') {
-    return { format: 'image', ext: 'webp' };
-  }
-  return undefined;
-}
-
-function writeFileAtomic(file: string, body: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
-  fs.writeFileSync(tmp, body, { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
-}
-
-interface CsvSnapshot {
-  file: string;
-  existed: boolean;
-  content: string;
-}
-
-function snapshot(file: string): CsvSnapshot {
-  const existed = fs.existsSync(file);
-  return { file, existed, content: existed ? fs.readFileSync(file, 'utf8') : '' };
-}
-
-function restore(snap: CsvSnapshot): void {
-  try {
-    if (snap.existed) writeFileAtomic(snap.file, snap.content);
-    else fs.rmSync(snap.file, { force: true });
-  } catch {
-    // 回滚已经是尽力而为的最后一步。
-  }
-}
-
-function bodyRows(text: string): string[][] {
-  const records = parseCsv(text.replace(/^﻿/, ''));
-  return records.slice(1);
-}
-
-function renderCsv(header: string[], rows: string[][]): string {
-  const lines = [header.map(csvCell).join(',')];
-  for (const row of rows) lines.push(header.map((_, i) => csvCell(row[i] ?? '')).join(','));
-  return `﻿${lines.join('\n')}\n`;
-}
-
-/** 归档目录里下一个未占用的 NNNN.ext；沿用自动归档的编号命名，避免 -1/-2 重复件。 */
-function nextNumberedName(dir: string, ext: string): string {
-  let counter = 1;
-  while (counter < 100000) {
-    const candidate = `${String(counter).padStart(4, '0')}.${ext}`;
-    if (!fs.existsSync(path.join(dir, candidate))) return candidate;
-    counter++;
-  }
-  throw new Error('invoices directory is full of numbered files');
+  hash: string;
 }
 
 export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult {
@@ -142,7 +218,7 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   }
 
   // 1) 先把全部候选读进内存并校验，任何一个不合格都不落盘（不产生部分副本）。
-  const staged: { source: string; data: Buffer; detected: DetectedFormat; hash: string }[] = [];
+  const staged: StagedSource[] = [];
   for (const source of input.sources) {
     let data: Buffer;
     try {
@@ -170,23 +246,29 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       };
     }
     const detected = detectFormat(data);
-    if (!detected) {
+    if (detected.kind === 'archive') {
+      return {
+        ...empty,
+        code: 'manual_archive_is_zip',
+        message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
+      };
+    }
+    if (detected.kind !== 'ok') {
       return {
         ...empty,
         code: 'manual_archive_unsupported_format',
         message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
       };
     }
-    staged.push({ source, data, detected, hash: contentHash(data) });
+    staged.push({ source, data, format: detected.format, ext: detected.ext, hash: contentHash(data) });
   }
 
-  // 2) 读取台账与队列的当前内容，作为回滚快照和去重依据。
-  const ledgerSnap = snapshot(input.ledgerCsv);
-  const queueSnap = snapshot(input.ocrPendingCsv);
-  const ledgerRows = ledgerSnap.existed ? bodyRows(ledgerSnap.content) : [];
-  const queueRows = queueSnap.existed ? bodyRows(queueSnap.content) : [];
-  const ledgerSeen = new Set(ledgerRows.map((row) => `${row[0] ?? ''}\0${row[6] ?? ''}`));
-  const queueSeen = new Set(queueRows.map((row) => `${row[0] ?? ''}\0${row[11] ?? ''}`));
+  // 2) 读取台账与队列现状，做去重与「半提交修复」判定。
+  const ledgerFilenameByKey = new Map<string, string>();
+  for (const row of bodyRows(input.ledgerCsv)) {
+    ledgerFilenameByKey.set(`${row[0] ?? ''}${SEP}${row[6] ?? ''}`, row[4] ?? '');
+  }
+  const queueSeen = new Set(bodyRows(input.ocrPendingCsv).map((row) => `${row[0] ?? ''}${SEP}${row[11] ?? ''}`));
 
   const pending = input.pendingRow ?? {};
   const messageId = pending.messageId ?? '';
@@ -194,80 +276,110 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   const from = pending.from ?? '';
   const subject = pending.subject ?? '';
 
-  const installed: string[] = [];
-  const archived: ManualArchiveFile[] = [];
   const duplicates: string[] = [];
-  const stagingDir = path.join(input.invoicesDir, '.staging', `manual-${input.hash || 'unknown'}-${randomBytes(3).toString('hex')}`);
+  const toInstall: StagedSource[] = [];
+  /** 台账已有、队列缺失：复用台账里的文件名补队列行，绝不再装一个新文件。 */
+  const toReuse: { item: StagedSource; filename: string }[] = [];
 
+  for (const item of staged) {
+    if (queueSeen.has(`${input.hash}${SEP}${item.hash}`)) {
+      duplicates.push(path.basename(item.source));
+      continue;
+    }
+    const ledgerFilename = ledgerFilenameByKey.get(`${messageId}${SEP}${item.hash}`);
+    if (ledgerFilename && fs.existsSync(path.join(input.invoicesDir, ledgerFilename))) {
+      toReuse.push({ item, filename: ledgerFilename });
+      continue;
+    }
+    toInstall.push(item);
+  }
+
+  if (toInstall.length === 0 && toReuse.length === 0) {
+    return {
+      ok: false,
+      code: 'manual_archive_all_duplicates',
+      message: '选择的文件都已经归档过了，没有新增内容。',
+      files: [],
+      duplicates,
+      pendingRemoved: 0,
+    };
+  }
+
+  // 3) 规划最终文件名与 CSV 追加基线，作为事务计划。
+  let plannedNames: string[];
+  let ledgerBase: number;
+  let queueBase: number;
   try {
     fs.mkdirSync(input.invoicesDir, { recursive: true });
-    fs.mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
-
-    // 3) 先写 staging，再用 COPYFILE_EXCL 原子安装到最终名字。
-    for (const item of staged) {
-      if (queueSeen.has(`${input.hash}\0${item.hash}`)) {
-        duplicates.push(path.basename(item.source));
-        continue;
-      }
-      const stagingPath = path.join(stagingDir, `${archived.length}.${item.detected.ext}`);
-      fs.writeFileSync(stagingPath, item.data, { mode: 0o600 });
-
-      let filename = '';
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const candidate = nextNumberedName(input.invoicesDir, item.detected.ext);
-        const finalPath = path.join(input.invoicesDir, candidate);
-        try {
-          fs.copyFileSync(stagingPath, finalPath, fs.constants.COPYFILE_EXCL);
-          filename = candidate;
-          installed.push(finalPath);
-          break;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-        }
-      }
-      if (!filename) throw new Error('failed to allocate a unique filename in the invoices directory');
-      fs.rmSync(stagingPath, { force: true });
-
-      const source = path.basename(item.source);
-      archived.push({ filename, contentHash: item.hash, format: item.detected.format });
-
-      if (!ledgerSeen.has(`${messageId}\0${item.hash}`)) {
-        ledgerRows.push([messageId, date, from, subject, filename, source, item.hash]);
-        ledgerSeen.add(`${messageId}\0${item.hash}`);
-      }
-      queueRows.push([
-        input.hash, messageId, date, from, subject, filename,
-        source, item.detected.format, 'invoice', 'pending', 'manual_archive', item.hash,
-      ]);
-      queueSeen.add(`${input.hash}\0${item.hash}`);
-    }
-
-    if (archived.length === 0) {
-      // 全部文件都已经归档过：不改台账/队列，也不动 pending 行。
-      return {
-        ok: false,
-        code: 'manual_archive_all_duplicates',
-        message: '选择的文件都已经归档过了，没有新增内容。',
-        files: [],
-        duplicates,
-        pendingRemoved: 0,
-      };
-    }
-
-    // 4) 台账与队列都用「整表原子替换」写入，杜绝半截追加。
-    writeFileAtomic(input.ledgerCsv, renderCsv(LEDGER_HEADER, ledgerRows));
-    writeFileAtomic(input.ocrPendingCsv, renderCsv(QUEUE_HEADER, queueRows));
+    plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
+    ensureCsvHeader(input.ledgerCsv, LEDGER_HEADER);
+    ensureCsvHeader(input.ocrPendingCsv, QUEUE_HEADER);
+    ledgerBase = fs.statSync(input.ledgerCsv).size;
+    queueBase = fs.statSync(input.ocrPendingCsv).size;
   } catch (err) {
-    // 回滚：删掉已安装的副本，恢复台账与队列。
-    for (const file of installed) {
-      try {
-        fs.rmSync(file, { force: true });
-      } catch {
-        // best-effort
-      }
+    return {
+      ...empty,
+      code: 'manual_archive_prepare_failed',
+      message: '无法准备归档目录，请确认归档位置可写后重试。',
+      detail: sanitizeText(err instanceof Error ? err.message : String(err)),
+      duplicates,
+    };
+  }
+
+  const plannedPaths = plannedNames.map((name) => path.join(input.invoicesDir, name));
+  const tx = beginArchiveTransaction(input.invoicesDir, {
+    files: plannedPaths,
+    csv: [
+      { path: input.ledgerCsv, baseLength: ledgerBase },
+      { path: input.ocrPendingCsv, baseLength: queueBase },
+    ],
+  });
+
+  const archived: ManualArchiveFile[] = [];
+  try {
+    // 4) 安装文件：`wx` 独占创建，绝不覆盖已有文件。
+    for (let i = 0; i < toInstall.length; i++) {
+      const item = toInstall[i];
+      const target = plannedPaths[i];
+      const name = plannedNames[i];
+      if (!item || !target || !name) throw new Error('archive plan mismatch');
+      fs.writeFileSync(target, item.data, { flag: 'wx', mode: 0o600 });
+      archived.push({ filename: name, contentHash: item.hash, format: item.format });
     }
-    restore(ledgerSnap);
-    restore(queueSnap);
+    tx.markStage('files-installed');
+
+    // 5) 先追加 OCR 队列，再追加台账。
+    //
+    // 顺序是有意的：`recoverArchiveTransactions()` 把 `ledger-committed` 当作
+    // 「已完成」向前滚（只删 journal，不回滚文件）。因此台账必须是**最后**一步，
+    // 这样 `ledger-committed` 才真正等于「文件 + 队列 + 台账全部落盘」；若在此之前
+    // 崩溃，阶段仍是 `files-installed`，恢复时会删掉文件并把两个 CSV 一起截回基线。
+    const queueLines = [
+      ...toInstall.map((item, i) => csvLine([
+        input.hash, messageId, date, from, subject, plannedNames[i] ?? '',
+        path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive', item.hash,
+      ])),
+      ...toReuse.map(({ item, filename }) => csvLine([
+        input.hash, messageId, date, from, subject, filename,
+        path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive_repair', item.hash,
+      ])),
+    ];
+    fs.appendFileSync(input.ocrPendingCsv, queueLines.join(''), 'utf8');
+
+    // 6) 追加台账（只为本次真正新装的文件）。
+    const ledgerLines = toInstall.map((item, i) => csvLine([
+      messageId, date, from, subject, plannedNames[i] ?? '', path.basename(item.source), item.hash,
+    ]));
+    if (ledgerLines.length > 0) fs.appendFileSync(input.ledgerCsv, ledgerLines.join(''), 'utf8');
+    tx.markStage('ledger-committed');
+    tx.commit();
+  } catch (err) {
+    // 删除已安装文件并把两个 CSV 截断回 baseLength。
+    try {
+      tx.rollback();
+    } catch {
+      // 回滚失败时 journal 仍在，下次启动的 recover 会再试一次。
+    }
     return {
       ...empty,
       code: 'manual_archive_failed',
@@ -275,15 +387,13 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       duplicates,
     };
-  } finally {
-    try {
-      fs.rmSync(stagingDir, { recursive: true, force: true });
-    } catch {
-      // best-effort
-    }
   }
 
-  // 5) 只有前面全部成功，才移除 pending 行；这一步失败不撤销归档，仅上报告警。
+  for (const { item, filename } of toReuse) {
+    archived.push({ filename, contentHash: item.hash, format: item.format });
+  }
+
+  // 7) 只有台账与队列都提交成功，才移除 pending 行；这一步失败不撤销归档，仅上报告警。
   let pendingRemoved = 0;
   let warning: string | undefined;
   try {
@@ -297,6 +407,12 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     files: archived,
     duplicates,
     pendingRemoved,
-    ...(warning ? { code: 'manual_archive_pending_not_updated', detail: warning, message: '文件已归档并加入识别队列，但待确认记录没有移除，可稍后手动忽略。' } : {}),
+    ...(warning
+      ? {
+        code: 'manual_archive_pending_not_updated',
+        detail: warning,
+        message: '文件已归档并加入识别队列，但待确认记录没有移除，可稍后手动忽略。',
+      }
+      : {}),
   };
 }
