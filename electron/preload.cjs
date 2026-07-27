@@ -1,7 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('mfhBridge', {
-  getSummary: () => ipcRenderer.invoke('mfh:get-summary'),
+  // payload 可选：{ inboxLimit, inboxOffset, libraryLimit, libraryOffset }
+  getSummary: (payload) => ipcRenderer.invoke('mfh:get-summary', payload),
   getConfig: () => ipcRenderer.invoke('mfh:get-config'),
   saveConfig: (payload) => ipcRenderer.invoke('mfh:save-config', payload),
   startFetch: (payload) => ipcRenderer.invoke('mfh:start-fetch', payload),
@@ -17,6 +18,8 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   pendingRefreshLink: (payload) => ipcRenderer.invoke('mfh:pending-refresh-link', payload),
   pendingManualArchive: (payload) => ipcRenderer.invoke('mfh:pending-manual-archive', payload),
   developerReset: () => ipcRenderer.invoke('mfh:developer-reset'),
+  // 当前是否有互斥操作在运行：{ running: null | { kind, jobId, startedAt } }
+  getOpState: () => ipcRenderer.invoke('mfh:get-op-state'),
   onFetchProgress: (callback) => {
     if (typeof callback !== 'function') return;
     ipcRenderer.removeAllListeners('mfh:fetch-progress');
@@ -31,5 +34,10 @@ contextBridge.exposeInMainWorld('mfhBridge', {
     if (typeof callback !== 'function') return;
     ipcRenderer.removeAllListeners('mfh:file-progress');
     ipcRenderer.on('mfh:file-progress', (_event, data) => callback(data));
+  },
+  onOpState: (callback) => {
+    if (typeof callback !== 'function') return;
+    ipcRenderer.removeAllListeners('op-state');
+    ipcRenderer.on('op-state', (_event, data) => callback(data));
   },
 });
