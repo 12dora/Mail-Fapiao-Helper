@@ -419,6 +419,12 @@ export async function runOcrPending(
         checkpoint();
         continue;
       }
+      // 显式迁移（APP-06A）：老 pending 行没有 contentHash，用刚读到的归档字节补齐，
+      // 让它升级成强身份行；补不出来的行保持独立，不参与任何折叠。
+      if (!row.contentHash) {
+        row.contentHash = hashBytes(data);
+        pendingDirty = true;
+      }
       batch.push({ row, data });
       if (concurrency > 1 && batch.length >= concurrency) {
         const jobs = batch.splice(0, batch.length);
