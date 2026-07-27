@@ -12,6 +12,9 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+// Single source of truth for "is dist/ usable?", shared with the suites so that
+// `node gui-design/tests/<suite>.mjs` fails the same way as `npm run test:*`.
+import { buildFreshnessProblems } from '../gui-design/tests/_shared.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -24,8 +27,13 @@ function requireFile(relative, hint) {
   }
 }
 
-function requireBuildOutput() {
-  requireFile('dist/index.js', 'run `npm run build` first (the test suites execute the compiled CLI, not the TypeScript sources)');
+/**
+ * CODE-02: `dist/` is git-ignored, so it can be missing *or* older than the
+ * sources it claims to compile. A suite run against a stale dist is a false
+ * positive, not a pass, so refuse before a single assertion executes.
+ */
+async function requireBuildOutput() {
+  for (const problem of await buildFreshnessProblems()) problems.push(problem);
 }
 
 function requireDisplay(suite) {
@@ -38,13 +46,12 @@ function requireDisplay(suite) {
   );
 }
 
-function checkCli() {
-  requireBuildOutput();
+async function checkCli() {
+  await requireBuildOutput();
 }
 
-function checkElectron() {
-  requireBuildOutput();
-  requireFile('dist/electron/main.js', 'run `npm run build` first');
+async function checkElectron() {
+  await requireBuildOutput();
   requireFile('config.example.json', 'the Electron suites seed their temp config from this file');
 
   let electronBinary;

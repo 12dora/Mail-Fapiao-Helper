@@ -1,5 +1,17 @@
 name: Release
 
+# Official, signed releases only.
+#
+# CODE-05A: this workflow publishes `draft: false, prerelease: false` GitHub
+# Releases, so every artifact it ships MUST carry a full trust chain — macOS
+# Developer ID + notarization + stapled ticket, Windows Authenticode + RFC3161
+# timestamp. If the signing secrets are not configured the run fails in the
+# cheap `resolve` job, before anything is built.
+#
+# Unsigned builds are produced by .github/workflows/dev-build.yml, which has no
+# `contents: write` permission and can only emit workflow artifacts. There is no
+# code path in this repository that turns an unsigned binary into a Release.
+
 on:
   push:
     tags:
@@ -32,6 +44,51 @@ jobs:
       sha: ${{ steps.ref.outputs.sha }}
       version: ${{ steps.ref.outputs.version }}
     steps:
+      # Fail closed, and fail cheap: no point building for 20 minutes only to
+      # discover at publish time that nothing can be signed.
+      - name: Require a complete signing trust chain
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -uo pipefail
+          MISSING=""
+          need() { [ -n "${!1:-}" ] || MISSING="${MISSING}\n  - ${1}"; }
+
+          need MACOS_CERTIFICATE_P12
+          need MACOS_CERTIFICATE_PASSWORD
+          need WINDOWS_CERTIFICATE_PFX
+          need WINDOWS_CERTIFICATE_PASSWORD
+
+          # Notarization accepts either credential set.
+          if [ -n "${APPLE_API_KEY_BASE64}" ] && [ -n "${APPLE_API_KEY_ID}" ] && [ -n "${APPLE_API_ISSUER}" ]; then
+            :
+          elif [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ] && [ -n "${APPLE_TEAM_ID}" ]; then
+            :
+          else
+            MISSING="${MISSING}\n  - notarization credentials: APPLE_API_KEY_BASE64 + APPLE_API_KEY_ID + APPLE_API_ISSUER, or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID"
+          fi
+
+          if [ -n "${MISSING}" ]; then
+            echo "::error::Cannot cut an official release: the signing trust chain is incomplete."
+            printf 'Missing repository secrets:%b\n\n' "${MISSING}"
+            echo "An official Release must be signed, notarized (macOS) and timestamped (Windows)."
+            echo "Unsigned binaries are never published as a Release."
+            echo "To produce an unsigned build for testing, run the \"Development build (unsigned)\" workflow;"
+            echo "it uploads workflow artifacts only."
+            exit 1
+          fi
+          echo "Signing trust chain is fully configured."
+
       - name: Resolve tag to an immutable commit
         id: ref
         env:
@@ -184,12 +241,12 @@ jobs:
             echo "No APPLE_API_KEY_BASE64 secret; notarization will fall back to APPLE_ID credentials if present"
           fi
 
-      # CODE-05A: signing is driven entirely by secrets. When they are absent the
-      # build does not fail — it degrades to an explicitly labelled unsigned
-      # development build whose artifacts carry an `-unsigned` suffix.
+      # CODE-05A: the stable channel is fail-closed inside build-release.mjs too,
+      # so even an edited workflow gate cannot emit an unsigned official build.
       - name: Build package
         shell: bash
         env:
+          MFH_RELEASE_CHANNEL: stable
           MFH_RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           MFH_RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -209,10 +266,13 @@ jobs:
           WIN_CSC_KEY_PASSWORD: ${{ matrix.platform == 'win' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
         run: npm run dist:${{ matrix.platform }}
 
-      # CODE-04 / CODE-06: no test code, no dev fake backend, and no
-      # cross-platform executables may ship inside a release package.
+      # CODE-04 / CODE-05A / CODE-06: no test code, no dev fake backend, no
+      # cross-platform executables — and, on the stable channel, a signature that
+      # actually verifies. macOS runs codesign --verify --deep --strict,
+      # spctl --assess and stapler validate; Windows checks the Authenticode
+      # status and the timestamp countersignature. Any failure fails the job.
       - name: Verify packaged artifacts
-        run: npm run verify:artifacts -- --platform ${{ matrix.platform }}
+        run: npm run verify:artifacts -- --platform ${{ matrix.platform }} --channel stable
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
