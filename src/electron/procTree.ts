@@ -7,60 +7,126 @@ import { spawnSync, type ChildProcess } from 'node:child_process';
  * CLI 里那个被 `unref()` 的 `efapiao serve` 孙进程会因此变成孤儿，继续占用端口
  * 并携带旧配置。所以 Windows 必须按 PID 精确终止整棵进程树。
  */
-export function killProcessTree(child: ChildProcess): void {
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (process.platform === 'win32') {
-    try {
-      // /T 连同子孙进程，/F 强制终止；taskkill 自身很快返回，同步调用可接受。
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        timeout: 5000,
-        stdio: 'ignore',
-      });
-      return;
-    } catch {
-      // taskkill 不可用时退回普通 kill。
-    }
-  }
+
+export interface KillOutcome {
+  /** 整棵进程树是否确实被终止（Windows 上等价于 taskkill /T 成功）。 */
+  treeTerminated: boolean;
+  /** 已向直接子进程发过信号（taskkill 失败后的降级路径）。 */
+  signalled: boolean;
+  /** 失败原因，仅用于主进程日志/诊断，不直接进 UI。 */
+  detail?: string;
+}
+
+/**
+ * `spawnSync` 不会因为「命令不存在 / 超时 / 退出码非零」而抛异常，这些情况分别
+ * 体现在 `error`、`signal` 和 `status` 上。只看 try/catch 会把失败当成功，从而
+ * 跳过降级路径——这正是复核指出的问题。
+ */
+function runTaskkill(pid: number): { ok: boolean; detail?: string } {
+  const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+    windowsHide: true,
+    timeout: 5000,
+    stdio: 'ignore',
+  });
+  if (result.error) return { ok: false, detail: `taskkill 启动失败：${result.error.message}` };
+  if (result.signal) return { ok: false, detail: `taskkill 被信号 ${result.signal} 终止（可能超时）` };
+  if (result.status === null) return { ok: false, detail: 'taskkill 没有返回退出码' };
+  // 128 = 进程已经不存在，对我们而言与成功等价。
+  if (result.status === 0 || result.status === 128) return { ok: true };
+  return { ok: false, detail: `taskkill 退出码 ${result.status}` };
+}
+
+function isAlive(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function sendSignal(child: ChildProcess, signal: NodeJS.Signals): boolean {
   try {
-    child.kill('SIGTERM');
+    return child.kill(signal);
   } catch {
     // 进程可能已经退出。
+    return false;
   }
+}
+
+export function killProcessTree(child: ChildProcess): KillOutcome {
+  const pid = child.pid;
+  if (pid === undefined) return { treeTerminated: false, signalled: false, detail: '子进程没有 PID' };
+  if (!isAlive(child)) return { treeTerminated: true, signalled: false };
+
+  if (process.platform === 'win32') {
+    const killed = runTaskkill(pid);
+    if (killed.ok) return { treeTerminated: true, signalled: false };
+    // 降级：taskkill 不可用/失败时至少终止直接子进程。注意这**不能**替代 /T 的
+    // 树终止，孙进程可能仍然存活，所以 treeTerminated 保持 false，由调用方决定
+    // 是否继续等待与重试。
+    const signalled = sendSignal(child, 'SIGKILL');
+    return { treeTerminated: false, signalled, ...(killed.detail ? { detail: killed.detail } : {}) };
+  }
+
+  const signalled = sendSignal(child, 'SIGTERM');
+  return { treeTerminated: signalled, signalled };
+}
+
+export interface TerminateSummary {
+  /** 仍然存活的直接子进程数量（0 表示全部已退出）。 */
+  remaining: number;
+  /** 至少有一个进程树没能被完整终止（Windows taskkill 失败）。 */
+  treeIncomplete: boolean;
+  details: string[];
+}
+
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (!isAlive(child)) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let timer: NodeJS.Timeout | undefined;
+    const done = (): void => {
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+    child.once('close', done);
+    child.once('exit', done);
+    timer = setTimeout(resolve, timeoutMs);
+  });
 }
 
 /**
  * 终止全部 tracked 子进程并等待它们真正退出（app quit 路径使用）。
- * 超时后再做一次强制 kill，然后放行退出，避免应用永远无法关闭。
+ * 超时后重试一次树终止再强制 kill，最后**验证**直接子进程是否确实退出，
+ * 然后放行退出，避免应用永远无法关闭。
  */
 export async function terminateChildren(
   children: Iterable<ChildProcess>,
   timeoutMs = 4000,
-): Promise<void> {
-  const pending = Array.from(children).filter((child) => child.exitCode === null && child.signalCode === null);
-  if (pending.length === 0) return;
-
-  const waits = pending.map((child) => new Promise<void>((resolve) => {
-    child.once('close', () => resolve());
-    child.once('exit', () => resolve());
-  }));
-
-  for (const child of pending) killProcessTree(child);
-
-  let timer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    Promise.all(waits),
-    new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
-  ]);
-  if (timer) clearTimeout(timer);
+): Promise<TerminateSummary> {
+  const pending = Array.from(children).filter(isAlive);
+  const details: string[] = [];
+  let treeIncomplete = false;
+  if (pending.length === 0) return { remaining: 0, treeIncomplete: false, details };
 
   for (const child of pending) {
-    if (child.exitCode !== null || child.signalCode !== null) continue;
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      // best-effort
-    }
+    const outcome = killProcessTree(child);
+    if (!outcome.treeTerminated) treeIncomplete = true;
+    if (outcome.detail) details.push(outcome.detail);
   }
+
+  await Promise.all(pending.map((child) => waitForExit(child, timeoutMs)));
+
+  // 第二轮：仍然存活的再试一次树终止，然后强制 kill 并验证。
+  const stillAlive = pending.filter(isAlive);
+  for (const child of stillAlive) {
+    if (process.platform === 'win32' && child.pid !== undefined) {
+      const retry = runTaskkill(child.pid);
+      if (!retry.ok && retry.detail) details.push(retry.detail);
+    }
+    sendSignal(child, 'SIGKILL');
+  }
+  await Promise.all(stillAlive.map((child) => waitForExit(child, 1000)));
+
+  const remaining = pending.filter(isAlive).length;
+  if (remaining > 0) {
+    treeIncomplete = true;
+    details.push(`仍有 ${remaining} 个后台进程没有在超时内退出`);
+  }
+  return { remaining, treeIncomplete, details };
 }

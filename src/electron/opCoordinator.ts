@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import {
   acquireDataDirLock,
   dataOpLabel,
+  leaseEnvForChild,
   type DataDirLease,
   type DataOpKind,
 } from '../util/dataDirLock.js';
@@ -16,8 +17,14 @@ import {
  *   3. 状态变化时向所有窗口广播 `op-state`。
  *
  * 锁本身复用 `src/util/dataDirLock.ts`（不依赖 Electron 的共享实现），GUI 与 CLI
- * 必须是同一份协议实现，否则两侧会各锁各的。CLI 子进程通过「持有者 pid == 自己的
- * 父进程 pid」识别出这是父进程的租约，不会被 GUI 自己启动的任务挡住。
+ * 必须是同一份协议实现，否则两侧会各锁各的。
+ *
+ * 租约继承**只认 token**：`begin()` 拿到锁后，`leaseEnv()` 会把锁 payload 里的随机
+ * token 通过 `MFH_LOCK_TOKEN`（连同 `MFH_LOCK_JOB_ID`）下发给 spawn 出来的 CLI 子
+ * 进程；子进程用环境变量里的 token 与磁盘锁文件里的 token 比对，一致才判定为在父
+ * 进程的租约内运行，因此不会被 GUI 自己启动的任务挡住。判据里**没有** `process.ppid`：
+ * 按父子关系推断会让「GUI 异常退出后仍在工作的子进程」脱离锁 ownership，新实例回收
+ * 这把锁后就会与旧子进程并发写同一个数据目录。
  */
 
 export type OpKind = DataOpKind;
@@ -70,6 +77,21 @@ export class OperationCoordinator {
   /** 供窗口创建时补发一次当前状态。 */
   state(): { running: RunningOp | null } {
     return { running: this.running };
+  }
+
+  /**
+   * 下发给 CLI 子进程的租约凭证（APP-05）。
+   *
+   * 子进程不能再凭「锁持有者 pid == 自己的 ppid」就认定继承租约：GUI 异常退出后
+   * 仍在工作的子进程不再体现在锁 ownership 里，新实例会回收这把锁并与旧子进程并发。
+   * 改成由父进程显式下发 token，子进程只有在 token 与磁盘锁文件里的 token 一致时
+   * 才判定为继承。变量名与取值都交给共享锁模块的 `leaseEnvForChild()`，避免两侧
+   * 各写一份字符串。
+   */
+  leaseEnv(): Record<string, string> {
+    const lease = this.lease;
+    if (!lease) return {};
+    return leaseEnvForChild(lease);
   }
 
   begin(kind: OpKind): BeginResult {

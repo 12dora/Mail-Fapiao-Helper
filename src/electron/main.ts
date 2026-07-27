@@ -31,6 +31,7 @@ import { OperationCoordinator, type OpKind, type OpLease, type RunningOp } from 
 import { killProcessTree, terminateChildren } from './procTree.js';
 import { registerManagedRoots, redactPath, sanitizeText, type UiError } from './sanitize.js';
 import { runManualArchive } from './manualArchive.js';
+import { recoverArchiveTransactions } from '../download/archiveJournal.js';
 
 interface DateRangePayload {
   from?: string;
@@ -98,7 +99,6 @@ interface SaveConfigPayload {
   playwright?: {
     headless?: boolean;
     timeoutMs?: number | string;
-    browserManagement?: string;
   };
   network?: {
     retries?: number | string;
@@ -382,8 +382,7 @@ function redactConfig(raw: Record<string, unknown>): Record<string, unknown> {
     ...ocrSrc,
     credentials: Object.fromEntries(Object.entries(creds).map(([k, v]) => [k, isSecretKey(k) ? '' : v])),
   };
-  const llm = { ...asObject(raw.llm), apiKey: '' };
-  return { ...raw, imap, ocr, llm };
+  return { ...raw, imap, ocr };
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +469,7 @@ function buildMinimalOcrConfig(current: Record<string, unknown>, concurrency: nu
     typeof value === 'string' && value.length > 0 ? value : fallback;
 
   return {
-    // 占位的邮箱/LLM 配置：仅用于通过 schema 校验，OCR 流程不会读取它们。
+    // 占位的邮箱配置：仅用于通过 schema 校验，OCR 流程不会读取它们。
     imap: { host: 'localhost', port: 993, user: 'ocr-run', pass: 'unused', tls: true, mailbox: ['INBOX'] },
     filter: { keywords: ['发票'], matchSubject: true, matchBody: true, sinceDays: 30 },
     paths: {
@@ -478,7 +477,7 @@ function buildMinimalOcrConfig(current: Record<string, unknown>, concurrency: nu
       invoices: str(paths.invoices, './invoices'),
       pending: str(paths.pending, './pending'),
     },
-    output: { dir: './invoices', pendingDir: './pending', csv: './invoices/invoices.csv' },
+    output: { csv: './invoices/invoices.csv' },
     rename: {
       rule: str(rename.rule, '{date}_{seller}_{amount}'),
       fallback: str(rename.fallback, '{hash}_{index}'),
@@ -492,8 +491,7 @@ function buildMinimalOcrConfig(current: Record<string, unknown>, concurrency: nu
       servicePort: port,
       serviceUrl: `http://${host}:${port}`,
     },
-    llm: { enabled: false, provider: 'none', model: 'none', apiKey: '' },
-    playwright: { headless: true, timeoutMs: 30000, browserManagement: 'system-managed' },
+    playwright: { headless: true, timeoutMs: 30000 },
     network: { retries: 3, retryDelayMs: 1000 },
   };
 }
@@ -877,7 +875,7 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
     };
 
     if (devBackend) {
-      const fake = devBackend.runFakeCli(command, { dataDir, readConfig: readConfigForPaths });
+      const fake = devBackend.runFakeCli(command, args, { dataDir, readConfig: readConfigForPaths });
       if (opts.progress) {
         emitFetch({ percent: 8, matched: 0, saved: 0, skipped: 0, step: '邮箱', code: 'fetch_phase', message: '正在连接邮箱并搜索邮件。' });
       } else if (opts.operation === 'ocr') {
@@ -895,6 +893,9 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       ...process.env,
       MFH_APP_ROOT: rootDir,
       MFH_RESOURCE_ROOT: process.resourcesPath,
+      // 当前数据目录租约的凭证：子进程凭 token 与磁盘锁文件比对来判定「继承租约」，
+      // 而不是凭 ppid（APP-05）。
+      ...coordinator.leaseEnv(),
       ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
     };
     const child = spawn(process.execPath, [path.join(rootDir, 'dist', 'index.js'), command, ...args], {
@@ -1041,6 +1042,87 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       resolve({ code, stdout: out, stderr: err, started: true, mails: mails() });
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// 诊断输出（COPY-01：原始日志只落到主进程受限的诊断文件，绝不进 IPC 返回值）
+// ---------------------------------------------------------------------------
+
+/** 保留的诊断文件数量上限，避免原始日志长期堆积在磁盘上。 */
+const DIAGNOSTICS_KEEP = 20;
+
+function diagnosticsDir(): string {
+  return path.join(dataDir, '.mfh-cache', 'diagnostics');
+}
+
+function pruneDiagnostics(dir: string): void {
+  try {
+    const files = fs.readdirSync(dir)
+      .filter((name) => name.endsWith('.log'))
+      .sort();
+    for (const name of files.slice(0, Math.max(0, files.length - DIAGNOSTICS_KEEP))) {
+      fs.rmSync(path.join(dir, name), { force: true });
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * 把子进程原始 stdout/stderr 写进 0600 的诊断文件，返回**相对 dataDir** 的引用。
+ * renderer 只拿到这个引用，可以经 `mfh:open-path`（有目录包含性校验）让用户显式
+ * 打开；原始内容不会出现在 bridge 返回值、toast、剪贴板或运行历史里。
+ */
+function writeDiagnostics(action: string, jobId: string, result: { stdout: string; stderr: string }): string | undefined {
+  const raw = `${result.stdout}\n${result.stderr}`.trim();
+  if (!raw) return undefined;
+  try {
+    const dir = diagnosticsDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(dir, `${action}-${stamp}-${jobId}.log`);
+    const body = [
+      `# action=${action} job=${jobId} time=${new Date().toISOString()}`,
+      '# 本文件保留子进程原始输出，可能包含下载链接、令牌和本机路径，请勿直接分享。',
+      '',
+      '[stdout]',
+      result.stdout,
+      '',
+      '[stderr]',
+      result.stderr,
+      '',
+    ].join('\n');
+    fs.writeFileSync(file, body, { encoding: 'utf8', mode: 0o600 });
+    pruneDiagnostics(dir);
+    return path.relative(dataDir, file).split(path.sep).join('/');
+  } catch {
+    return undefined;
+  }
+}
+
+/** IPC 返回值里与子进程结果相关的字段：只有 code / 已脱敏 detail / 诊断引用。 */
+interface CliReport {
+  code: string;
+  exitCode: number | null;
+  detail?: string;
+  diagnosticsRef?: string;
+}
+
+function reportFor(
+  action: string,
+  jobId: string,
+  result: RunCliResult,
+  codes: { ok: string; failed: string },
+): CliReport {
+  if (result.code === 0) return { code: codes.ok, exitCode: result.code };
+  const detail = sanitizeText(result.stderr.trim() || result.stdout.trim(), { maxLength: 400 });
+  const diagnosticsRef = writeDiagnostics(action, jobId, result);
+  return {
+    code: codes.failed,
+    exitCode: result.code,
+    ...(detail ? { detail } : {}),
+    ...(diagnosticsRef ? { diagnosticsRef } : {}),
+  };
 }
 
 function ocrRunMessage(result: { stdout: string; stderr: string }): string {
@@ -1575,14 +1657,12 @@ ipcMain.handle('mfh:get-config', () => {
   // secret is populated so the UI can show "已保存（留空则不修改）" placeholders.
   const ocrSrc = (cfg as { ocr?: Record<string, unknown> }).ocr ?? {};
   const credsSrc = asObject((ocrSrc as Record<string, unknown>).credentials);
-  const llmSrc = asObject((cfg as { llm?: unknown }).llm);
   const redactedConfig = redactConfig(cfg as unknown as Record<string, unknown>);
   const secrets = {
     imapPass: Boolean(cfg.imap?.pass),
     tencentSecretId: Boolean(credsSrc.tencentSecretId || credsSrc.secretId),
     tencentSecretKey: Boolean(credsSrc.tencentSecretKey || credsSrc.secretKey),
     ocrApiKey: Boolean(credsSrc.apiKey),
-    llmApiKey: Boolean(llmSrc.apiKey),
   };
   return {
     configPath,
@@ -1646,11 +1726,13 @@ ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
     // 预览（--dry-run）不写缓存也不写 INDEX，没有可回显的逐封明细，因此不带
     // `batch` 字段——让 renderer 显示「没有返回明细」，而不是谎称「本次新增 0 封」。
     const batch = range.dryRun ? undefined : batchFromHashes(result.mails.saved);
+    const report = reportFor('fetch', gate.lease.jobId, result, { ok: 'fetch_done', failed: 'fetch_failed' });
     return {
       ok: result.code === 0,
-      code: result.code,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ...report,
+      message: result.code === 0
+        ? (range.dryRun ? '预览完成。' : '获取邮件完成。')
+        : '获取邮件失败，请检查邮箱设置后重试。',
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(range),
       ...(batch ? { batch } : {}),
@@ -1693,11 +1775,13 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
     // 本次运行真正处理掉的邮件：归档成功的 + 降级到待确认的。仅被跳过（此前已处理）
     // 的邮件不算，否则又变成「展示全量最近行」。
     const batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
+    const report = reportFor('pipeline', gate.lease.jobId, result, { ok: 'pipeline_done', failed: 'pipeline_failed' });
     return {
       ok: result.code === 0,
-      code: result.code,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ...report,
+      message: result.code === 0
+        ? `处理完成，本次处理 ${batch.total} 封邮件。`
+        : '处理缓存邮件失败，请查看诊断信息后重试。',
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(),
       batch,
@@ -1737,9 +1821,8 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     });
     return {
       ok: false,
-      code: 0,
-      stdout: '',
-      stderr: '',
+      code: 'ocr_no_work',
+      exitCode: 0,
       message: '没有待识别文件。请先抓取邮件，或确认本地缓存里有发票附件。',
       summary,
     };
@@ -1825,23 +1908,20 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
       return {
         ok: false,
         stopped: true,
-        code: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
+        code: 'ocr_stopped',
+        exitCode: result.code,
         jobId,
         message: '识别已停止。',
         ...(warning ? { warning } : {}),
         summary: appSummary(),
       };
     }
+    const report = reportFor('ocr', jobId, result, { ok: 'ocr_done', failed: 'ocr_failed' });
     return {
       ok: result.code === 0,
-      code: result.code,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ...report,
       jobId,
-      message: ocrRunMessage(result),
-      ...(result.spawnError ? { detail: result.spawnError.detail } : {}),
+      message: result.code === 0 ? ocrRunMessage(result) : '识别失败，请检查识别服务配置后重试。',
       ...(warning ? { warning } : {}),
       summary: appSummary(),
     };
@@ -1875,14 +1955,13 @@ ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
       : Number.isFinite(scanned)
         ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
         : `${baseLabel}完成。`;
+    const report = reportFor('organize', gate.lease.jobId, result, { ok: 'organize_done', failed: 'organize_failed' });
     return {
       ok: result.code === 0,
-      code: result.code,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ...report,
       jobId: gate.lease.jobId,
-      message: result.code === 0 ? message : `${baseLabel}没有完成，请查看运行记录了解详情。`,
-      ...(result.code === 0 ? {} : { detail: sanitizeText(output, { maxLength: 400 }) }),
+      message: result.code === 0 ? message : `${baseLabel}没有完成，请查看诊断信息了解详情。`,
+      ...(Number.isFinite(scanned) ? { scanned } : {}),
       ...(warning ? { warning } : {}),
       summary: appSummary(),
     };
@@ -1893,10 +1972,22 @@ ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
 
 ipcMain.handle('mfh:stop-ocr', () => {
   if (ocrProcesses.size === 0) return { ok: false, code: 'ocr_not_running', message: '当前没有正在运行的识别任务。' };
+  const details: string[] = [];
+  let treeIncomplete = false;
   for (const [jobId, child] of ocrProcesses) {
     ocrStopRequested.add(jobId);
     // Windows 上必须终止整棵进程树，否则 efapiao serve 会继续占用端口（APP-16）。
-    killProcessTree(child);
+    const outcome = killProcessTree(child);
+    if (!outcome.treeTerminated) treeIncomplete = true;
+    if (outcome.detail) details.push(outcome.detail);
+  }
+  if (treeIncomplete) {
+    return {
+      ok: true,
+      code: 'ocr_stopping_partial',
+      message: '正在停止识别。本机识别服务可能需要多等几秒才会完全退出。',
+      detail: sanitizeText(details.join('；'), { maxLength: 200 }),
+    };
   }
   return { ok: true, code: 'ocr_stopping', message: '正在停止识别。' };
 });
@@ -2115,7 +2206,9 @@ ipcMain.handle('mfh:pending-manual-archive', async (_event, payload: unknown) =>
     title: '选择要归档的发票文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg', 'zip'] },
+      // 不提供 zip：压缩包无法直接归档也无法识别，旧实现会把任意 PK 容器当成 OFD
+      // 塞进队列。用户仍可用「全部文件」选到压缩包，此时 runManualArchive 会明确拒绝。
+      { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg'] },
       { name: '全部文件', extensions: ['*'] },
     ],
   });
@@ -2178,8 +2271,6 @@ ipcMain.handle('mfh:developer-reset', () => {
     { label: '归档发票', value: paths.invoices },
     { label: '待确认队列', value: paths.pending },
     { label: '归档台账', value: output.csv },
-    { label: '输出目录', value: output.dir },
-    { label: '待确认输出目录', value: output.pendingDir },
     { label: '识别结果', value: ocr.resultsCsv },
     { label: '整理输出目录', value: rename.organizedDir },
     { label: '运行状态', value: statePath },
@@ -2243,10 +2334,23 @@ coordinator.setBroadcast((payload) => {
   sendToRenderer('op-state', payload as unknown as Record<string, unknown>);
 });
 
+/**
+ * 回滚上次崩溃/强退留下的半成品归档事务（APP-04）。自动归档与手工归档共用同一份
+ * journal，所以这里一次调用就能把两边的残留一起清掉。
+ */
+function recoverPendingArchives(): void {
+  try {
+    recoverArchiveTransactions(invoicesDirPath());
+  } catch {
+    // 恢复失败不应阻止应用启动；journal 会留到下次再试。
+  }
+}
+
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   ensureUserDataConfig();
   cleanupStaleTempDirs();
+  recoverPendingArchives();
   await loadDevFakeBackend();
   createWindow();
 });
