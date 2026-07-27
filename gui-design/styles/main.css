@@ -15,12 +15,17 @@
   --bg-hover:      rgba(0,0,0,0.04);
   --bg-active:     rgba(0,0,0,0.06);
 
-  /* Text */
+  /* Text — every token below is used for real copy and must stay >= 4.5:1
+     against --bg-pane / --bg-app / --bg-hover. Decorative-only greys live in
+     --fg-deco and must never be used for text. */
   --fg-strong:     #15171b;
   --fg:            #3a3f47;
-  --fg-muted:      #6b7280;
-  --fg-faint:      #9aa1ab;
+  --fg-muted:      #5a616d;
+  --fg-faint:      #636a76;
   --fg-on-accent:  #ffffff;
+
+  /* Decorative grey — icons, dividers, sparklines. Not for text. */
+  --fg-deco:       #9aa1ab;
 
   /* Borders / hairlines */
   --border:        rgba(0,0,0,0.07);
@@ -34,15 +39,20 @@
   --accent-soft:   rgba(47,111,235,0.10);
   --accent-ring:   rgba(47,111,235,0.30);
 
-  /* Semantic — used sparingly, only for state */
+  /* Semantic — the plain tokens are decorative (dots, bars, borders, large
+     numerals); the *-text tokens are the accessible variants for small copy. */
   --ok:            #16a34a;
   --ok-soft:       rgba(22,163,74,0.10);
+  --ok-text:       #147a39;
   --warn:          #b8860b;
   --warn-soft:     rgba(184,134,11,0.12);
+  --warn-text:     #946200;
   --err:           #dc2626;
   --err-soft:      rgba(220,38,38,0.10);
+  --err-text:      #b91c1c;
   --info:          var(--accent);
   --info-soft:     var(--accent-soft);
+  --accent-text:   #1d4ed8;
 
   /* Shadows (used very sparingly) */
   --shadow-pop:    0 6px 22px rgba(20,25,35,0.10), 0 1px 2px rgba(20,25,35,0.06);
@@ -86,9 +96,10 @@
 
   --fg-strong:     #ecedef;
   --fg:            #c8cbd1;
-  --fg-muted:      #8b8f97;
-  --fg-faint:      #5f636b;
+  --fg-muted:      #a2a7b0;
+  --fg-faint:      #8b939f;
   --fg-on-accent:  #0c0d10;
+  --fg-deco:       #5f636b;
 
   --border:        rgba(255,255,255,0.07);
   --border-strong: rgba(255,255,255,0.12);
@@ -102,10 +113,14 @@
 
   --ok:            #6fcf97;
   --ok-soft:       rgba(111,207,151,0.14);
+  --ok-text:       #7fd8a4;
   --warn:          #e6b450;
   --warn-soft:     rgba(230,180,80,0.14);
+  --warn-text:     #edc06a;
   --err:           #ec6a6a;
   --err-soft:      rgba(236,106,106,0.14);
+  --err-text:      #f18888;
+  --accent-text:   #8fbcff;
 
   --shadow-pop:    0 6px 24px rgba(0,0,0,0.32), 0 1px 2px rgba(0,0,0,0.4);
   --shadow-modal:  0 20px 60px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4);
@@ -231,7 +246,7 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
   position: absolute;
   left: 8px; top: 50%;
   transform: translateY(-50%);
-  color: var(--fg-faint);
+  color: var(--fg-deco);
   pointer-events: none;
 }
 .sidebar__search kbd {
@@ -366,6 +381,20 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
   font-weight: 600;
   color: var(--fg-strong);
   letter-spacing: -0.005em;
+  margin: 0;
+}
+.toolbar__title:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-radius: var(--radius-sm);
+}
+.tabs .tab { font-family: inherit; border: 0; background: transparent; }
+.tabs .tab:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.load-more {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
 }
 .toolbar__spacer { flex: 1; }
 .toolbar__meta {
@@ -466,7 +495,7 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
               transform var(--dur-1) var(--ease-out),
               box-shadow var(--dur-1) var(--ease-out);
 }
-.btn:hover { background: var(--bg-hover); border-color: var(--fg-faint); }
+.btn:hover { background: var(--bg-hover); border-color: var(--fg-deco); }
 .btn:active { transform: translateY(1px) scale(0.99); }
 .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
 .btn:disabled {
@@ -487,7 +516,7 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
 .btn--primary:active { background: var(--accent-press); }
 .btn--ghost { background: transparent; border-color: transparent; color: var(--fg-muted); }
 .btn--ghost:hover { background: var(--bg-hover); color: var(--fg-strong); }
-.btn--danger { color: var(--err); border-color: var(--err-soft); }
+.btn--danger { color: var(--err-text); border-color: var(--err-soft); }
 .btn--danger:hover { background: var(--err-soft); }
 .btn--sm { height: 24px; padding: 0 8px; font-size: 11.5px; }
 .btn--lg { height: 34px; padding: 0 16px; font-size: 13.5px; }
@@ -562,7 +591,7 @@ kbd {
   box-shadow: 0 0 0 3px var(--err-soft);
 }
 .is-invalid.mono, span.is-invalid {
-  color: var(--err);
+  color: var(--err-text);
 }
 .textarea {
   height: auto;
@@ -621,7 +650,13 @@ kbd {
 .toggle.is-on { background: var(--accent); }
 .toggle.is-on::after { transform: translateX(12px); }
 
+/* `.check` is a real <input type="checkbox">; the visual language of the old
+   mouse-only div is preserved through appearance:none + ::after. */
 .check {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 0;
   width: 14px; height: 14px;
   border: 1px solid var(--border-strong);
   border-radius: 3px;
@@ -629,10 +664,16 @@ kbd {
   display: inline-grid;
   place-items: center;
   cursor: pointer;
+  flex-shrink: 0;
   transition: background var(--dur-1), border-color var(--dur-1);
 }
-.check.is-on { background: var(--accent); border-color: var(--accent); }
-.check.is-on::after {
+.check:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.check:disabled { cursor: default; opacity: 0.55; }
+.check:checked, .check.is-on { background: var(--accent); border-color: var(--accent); }
+.check:checked::after, .check.is-on::after {
   content: "";
   width: 8px; height: 4px;
   border-left: 1.5px solid var(--fg-on-accent);
@@ -658,10 +699,10 @@ kbd {
   background: var(--bg-hover);
   color: var(--fg-muted);
 }
-.pill--ok    { background: var(--ok-soft);   color: var(--ok); }
-.pill--warn  { background: var(--warn-soft); color: var(--warn); }
-.pill--err   { background: var(--err-soft);  color: var(--err); }
-.pill--info  { background: var(--accent-soft); color: var(--accent); }
+.pill--ok    { background: var(--ok-soft);   color: var(--ok-text); }
+.pill--warn  { background: var(--warn-soft); color: var(--warn-text); }
+.pill--err   { background: var(--err-soft);  color: var(--err-text); }
+.pill--info  { background: var(--accent-soft); color: var(--accent-text); }
 .pill__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 
 .template-fields {
@@ -729,9 +770,9 @@ kbd {
   font-family: var(--f-mono);
   font-size: 11px;
   margin-top: 6px;
-  color: var(--ok);
+  color: var(--ok-text);
 }
-.stat__delta.is-down { color: var(--err); }
+.stat__delta.is-down { color: var(--err-text); }
 .stat__delta.is-flat { color: var(--fg-faint); }
 .stat__spark {
   position: absolute;
@@ -763,19 +804,36 @@ kbd {
   background: var(--bg-pane);
   position: sticky; top: 0;
   user-select: none;
-  cursor: pointer;
+  z-index: 1;
   transition: color var(--dur-1) var(--ease-out);
 }
-.table thead th:hover { color: var(--fg-strong); }
-.table thead th.is-sorted { color: var(--fg-strong); }
-.table thead th.is-sorted::after {
-  content: "↓";
-  margin-left: 4px;
-  color: var(--accent);
+/* Only genuinely sortable headers get a control, a pointer and hover feedback. */
+.th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.th-sort:hover { color: var(--fg-strong); }
+.th-sort:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.table thead th[aria-sort="ascending"],
+.table thead th[aria-sort="descending"] { color: var(--fg-strong); }
+.table thead th[aria-sort="ascending"] .th-sort::after,
+.table thead th[aria-sort="descending"] .th-sort::after {
+  color: var(--accent-text);
   display: inline-block;
   animation: sortIn var(--dur-2) var(--ease-spring);
 }
-.table thead th.is-sorted-desc::after { content: "↑"; }
+.table thead th[aria-sort="ascending"] .th-sort::after { content: "↑"; }
+.table thead th[aria-sort="descending"] .th-sort::after { content: "↓"; }
 @keyframes sortIn {
   from { transform: translateY(-3px); opacity: 0; }
   to   { transform: translateY(0); opacity: 1; }
@@ -792,8 +850,12 @@ kbd {
 .table td.mono, .table td .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 .table .col-num { text-align: right; font-variant-numeric: tabular-nums; }
 .table .col-actions { text-align: right; white-space: nowrap; }
-.table tbody tr.is-selected { background: var(--accent-soft); }
-.table tbody tr.is-selected td { color: var(--fg-strong); }
+/* Read-only tables no longer keep a persistent "selected" highlight: nothing
+   consumed that state and it implied an action that did not exist. */
+
+/* Secondary columns collapse on narrow windows; their content is repeated
+   inline in the primary cell via .cell-sub so nothing becomes unreachable. */
+.cell-sub { display: none; }
 
 .row-expand { height: 0; overflow: hidden; transition: height var(--dur-3) var(--ease-out); }
 .row-expand.is-open { height: var(--h, 120px); }
@@ -821,13 +883,16 @@ kbd {
   transition: border-color var(--dur-1) var(--ease-out),
               background var(--dur-1) var(--ease-out);
 }
+.filterbar .chip { font-family: inherit; }
 .filterbar .chip:hover { border-color: var(--border-strong); }
+.filterbar .chip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.filterbar .chip[aria-pressed="true"],
 .filterbar .chip.is-active {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--fg-strong);
 }
-.filterbar .chip .x { color: var(--fg-faint); }
+.filterbar .chip .x { color: var(--fg-deco); }
 .filterbar .spacer { flex: 1; }
 
 /* ---------- Console ---------- */
@@ -865,10 +930,12 @@ kbd {
   animation: logIn 320ms var(--ease-out) forwards;
 }
 .console__time { color: #5f636b; flex-shrink: 0; }
-.console__tag { color: var(--accent); flex-shrink: 0; min-width: 60px; }
-.console__tag.ok   { color: var(--ok); }
-.console__tag.warn { color: var(--warn); }
-.console__tag.err  { color: var(--err); }
+.console__tag { color: #8fbcff; flex-shrink: 0; min-width: 60px; }
+/* The console keeps a fixed near-black background in both themes, so these
+   stay on the bright (dark-surface) variants regardless of the active theme. */
+.console__tag.ok   { color: #7fd8a4; }
+.console__tag.warn { color: #edc06a; }
+.console__tag.err  { color: #f18888; }
 .console__msg { color: #d3d5db; word-break: break-all; }
 .console__cursor {
   display: inline-block;
@@ -949,9 +1016,9 @@ kbd {
   margin-bottom: 4px;
 }
 .ocr-log__line:last-child { margin-bottom: 0; }
-.ocr-log__line.ok { color: var(--ok); }
-.ocr-log__line.warn { color: var(--warn); }
-.ocr-log__line.err { color: var(--err); }
+.ocr-log__line.ok { color: var(--ok-text); }
+.ocr-log__line.warn { color: var(--warn-text); }
+.ocr-log__line.err { color: var(--err-text); }
 
 /* ---------- Toast ---------- */
 .toast-stack {
@@ -964,12 +1031,14 @@ kbd {
   z-index: 80;
 }
 .toast {
+  position: relative;
   min-width: 280px;
+  max-width: 380px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   border-radius: var(--radius);
-  padding: 10px 14px;
+  padding: 10px 32px 10px 14px;
   box-shadow: var(--shadow-pop);
   animation: toastIn var(--dur-3) var(--ease-spring);
   font-size: 12.5px;
@@ -979,6 +1048,45 @@ kbd {
 .toast.warn { border-left-color: var(--warn); }
 .toast.err  { border-left-color: var(--err); }
 .toast__sub { color: var(--fg-muted); font-size: 11.5px; margin-top: 2px; }
+.toast__close {
+  position: absolute;
+  top: 6px; right: 6px;
+  width: 20px; height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.toast__close:hover { background: var(--bg-hover); color: var(--fg-strong); }
+.toast__close:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+.toast__detail { margin-top: 6px; }
+.toast__detail > summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 11.5px;
+  list-style: none;
+}
+.toast__detail > summary::-webkit-details-marker { display: none; }
+.toast__detail > summary::before { content: "▸ "; }
+.toast__detail[open] > summary::before { content: "▾ "; }
+.toast__detail pre {
+  margin: 6px 0 0;
+  max-height: 130px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: var(--fg-muted);
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+}
+.toast__actions { margin-top: 8px; display: flex; gap: 6px; }
 @keyframes toastIn {
   from { opacity: 0; transform: translateX(20px); }
   to   { opacity: 1; transform: translateX(0);   }
@@ -1049,7 +1157,7 @@ kbd {
 .empty__glyph {
   width: 84px; height: 84px;
   margin-bottom: 14px;
-  color: var(--fg-faint);
+  color: var(--fg-deco);
   animation: floatY 4s ease-in-out infinite;
 }
 @keyframes floatY {
@@ -1152,11 +1260,21 @@ kbd {
   .stats {
     grid-template-columns: repeat(2, 1fr);
   }
+  /* Bounded height keeps the horizontal scrollbar next to the rows instead of
+     parking it below up to 80 rows of content; the sticky header stays put. */
   .table-wrap {
-    overflow-x: auto;
+    overflow: auto;
+    max-height: 62vh;
   }
   .table {
-    min-width: 760px;
+    min-width: 0;
+  }
+  .table .col-secondary { display: none; }
+  .cell-sub {
+    display: block;
+    font-size: 11px;
+    color: var(--fg-muted);
+    margin-top: 2px;
   }
 }
 
@@ -1243,15 +1361,24 @@ kbd {
   margin-bottom: 12px;
   overflow: hidden;
 }
+.group__heading { margin: 0; font-size: inherit; font-weight: inherit; }
+/* Accordion header is a real <button aria-expanded aria-controls>. */
 .group__head {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-out);
 }
 .group__head:hover { background: var(--bg-hover); }
+.group__head:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
 .group__title { font-size: 12.5px; font-weight: 600; color: var(--fg-strong); }
 .group__count {
   font-family: var(--f-mono);
@@ -1272,7 +1399,8 @@ kbd {
   overflow: hidden;
   transition: max-height var(--dur-4) var(--ease-out);
 }
-.group.is-open .group__body { max-height: 1200px; }
+/* `none` rather than a fixed cap: every row in a group must stay reachable. */
+.group.is-open .group__body { max-height: none; }
 .group__inner { padding: 0 16px 14px; }
 
 /* ---------- Theme toggle ---------- */
@@ -1289,6 +1417,121 @@ kbd {
 }
 .theme-toggle:hover { color: var(--fg-strong); border-color: var(--border-strong); }
 
+/* ---------- Accessibility helpers ---------- */
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+[hidden] { display: none !important; }
+
+/* Async navigation pending state */
+.nav-item[aria-busy="true"] { opacity: 0.72; }
+.main[aria-busy="true"] { cursor: progress; }
+.page-skeleton {
+  display: grid;
+  gap: 10px;
+  padding: 22px 28px;
+}
+.page-skeleton__note {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* ---------- Live log follow ---------- */
+.log-host { position: relative; }
+.log-jump {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 3;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-size: 11.5px;
+  font-family: var(--f-sans);
+  cursor: pointer;
+  box-shadow: var(--shadow-pop);
+}
+.log-jump:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* ---------- Config: sticky save status, inline field errors ---------- */
+.save-bar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: var(--bg-pane);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+}
+.save-bar__spacer { flex: 1; }
+.field__error {
+  font-size: 11.5px;
+  color: var(--err-text);
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.field__error::before { content: "⚠"; }
+.error-summary {
+  border: 1px solid var(--err);
+  background: var(--err-soft);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.error-summary__title { font-weight: 600; color: var(--fg-strong); margin-bottom: 6px; }
+.error-summary ul { margin: 0; padding-left: 18px; }
+.error-summary a { color: var(--err-text); text-decoration: underline; cursor: pointer; }
+.config-blocker {
+  border: 1px solid var(--err);
+  background: var(--err-soft);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+
+/* ---------- Pending queue item removal ---------- */
+.pending-item {
+  transition: opacity 170ms var(--ease-out),
+              max-height 170ms var(--ease-out),
+              margin 170ms var(--ease-out),
+              padding 170ms var(--ease-out);
+  max-height: 400px;
+}
+.pending-item.is-removing {
+  opacity: 0;
+  max-height: 0;
+  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+
+/* ---------- Progress ---------- */
+.progress.is-indeterminate .progress__bar {
+  width: 38%;
+  animation: indeterminateSlide 1.4s var(--ease-in-out) infinite;
+}
+@keyframes indeterminateSlide {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(300%); }
+}
+
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -1296,12 +1539,20 @@ kbd {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  /* Stop the decorative shimmer/pulse outright, but keep every semantic state
+     (width, colour, role=progressbar values) intact. */
+  .progress__bar::after,
+  .status-dot::after { display: none !important; }
+  .progress.is-indeterminate .progress__bar { width: 100%; animation: none !important; }
 }
 :root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after {
   animation-duration: 0.01ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
 }
+:root[data-motion="off"] .progress__bar::after,
+:root[data-motion="off"] .status-dot::after { display: none !important; }
+:root[data-motion="off"] .progress.is-indeterminate .progress__bar { width: 100%; animation: none !important; }
 
 /* ---------- Icons ---------- */
 .ic { width: 16px; height: 16px; stroke-width: 1.75; flex-shrink: 0; }

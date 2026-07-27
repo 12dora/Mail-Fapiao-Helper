@@ -14,7 +14,7 @@
     <main class="main">
         <div class="toolbar">
             <span class="toolbar__crumb">工作流</span>
-            <span class="toolbar__title">发票库</span>
+            <h1 class="toolbar__title" tabindex="-1">发票库</h1>
             <div class="toolbar__spacer"></div>
             <span class="toolbar__meta"><span data-lib="recognized">0</span> 条识别结果 · 发票清册</span>
         </div>
@@ -46,28 +46,27 @@
 
             <!-- 过滤栏 -->
             <div class="filterbar">
-                <input class="input" data-search="library" placeholder="按销售方、票号、金额搜索…" style="width: 280px;">
+                <label class="sr-only" for="library-search">在已加载的发票库中搜索销售方、票号或金额</label>
+                <input class="input" type="search" id="library-search" data-search="library" placeholder="在已加载的记录中搜索销售方、票号、金额…" style="width: 280px;">
 
-                <div class="tabs">
-                    <button class="tab is-active" data-library-tab="all">全部</button>
-                    <button class="tab" data-library-tab="recognized">已识别</button>
-                    <button class="tab" data-library-tab="failed">失败</button>
-                    <button class="tab" data-library-tab="supporting">支撑材料</button>
-                    <button class="tab" data-library-tab="itinerary">行程单</button>
+                <div class="tabs" role="group" aria-label="按状态筛选">
+                    <button class="tab is-active" type="button" data-library-tab="all" aria-pressed="true">全部</button>
+                    <button class="tab" type="button" data-library-tab="recognized" aria-pressed="false">已识别</button>
+                    <button class="tab" type="button" data-library-tab="partial" aria-pressed="false">待补充</button>
+                    <button class="tab" type="button" data-library-tab="failed" aria-pressed="false">识别失败</button>
+                    <button class="tab" type="button" data-library-tab="supporting" aria-pressed="false">支撑材料</button>
+                    <button class="tab" type="button" data-library-tab="itinerary" aria-pressed="false">行程单</button>
                 </div>
 
-                <select class="select" data-library-seller style="width: 160px;">
-                    <option value="">全部销售方</option>
+                <label class="sr-only" for="library-seller">按销售方筛选（仅在已加载记录中生效）</label>
+                <select class="select" id="library-seller" data-library-seller style="width: 160px;">
+                    <option value="">全部销售方（已加载记录）</option>
                 </select>
-
-                <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                    <div class="check" data-filter="library-failed"></div>
-                    仅失败项
-                </label>
 
                 <div class="spacer"></div>
                 <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别</button>
-                <select class="select" data-ocr-parallel style="width: 120px;">
+                <label class="sr-only" for="library-ocr-parallel">识别并行数</label>
+                <select class="select" id="library-ocr-parallel" data-ocr-parallel style="width: 120px;">
                     <option value="1" selected>1 个并行</option>
                     <option value="2">2 个并行</option>
                     <option value="4">4 个并行</option>
@@ -109,7 +108,8 @@
                     </div>
                     <span class="mono small muted" data-ocr-counts>0 / 0</span>
                 </div>
-                <div class="progress is-idle mt-12" data-ocr-progress>
+                <div class="progress is-idle mt-12" data-ocr-progress role="progressbar"
+                     aria-label="识别进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="尚未开始">
                     <div class="progress__bar" data-ocr-bar style="--p: 0%"></div>
                 </div>
                 <div class="row gap-12 mt-12 mono small muted">
@@ -131,8 +131,8 @@
                             <th data-sort-key="seller">销售方</th>
                             <th style="width: 200px;" data-sort-key="invoiceNo">发票号码</th>
                             <th class="col-num" style="width: 130px;" data-sort-key="amount">金额</th>
-                            <th style="width: 100px;" data-sort-key="source">来源</th>
-                            <th style="width: 180px;" data-sort-key="filename">文件名</th>
+                            <th class="col-secondary" style="width: 100px;" data-sort-key="source">来源</th>
+                            <th class="col-secondary" style="width: 180px;" data-sort-key="filename">文件名</th>
                             <th style="width: 90px;" data-sort-key="status">状态</th>
                             <th style="width: 80px;">操作</th>
                         </tr>
@@ -145,8 +145,10 @@
 
             <!-- 结果统计 -->
             <div class="row row--between mt-16">
-                <div class="small mono muted"><span data-library-page>显示 0 · 共 0 条</span> · <span data-library-sellers>销售方：全部</span></div>
+                <div class="small mono muted"><span data-library-page>显示 0 · 已加载 0 · 共 0 条</span> · <span data-library-sellers>销售方：全部（仅在已加载记录中筛选）</span></div>
             </div>
+
+            <div class="load-more" data-load-more="library"></div>
         </div>
     </main>
 </div>

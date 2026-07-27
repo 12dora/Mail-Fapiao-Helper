@@ -30,7 +30,9 @@
 
     const NAV = [
         { group: '日常操作', items: [
-            { id: 'dashboard', label: '开始处理', href: 'dashboard.html', icon: 'play',    badge: '⌘R' },
+            // No shortcut badge here: the only real global shortcut is ⌘/Ctrl+K
+            // (search focus), and it is shown on the search box itself.
+            { id: 'dashboard', label: '开始处理', href: 'dashboard.html', icon: 'play' },
             { id: 'inbox',     label: '邮件记录', href: 'inbox.html',     icon: 'inbox',   badge: '0', badgeKey: 'inbox' },
             { id: 'library',   label: '发票库',   href: 'library.html',   icon: 'library', badge: '0', badgeKey: 'library' },
             { id: 'pending',   label: '待确认',   href: 'pending.html',   icon: 'pending', badge: '0', badgeKey: 'pending'  },
@@ -41,18 +43,55 @@
         ]},
     ];
     const SPA_PAGES = new Set(['dashboard', 'inbox', 'library', 'pending', 'config', 'settings']);
+    const PAGE_META = {
+        dashboard: { heading: '运行控制台', title: '运行控制台 · 发票助手' },
+        inbox:     { heading: '邮件记录',   title: '收件箱 · 发票助手' },
+        library:   { heading: '发票库',     title: '发票库 · 发票助手' },
+        pending:   { heading: '待处理队列', title: '待处理队列 · 发票助手' },
+        config:    { heading: '配置',       title: '配置 · 发票助手' },
+        settings:  { heading: '关于',       title: '关于 · 发票助手' },
+    };
     const PAGE_SCRIPT_INIT = {
         dashboard: () => window.MFH_PAGE_INIT?.dashboard?.(),
         config: () => window.MFH_PAGE_INIT?.config?.(),
     };
+
+    /* ---------- Platform-correct modifier key ---------- */
+    const IS_APPLE = /mac|iphone|ipad|ipod/i.test(navigator.platform || navigator.userAgent || '');
+    const MOD_KEY = IS_APPLE ? '⌘' : 'Ctrl';
+    const SEARCH_HINT = {
+        inbox: '在已加载的邮件记录中搜索…',
+        library: '在已加载的发票库中搜索…',
+    };
+    function searchPlaceholder(pageId) {
+        return SEARCH_HINT[pageId] || '搜索发票库（已加载记录）…';
+    }
+
+    /* ---------- Checkbox helpers ----------
+       `.check` is now a native <input type="checkbox">. These helpers keep
+       working if any legacy div.check.is-on markup is still around. */
+    function isChecked(el) {
+        if (!el) return false;
+        if (typeof el.checked === 'boolean' && el.tagName === 'INPUT') return el.checked;
+        return el.classList.contains('is-on');
+    }
+    function setChecked(el, value) {
+        if (!el) return;
+        const on = Boolean(value);
+        if (el.tagName === 'INPUT') el.checked = on;
+        else el.classList.toggle('is-on', on);
+    }
+    function checkedBySelector(selector, scope) {
+        return isChecked((scope || document).querySelector(selector));
+    }
 
     function navHTML(active) {
         return NAV.map(sec => `
             <div class="nav-group">
                 <div class="nav-group__title">${sec.group}</div>
                 ${sec.items.map(it => `
-                    <a class="nav-item ${it.id === active ? 'is-active' : ''}" href="${document.body.dataset.page ? it.href : rel(it.href)}" data-spa-page="${it.id}">
-                        <span class="nav-item__icon">${ICON[it.icon]}</span>
+                    <a class="nav-item ${it.id === active ? 'is-active' : ''}" href="${document.body.dataset.page ? it.href : rel(it.href)}" data-spa-page="${it.id}"${it.id === active ? ' aria-current="page"' : ''}>
+                        <span class="nav-item__icon" aria-hidden="true">${ICON[it.icon]}</span>
                         <span>${it.label}</span>
                         ${it.badge ? `<span class="nav-item__badge" ${it.badgeKey ? `data-nav-badge="${it.badgeKey}"` : ''}>${it.badge}</span>` : ''}
                     </a>
@@ -66,31 +105,77 @@
     }
 
     function sidebarHTML(active) {
+        const placeholder = searchPlaceholder(active);
         return `
             <aside class="sidebar">
                 <div class="sidebar__brand">
-                    <div class="sidebar__logo">F</div>
+                    <div class="sidebar__logo" aria-hidden="true">F</div>
                     <div>
                         <div class="sidebar__title">发票助手</div>
-                        <div class="sidebar__ver">本地预览版</div>
+                        <div class="sidebar__ver" data-app-version>版本读取中…</div>
                     </div>
                 </div>
                 <div class="sidebar__search">
-                    <span class="sidebar__search-icon">${ICON.search}</span>
-                    <input type="text" placeholder="搜索发票或邮件…" aria-label="搜索发票或邮件" data-global-search>
-                    <kbd>⌘K</kbd>
+                    <span class="sidebar__search-icon" aria-hidden="true">${ICON.search}</span>
+                    <label class="sr-only" for="global-search">${escapeHtml(placeholder)}</label>
+                    <input type="search" id="global-search" placeholder="${escapeHtml(placeholder)}" data-global-search>
+                    <kbd title="${MOD_KEY}+K 聚焦搜索">${MOD_KEY}K</kbd>
                 </div>
-                <div class="sidebar__nav">
+                <nav class="sidebar__nav" aria-label="主导航">
                     ${navHTML(active)}
-                </div>
+                </nav>
                 <div class="sidebar__foot">
-                    <span class="status-dot" data-mail-status-dot></span>
+                    <span class="status-dot" data-mail-status-dot aria-hidden="true"></span>
                     <span data-mail-status-label>邮箱未配置</span>
                     <span class="sidebar__foot-meta" data-clock>--:--</span>
-                    <button class="theme-toggle" data-theme-toggle aria-label="切换到深色主题" title="切换到深色主题">${ICON.moon}</button>
+                    <button class="theme-toggle" type="button" data-theme-toggle aria-label="切换到深色主题" title="切换到深色主题">${ICON.moon}</button>
                 </div>
             </aside>
         `;
+    }
+
+    /* ---------- Screen-reader announcements ---------- */
+    function liveRegion(kind) {
+        const id = kind === 'alert' ? 'mfh-live-alert' : 'mfh-live-status';
+        let el = document.getElementById(id);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = id;
+            el.className = 'sr-only';
+            if (kind === 'alert') {
+                el.setAttribute('role', 'alert');
+            } else {
+                el.setAttribute('role', 'status');
+                el.setAttribute('aria-live', 'polite');
+            }
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+
+    const ANNOUNCE_THROTTLE_MS = 700;
+    let lastAnnounceAt = 0;
+    let announceTimer = 0;
+    function announce(message, kind = 'status') {
+        if (!message) return;
+        if (kind === 'alert') {
+            liveRegion('alert').textContent = String(message);
+            return;
+        }
+        // Throttle progress chatter so a fast task does not flood the SR queue.
+        const now = Date.now();
+        const region = liveRegion('status');
+        window.clearTimeout(announceTimer);
+        const wait = Math.max(0, ANNOUNCE_THROTTLE_MS - (now - lastAnnounceAt));
+        announceTimer = window.setTimeout(() => {
+            lastAnnounceAt = Date.now();
+            region.textContent = String(message);
+        }, wait);
+    }
+
+    function prefersReducedMotion() {
+        if (document.documentElement.getAttribute('data-motion') === 'off') return true;
+        return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
     }
 
     function titlebarHTML() {
@@ -150,9 +235,16 @@
                 btn.style.setProperty('--ry', `${e.clientY - r.top}px`);
             }
 
-            // Group accordion toggles
+            // Group accordion toggles (native button + aria-expanded/controls)
             const gh = e.target.closest('.group__head');
-            if (gh) gh.parentElement.classList.toggle('is-open');
+            if (gh) {
+                const group = gh.closest('.group');
+                const open = !group.classList.contains('is-open');
+                group.classList.toggle('is-open', open);
+                gh.setAttribute('aria-expanded', open ? 'true' : 'false');
+                const body = gh.getAttribute('aria-controls') ? document.getElementById(gh.getAttribute('aria-controls')) : null;
+                if (body) body.setAttribute('aria-hidden', open ? 'false' : 'true');
+            }
 
             const spaLink = e.target.closest('a[data-spa-page]');
             if (spaLink) {
@@ -168,9 +260,10 @@
                 return;
             }
 
-            const sortHeader = e.target.closest('.table thead th');
-            if (sortHeader) {
-                const key = sortHeader.dataset.sortKey;
+            const sortButton = e.target.closest('.table thead th .th-sort');
+            if (sortButton) {
+                const sortHeader = sortButton.closest('th');
+                const key = sortHeader?.dataset.sortKey;
                 if (key) {
                     const page = document.body.dataset.page;
                     const stateKey = page === 'library' ? 'sortLibrary' : page === 'inbox' ? 'sortInbox' : '';
@@ -180,11 +273,11 @@
                         window.FPH[stateKey] = { key, dir };
                         window.FPH.sortKey = key;
                         window.FPH.sortDir = dir;
-                        sortHeader.parentElement.querySelectorAll('th').forEach(x => x.classList.remove('is-sorted', 'is-sorted-desc'));
-                        sortHeader.classList.add('is-sorted');
-                        if (dir === 'desc') sortHeader.classList.add('is-sorted-desc');
+                        sortHeader.parentElement.querySelectorAll('th[data-sort-key]').forEach((x) => x.setAttribute('aria-sort', 'none'));
+                        sortHeader.setAttribute('aria-sort', dir === 'asc' ? 'ascending' : 'descending');
                         if (page === 'inbox') renderInboxRows();
                         else if (page === 'library') renderLibraryRows();
+                        announce(`已按${sortButton.textContent.trim()}${dir === 'asc' ? '升序' : '降序'}排序`);
                     }
                 }
             }
@@ -192,16 +285,22 @@
             // Tabs
             const tab = e.target.closest('.tabs .tab');
             if (tab) {
-                tab.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('is-active'));
+                tab.parentElement.querySelectorAll('.tab').forEach((t) => {
+                    t.classList.remove('is-active');
+                    t.setAttribute('aria-pressed', 'false');
+                });
                 tab.classList.add('is-active');
+                tab.setAttribute('aria-pressed', 'true');
                 if (tab.dataset.libraryTab) renderLibraryRows();
                 if (tab.dataset.pendingTab) renderPendingGroups();
             }
 
-            // Filter chip toggle
+            // Filter chip toggle (native button + aria-pressed)
             const chip = e.target.closest('.filterbar .chip[data-toggle]');
             if (chip) {
-                chip.classList.toggle('is-active');
+                const on = !chip.classList.contains('is-active');
+                chip.classList.toggle('is-active', on);
+                chip.setAttribute('aria-pressed', on ? 'true' : 'false');
                 const filter = String(chip.dataset.filter || '');
                 if (filter.startsWith('inbox-')) renderInboxRows();
                 else if (filter.startsWith('library-')) renderLibraryRows();
@@ -212,46 +311,15 @@
             const tg = e.target.closest('.toggle');
             if (tg) tg.classList.toggle('is-on');
 
-            let ck = e.target.closest('.check');
-            if (!ck) {
-                // Clicking on label text should also toggle the inner .check (no native checkbox here).
-                const label = e.target.closest('label');
-                if (label && !label.classList.contains('field__label')) {
-                    const inner = label.querySelector('.check');
-                    if (inner) ck = inner;
-                }
-            }
-            if (ck) {
-                ck.classList.toggle('is-on');
-                const configKey = ck.dataset.configCheck;
-                if (configKey) {
-                    const isOn = ck.classList.contains('is-on');
-                    document.querySelectorAll(`.check[data-config-check="${configKey}"]`).forEach((peer) => {
-                        if (peer !== ck) peer.classList.toggle('is-on', isOn);
-                    });
-                    // Persist the change for checks outside the config page; the config page
-                    // has its own debounced auto-save that already handles its own checks.
-                    if (!ck.closest('main.main[data-spa-page="config"]') && document.body.dataset.page !== 'config') {
-                        persistConfigCheck(configKey, isOn);
-                    }
-                }
-                if (ck.dataset.filter === 'library-failed') renderLibraryRows();
-            }
-
             const action = e.target.closest('[data-action]');
             if (action && !t && !action.closest('.tabs') && !action.closest('#date-preset-buttons')) {
                 // Catch here so any action handler that rejects (e.g. an IPC error)
                 // shows feedback instead of becoming a silent unhandled rejection.
-                Promise.resolve(handleAction(action)).catch((err) => showToast('运行失败', err?.message || '请重试。', 'err'));
+                Promise.resolve(handleAction(action)).catch((err) => showToast('运行失败', '这个操作没有完成，请重试。', 'err', { detail: err?.message }));
             }
         });
 
-        document.body.addEventListener('click', (e) => {
-            const row = e.target.closest('.table tbody tr');
-            if (!row) return;
-            row.parentElement.querySelectorAll('tr').forEach(x => x.classList.remove('is-selected'));
-            row.classList.add('is-selected');
-        });
+        // Read-only tables: no persistent selection highlight (nothing consumed it).
 
         document.body.addEventListener('input', (e) => {
             if (e.target.matches('[data-search="inbox"]')) renderInboxRows();
@@ -260,6 +328,25 @@
 
         document.body.addEventListener('change', (e) => {
             if (e.target.matches('[data-library-seller]')) renderLibraryRows();
+            const ck = e.target.closest('.check');
+            if (!ck) return;
+            const on = isChecked(ck);
+            const configKey = ck.dataset.configCheck;
+            if (configKey) {
+                document.querySelectorAll(`.check[data-config-check="${configKey}"]`).forEach((peer) => {
+                    if (peer !== ck) setChecked(peer, on);
+                });
+                // Persist the change for checks outside the config page; the config page
+                // has its own debounced auto-save that already handles its own checks.
+                if (!ck.closest('main.main[data-spa-page="config"]') && document.body.dataset.page !== 'config') {
+                    persistConfigCheck(configKey, on);
+                }
+            }
+            if (ck.dataset.fetchCheck === 'matchSubject' || ck.dataset.fetchCheck === 'matchBody') {
+                enforceMatchScope(ck);
+            }
+            if (String(ck.dataset.filter || '').startsWith('library-')) renderLibraryRows();
+            if (String(ck.dataset.filter || '').startsWith('inbox-')) renderInboxRows();
         });
 
         refreshClock();
@@ -268,11 +355,169 @@
         loadBridgeSummary();
         loadBridgeConfig();
         wireOperationProgress();
+        wireOpState();
+        loadAppInfo();
         window.addEventListener('popstate', () => {
             const page = pageIdFromPath(location.pathname);
             if (page) showPage(page, null, { push: false });
         });
-        markPageLoaded(document.body.dataset.page || pageIdFromPath(location.pathname));
+        const initialPage = document.body.dataset.page || pageIdFromPath(location.pathname);
+        markPageLoaded(initialPage);
+        updateActiveNav(initialPage);
+        upgradeStaticMarkup(document);
+        wireLogFollow();
+    }
+
+    /* ---------- Progressive upgrade of static page markup ----------
+       Keeps the hand-written HTML readable while guaranteeing the
+       accessibility contract (sortable headers, progress semantics,
+       focusable page heading) on every page, including SPA-loaded ones. */
+    function upgradeStaticMarkup(root) {
+        const scope = root || document;
+        scope.querySelectorAll?.('.toolbar__title:not([tabindex])').forEach((el) => {
+            el.setAttribute('tabindex', '-1');
+        });
+        scope.querySelectorAll?.('.table thead th[data-sort-key]').forEach((th) => {
+            if (th.querySelector('.th-sort')) return;
+            const label = th.textContent.trim();
+            th.textContent = '';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'th-sort';
+            button.textContent = label;
+            button.setAttribute('aria-label', `按${label}排序`);
+            th.appendChild(button);
+            if (!th.hasAttribute('aria-sort')) th.setAttribute('aria-sort', 'none');
+        });
+        scope.querySelectorAll?.('.progress').forEach((el) => {
+            if (el.hasAttribute('role')) return;
+            el.setAttribute('role', 'progressbar');
+            el.setAttribute('aria-valuemin', '0');
+            el.setAttribute('aria-valuemax', '100');
+            el.setAttribute('aria-valuenow', '0');
+            if (!el.hasAttribute('aria-label') && !el.hasAttribute('aria-labelledby')) {
+                el.setAttribute('aria-label', el.hasAttribute('data-ocr-progress') ? '识别进度'
+                    : el.hasAttribute('data-file-progress') ? '获取发票文件进度' : '获取邮件进度');
+            }
+            el.setAttribute('aria-valuetext', '尚未开始');
+        });
+    }
+
+    /* Subject/body are the only two keyword match scopes; turning both off would
+       silently match nothing (and the backend quietly re-enables subject). */
+    function enforceMatchScope(changed) {
+        const subject = document.querySelector('[data-fetch-check="matchSubject"]');
+        const body = document.querySelector('[data-fetch-check="matchBody"]');
+        if (!subject || !body) return;
+        if (isChecked(subject) || isChecked(body)) return;
+        setChecked(changed, true);
+        showToast('至少需要一个匹配范围', '“匹配主题”和“匹配正文”不能同时关闭，否则不会命中任何邮件。已为你恢复。', 'warn');
+    }
+
+    /* Reflects the backend-normalised filter (contract: normalizedFilter) back
+       into the controls so the UI never claims a setting the run did not use. */
+    function applyNormalizedFilter(normalized) {
+        if (!normalized || typeof normalized !== 'object') return;
+        if (typeof normalized.matchSubject === 'boolean') {
+            document.querySelectorAll('[data-fetch-check="matchSubject"]').forEach((el) => setChecked(el, normalized.matchSubject));
+        }
+        if (typeof normalized.matchBody === 'boolean') {
+            document.querySelectorAll('[data-fetch-check="matchBody"]').forEach((el) => setChecked(el, normalized.matchBody));
+        }
+        window.FPH.normalizedFilter = normalized;
+        const note = document.querySelector('[data-normalized-filter]');
+        if (note) {
+            const parts = [];
+            if (normalized.matchSubject) parts.push('主题');
+            if (normalized.matchBody) parts.push('正文');
+            const keywords = Array.isArray(normalized.keywords) ? normalized.keywords.join('、') : '';
+            note.textContent = `本次实际使用：匹配${parts.join(' + ') || '（无）'}${keywords ? ` · 关键词 ${keywords}` : ''}`;
+        }
+    }
+
+    /* ---------- Mutually exclusive operations (contract: 'op-state') ---------- */
+    const MUTEX_ACTIONS = ['run-pipeline', 'rerun-pipeline', 'ocr-toggle', 'organize', 'rename-organize'];
+    function wireOpState() {
+        const subscribe = window.mfhBridge?.onOpState;
+        if (typeof subscribe !== 'function') return; // Graceful degradation.
+        subscribe((payload) => {
+            const running = payload?.running || null;
+            window.FPH.opState = running;
+            applyOpState(running);
+        });
+    }
+    function applyOpState(running) {
+        const busyKind = running?.kind || '';
+        document.querySelectorAll('#run-btn').forEach((el) => {
+            if (!busyKind) { el.removeAttribute('data-op-locked'); return; }
+            if (busyKind !== 'fetch') { el.disabled = true; el.dataset.opLocked = 'true'; }
+        });
+        MUTEX_ACTIONS.forEach((name) => {
+            document.querySelectorAll(`[data-action="${name}"]`).forEach((el) => {
+                if (!busyKind) {
+                    if (el.dataset.opLocked === 'true') { el.disabled = false; delete el.dataset.opLocked; }
+                    return;
+                }
+                const ownKind = name === 'ocr-toggle' ? 'ocr' : name.includes('organize') ? 'organize' : 'pipeline';
+                if (ownKind === busyKind) return; // Its own stop/progress control stays live.
+                el.disabled = true;
+                el.dataset.opLocked = 'true';
+                el.title = '另一个任务正在运行，完成后可再操作。';
+            });
+        });
+        if (!busyKind) {
+            document.querySelectorAll('[data-op-locked="true"]').forEach((el) => {
+                el.disabled = false;
+                delete el.dataset.opLocked;
+                el.removeAttribute('title');
+            });
+        }
+    }
+
+    /* ---------- About / version metadata (COPY-07B) ---------- */
+    async function loadAppInfo() {
+        let info = null;
+        try {
+            const fn = window.mfhBridge?.getAppInfo;
+            if (typeof fn === 'function') info = await fn();
+        } catch {
+            info = null;
+        }
+        window.FPH.appInfo = info || null;
+        const version = info?.version ? `v${info.version}` : '版本未知';
+        const channel = info?.channel || (window.mfhBridge ? '桌面版' : '静态预览');
+        document.querySelectorAll('[data-app-version]').forEach((el) => { el.textContent = version; });
+        document.querySelectorAll('[data-about-version]').forEach((el) => { el.textContent = version; });
+        document.querySelectorAll('[data-about-channel]').forEach((el) => { el.textContent = channel; });
+        applyOcrStatusCards();
+    }
+
+    /* “已配置” must reflect real config, never a hardcoded pill. */
+    function applyOcrStatusCards() {
+        const cfg = window.FPH.configPayload?.config || {};
+        const secrets = window.FPH.configPayload?.secrets || {};
+        const ocr = cfg.ocr || {};
+        const engineEnabled = ocr.enabled !== false;
+        const engineEl = document.querySelector('[data-about-engine]');
+        if (engineEl) {
+            engineEl.className = `pill ${engineEnabled ? 'pill--ok' : ''}`;
+            engineEl.textContent = engineEnabled ? `已启用 · ${ocr.provider || 'efapiao'}` : '未启用（只保存原件）';
+        }
+        const hasId = Boolean(secrets.tencentSecretId ?? ocr.credentials?.tencentSecretId ?? ocr.credentials?.secretId);
+        const hasKey = Boolean(secrets.tencentSecretKey ?? ocr.credentials?.tencentSecretKey ?? ocr.credentials?.secretKey);
+        const cloudEl = document.querySelector('[data-about-cloud]');
+        if (cloudEl) {
+            const configured = hasId && hasKey;
+            cloudEl.className = `pill ${configured ? 'pill--warn' : ''}`;
+            cloudEl.textContent = configured ? '已填写密钥（会上传发票文件）' : '未填写密钥（不会上传文件）';
+        }
+        const modeEl = document.querySelector('[data-about-ocr-mode]');
+        if (modeEl) {
+            const mode = ocr.ocrMode || 'auto';
+            modeEl.textContent = mode === 'disabled' ? '仅本地规则，不调用云端 OCR'
+                : mode === 'required' ? '每个文件都调用云端 OCR'
+                : '规则优先，必要时调用云端 OCR';
+        }
     }
 
     function pageIdFromPath(pathname) {
@@ -298,55 +543,146 @@
 
     function updateActiveNav(pageId) {
         document.querySelectorAll('[data-spa-page]').forEach((link) => {
-            link.classList.toggle('is-active', link.dataset.spaPage === pageId);
+            const active = link.dataset.spaPage === pageId;
+            link.classList.toggle('is-active', active);
+            if (link.classList.contains('nav-item')) {
+                if (active) link.setAttribute('aria-current', 'page');
+                else link.removeAttribute('aria-current');
+            }
         });
     }
 
+    /* Per-page in-flight load cache: a double click can never append two
+       <main> elements or execute a page's inline script twice. */
+    const pageLoads = new Map();
+    // Monotonic navigation token — only the newest request may commit.
+    let navToken = 0;
+
     async function loadPageMain(pageId, href) {
-        const url = href || pathForPage(pageId);
-        const response = await fetch(url, { cache: 'no-store' });
-        if (!response.ok) throw new Error(`无法加载页面：${url}`);
-        const html = await response.text();
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        const main = doc.querySelector('main.main');
-        if (!main) throw new Error(`页面缺少 main：${url}`);
-        const clone = main.cloneNode(true);
-        clone.dataset.spaPage = pageId;
-        clone.dataset.spaLoaded = 'true';
-        clone.style.display = 'none';
-        document.querySelector('.app')?.appendChild(clone);
-        for (const script of doc.querySelectorAll('script')) {
-            if (script.src && script.src.includes('/scripts/shell.js')) continue;
-            if (script.src && script.getAttribute('src')?.includes('../scripts/shell.js')) continue;
-            const node = document.createElement('script');
-            if (script.src) node.src = script.src;
-            else node.textContent = script.textContent || '';
-            document.body.appendChild(node);
-            if (!script.src) node.remove();
+        const existing = document.querySelector(`main.main[data-spa-page="${pageId}"]`);
+        if (existing) return existing;
+        const cached = pageLoads.get(pageId);
+        if (cached) return cached;
+        const promise = (async () => {
+            const url = href || pathForPage(pageId);
+            const response = await fetch(url, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`无法加载页面：${url}`);
+            const html = await response.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const main = doc.querySelector('main.main');
+            if (!main) throw new Error(`页面缺少 main：${url}`);
+            // A concurrent request may have finished while we were awaiting.
+            const raced = document.querySelector(`main.main[data-spa-page="${pageId}"]`);
+            if (raced) return raced;
+            const clone = main.cloneNode(true);
+            clone.dataset.spaPage = pageId;
+            clone.dataset.spaLoaded = 'true';
+            clone.style.display = 'none';
+            document.querySelector('.app')?.appendChild(clone);
+            upgradeStaticMarkup(clone);
+            for (const script of doc.querySelectorAll('script')) {
+                if (script.src && script.src.includes('/scripts/shell.js')) continue;
+                if (script.src && script.getAttribute('src')?.includes('../scripts/shell.js')) continue;
+                const node = document.createElement('script');
+                if (script.src) node.src = script.src;
+                else node.textContent = script.textContent || '';
+                document.body.appendChild(node);
+                if (!script.src) node.remove();
+            }
+            PAGE_SCRIPT_INIT[pageId]?.();
+            return clone;
+        })();
+        pageLoads.set(pageId, promise);
+        try {
+            return await promise;
+        } catch (err) {
+            pageLoads.delete(pageId); // Allow a retry after a failed load.
+            throw err;
         }
-        PAGE_SCRIPT_INIT[pageId]?.();
-        return clone;
+    }
+
+    function setNavPending(pageId, pending) {
+        document.querySelectorAll('.nav-item[data-spa-page]').forEach((link) => {
+            if (link.dataset.spaPage !== pageId) return;
+            if (pending) link.setAttribute('aria-busy', 'true');
+            else link.removeAttribute('aria-busy');
+        });
+        const current = document.querySelector('main.main:not([style*="display: none"])');
+        if (current) {
+            if (pending) current.setAttribute('aria-busy', 'true');
+            else current.removeAttribute('aria-busy');
+        }
+    }
+
+    function showLoadingHint(pageId, token) {
+        // Only surfaced when the load is actually slow (~150ms), so fast local
+        // navigations never flash a skeleton.
+        return window.setTimeout(() => {
+            if (token !== navToken) return;
+            const current = document.querySelector('main.main:not([style*="display: none"])');
+            if (!current || current.querySelector('.page-skeleton')) return;
+            const hint = document.createElement('div');
+            hint.className = 'page-skeleton';
+            hint.dataset.navSkeleton = 'true';
+            hint.innerHTML = `
+                <div class="page-skeleton__note">正在打开「${escapeHtml(PAGE_META[pageId]?.heading || '页面')}」…</div>
+                <div class="skeleton" style="height: 14px; width: 40%;"></div>
+                <div class="skeleton" style="height: 10px;"></div>
+                <div class="skeleton" style="height: 10px; width: 80%;"></div>
+            `;
+            current.appendChild(hint);
+            announce(`正在打开${PAGE_META[pageId]?.heading || '页面'}`);
+        }, 150);
+    }
+
+    function clearLoadingHint(timer) {
+        window.clearTimeout(timer);
+        document.querySelectorAll('[data-nav-skeleton]').forEach((el) => el.remove());
     }
 
     async function showPage(pageId, href, opts = {}) {
         if (!SPA_PAGES.has(pageId)) return;
         const current = document.querySelector('main.main:not([style*="display: none"])');
         if (current?.dataset.spaPage === pageId) return;
+        const token = ++navToken;
+        setNavPending(pageId, true);
+        const hintTimer = showLoadingHint(pageId, token);
         try {
-            let target = document.querySelector(`main.main[data-spa-page="${pageId}"]`);
-            if (!target) target = await loadPageMain(pageId, href);
+            const target = await loadPageMain(pageId, href);
+            // A newer navigation started while this one was loading: discard.
+            if (token !== navToken) return;
             document.querySelectorAll('main.main').forEach((main) => {
                 main.style.display = main === target ? '' : 'none';
             });
             document.body.dataset.page = pageId;
             updateActiveNav(pageId);
-            await loadBridgeSummary();
-            await loadBridgeConfig();
+            const meta = PAGE_META[pageId];
+            if (meta) document.title = meta.title;
+            const search = document.querySelector('[data-global-search]');
+            if (search) {
+                const placeholder = searchPlaceholder(pageId);
+                search.placeholder = placeholder;
+                document.querySelector('label[for="global-search"]')?.replaceChildren(placeholder);
+            }
+            target.scrollTop = 0;
+            target.querySelector('.page')?.scrollTo?.({ top: 0, behavior: 'auto' });
+            const heading = target.querySelector('.toolbar__title');
+            if (heading) {
+                heading.setAttribute('tabindex', '-1');
+                heading.focus({ preventScroll: true });
+            }
+            wireLogFollow();
+            announce(`${meta?.heading || pageId} 已打开`);
             if (opts.push !== false) {
                 history.pushState({ page: pageId }, '', pathForPage(pageId));
             }
+            await loadBridgeSummary();
+            await loadBridgeConfig();
         } catch (err) {
-            showToast('页面加载失败', err?.message || '请重试。', 'err');
+            if (token === navToken) showToast('页面加载失败', '请重试，或重启应用。', 'err', { detail: err?.message });
+        } finally {
+            clearLoadingHint(hintTimer);
+            setNavPending(pageId, false);
         }
     }
 
@@ -392,6 +728,51 @@
         return `${day} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     }
 
+    /* ---------- Redaction (COPY-01 / COPY-05) ----------
+       Anything that can reach a toast, the log export, a history entry or the
+       clipboard passes through here first: URL query/fragment, absolute local
+       paths and full content hashes are removed. */
+    const URL_RE = /\b(?:https?|ftp):\/\/[^\s"'<>]+/gi;
+    const WIN_PATH_RE = /\b[A-Za-z]:\\[^\s"'<>]+/g;
+    const POSIX_PATH_RE = /(?:^|[\s(:])(\/(?:Users|home|var|tmp|private|Applications|opt|etc|mnt)\/[^\s"'<>)]*)/g;
+    const HASH_RE = /\b[0-9a-f]{12,}\b/gi;
+
+    function sanitizeText(value) {
+        let out = String(value ?? '');
+        out = out.replace(URL_RE, (match) => {
+            try {
+                const url = new URL(match);
+                return `${url.origin}${url.pathname}`;
+            } catch {
+                return match.split(/[?#]/)[0];
+            }
+        });
+        out = out.replace(WIN_PATH_RE, (match) => `…\\${match.split(/[\\/]/).filter(Boolean).pop() || ''}`);
+        out = out.replace(POSIX_PATH_RE, (match, path) => match.replace(path, `…/${path.split('/').filter(Boolean).pop() || ''}`));
+        out = out.replace(HASH_RE, (match) => `${match.slice(0, 6)}…`);
+        return out;
+    }
+
+    /* Short, shareable reference for a pending row instead of a raw hash. */
+    function supportRef(hash) {
+        const value = String(hash || '').trim();
+        return value ? value.slice(0, 6).toUpperCase() : '——';
+    }
+
+    /* Prefer the backend's concise Chinese `message`; fall back to a redacted
+       version of whatever legacy field is available. */
+    function eventMessage(data) {
+        const message = typeof data?.message === 'string' ? data.message : '';
+        return sanitizeText(message);
+    }
+
+    function eventDetail(data) {
+        const detail = data?.detail ?? data?.stderr ?? data?.error ?? '';
+        const text = typeof detail === 'string' ? detail : '';
+        if (!text) return '';
+        return sanitizeText(text).slice(0, 1200);
+    }
+
     function pill(label, kind = '') {
         return `<span class="pill ${kind ? `pill--${kind}` : ''}">${escapeHtml(label)}</span>`;
     }
@@ -424,7 +805,8 @@
         if (label === '完整') return pill('完整', 'ok');
         if (label === '待补充') return pill('待补充', 'warn');
         if (label === '识别失败') return pill('识别失败', 'err');
-        return pill(label || '已识别');
+        if (label === '已归档') return pill('已归档');
+        return pill(label || '未知状态');
     }
 
     function sortableValue(row, key) {
@@ -461,7 +843,7 @@
             window.FPH.summary = summary;
             applySummary(summary);
         } catch (err) {
-            showToast('读取本地数据失败', err?.message || '请检查配置文件是否完整。', 'err');
+            showToast('读取本地数据失败', '无法读取本机的邮件和发票记录，请确认配置文件是否完整。', 'err', { detail: err?.message });
         }
     }
 
@@ -470,9 +852,13 @@
         try {
             const payload = await window.mfhBridge.getConfig();
             window.FPH.configPayload = payload;
+            // A corrupted config must show a blocking repair entry point, never "已加载".
+            if (payload?.configError) showConfigError(payload.configError);
+            else document.querySelectorAll('[data-config-blocker]').forEach((el) => { el.hidden = true; });
             applyConfig(payload.config || {}, payload.secrets || {});
-        } catch {
-            // Config page keeps its inline defaults when no local config exists.
+        } catch (err) {
+            showConfigError({ message: '无法读取本机配置文件。' });
+            window.FPH.configLoadError = err?.message || '';
         } finally {
             window.FPH.configReady = true;
             window.FPH._configReadyResolvers?.forEach((resolve) => resolve());
@@ -509,12 +895,97 @@
         return `<div class="console__line"><span class="console__time">${logTime()}</span><span class="console__tag ${kind}">${escapeHtml(tag)}</span><span class="console__msg">${escapeHtml(message)}</span></div>`;
     }
 
-    function resetOcrProgress(message = '正在准备识别文件。') {
-        document.querySelectorAll('[data-ocr-progress]').forEach((el) => {
-            el.classList.remove('is-idle', 'is-done', 'is-error');
+    /* ---------- Live log: follow-on-tail instead of forced scroll (FB-05) ---------- */
+    const NEAR_BOTTOM_PX = 24;
+
+    function isNearBottom(el) {
+        return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+    }
+
+    function ensureLogHost(el) {
+        let host = el.parentElement;
+        if (!host || !host.classList.contains('log-host')) {
+            host = document.createElement('div');
+            host.className = 'log-host';
+            el.parentElement?.insertBefore(host, el);
+            host.appendChild(el);
+        }
+        let jump = host.querySelector('.log-jump');
+        if (!jump) {
+            jump = document.createElement('button');
+            jump.type = 'button';
+            jump.className = 'log-jump';
+            jump.hidden = true;
+            jump.textContent = '有新消息 · 跳到最新';
+            jump.addEventListener('click', () => {
+                scrollLogToBottom(el);
+                jump.hidden = true;
+                el.focus?.();
+            });
+            host.appendChild(jump);
+        }
+        if (!el.dataset.logWired) {
+            el.dataset.logWired = 'true';
+            if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+            el.addEventListener('scroll', () => {
+                if (isNearBottom(el)) jump.hidden = true;
+            });
+        }
+        return jump;
+    }
+
+    function scrollLogToBottom(el) {
+        el.scrollTo?.({ top: el.scrollHeight, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+        if (!el.scrollTo) el.scrollTop = el.scrollHeight;
+    }
+
+    function appendLogLine(el, html, { reset = false } = {}) {
+        const jump = ensureLogHost(el);
+        const stick = reset || isNearBottom(el);
+        if (reset) el.innerHTML = html;
+        else {
+            el.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
+            el.insertAdjacentHTML('beforeend', html);
+        }
+        if (stick) {
+            el.scrollTop = el.scrollHeight;
+            jump.hidden = true;
+        } else {
+            jump.hidden = false;
+        }
+    }
+
+    function wireLogFollow() {
+        document.querySelectorAll('[data-ocr-log], [data-file-log], #console-out').forEach((el) => ensureLogHost(el));
+    }
+
+    /* ---------- Accessible progress ---------- */
+    function setProgressState(progressSelector, barSelector, opts) {
+        const { percent, label, indeterminate = false, done = false, error = false } = opts;
+        document.querySelectorAll(progressSelector).forEach((el) => {
+            el.classList.remove('is-idle');
+            el.classList.toggle('is-error', error);
+            el.classList.toggle('is-done', done);
+            el.classList.toggle('is-indeterminate', indeterminate);
+            el.setAttribute('role', 'progressbar');
+            el.setAttribute('aria-valuemin', '0');
+            el.setAttribute('aria-valuemax', '100');
+            if (indeterminate) {
+                el.removeAttribute('aria-valuenow');
+                el.setAttribute('aria-valuetext', label || '正在准备…');
+            } else {
+                el.setAttribute('aria-valuenow', String(Math.round(percent)));
+                el.setAttribute('aria-valuetext', label || `${Math.round(percent)}%`);
+            }
         });
-        document.querySelectorAll('[data-ocr-bar]').forEach((el) => {
-            el.style.setProperty('--p', '0%');
+        document.querySelectorAll(barSelector).forEach((el) => {
+            el.style.setProperty('--p', `${indeterminate ? 0 : percent}%`);
+        });
+    }
+
+    function resetOcrProgress(message = '正在准备识别文件。') {
+        setProgressState('[data-ocr-progress]', '[data-ocr-bar]', {
+            percent: 0, indeterminate: true, label: '正在准备识别文件',
         });
         text('[data-ocr-phase]', '准备识别');
         text('[data-ocr-counts]', '0 / 0');
@@ -524,17 +995,15 @@
         setOcrControlState('running');
         document.querySelectorAll('[data-ocr-parallel]').forEach((el) => { el.disabled = true; });
         document.querySelectorAll('[data-ocr-log]').forEach((el) => {
-            el.innerHTML = consoleLine('准备', message);
-            el.scrollTop = el.scrollHeight;
+            appendLogLine(el, consoleLine('准备', message), { reset: true });
         });
+        announce('已开始识别发票文件，正在准备。');
     }
 
     function appendOcrLog(message, kind = '') {
         if (!message) return;
         document.querySelectorAll('[data-ocr-log]').forEach((el) => {
-            el.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
-            el.insertAdjacentHTML('beforeend', consoleLine(kind === 'ok' ? '成功' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
-            el.scrollTop = el.scrollHeight;
+            appendLogLine(el, consoleLine(kind === 'ok' ? '成功' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
         });
     }
 
@@ -548,15 +1017,14 @@
             ? (total > 0 ? Math.min(96, Math.round((processed / total) * 100)) : 12)
             : Math.max(0, Math.min(100, Number(data.percent) || 0));
         const ocrErrored = data.kind === 'err';
-        document.querySelectorAll('[data-ocr-progress]').forEach((el) => {
-            el.classList.remove('is-idle');
-            el.classList.toggle('is-error', ocrErrored);
-            el.classList.toggle('is-done', !ocrErrored && (Boolean(data.done) || percent >= 100));
+        const phase = data.phase || (data.done ? '识别完成' : '正在识别');
+        setProgressState('[data-ocr-progress]', '[data-ocr-bar]', {
+            percent,
+            done: !ocrErrored && (Boolean(data.done) || percent >= 100),
+            error: ocrErrored,
+            label: total > 0 ? `${phase}：${processed} / ${total}，${percent}%` : `${phase}，${percent}%`,
         });
-        document.querySelectorAll('[data-ocr-bar]').forEach((el) => {
-            el.style.setProperty('--p', `${percent}%`);
-        });
-        text('[data-ocr-phase]', data.phase || (data.done ? '识别完成' : '正在识别'));
+        text('[data-ocr-phase]', phase);
         text('[data-ocr-counts]', `${fmtInt(processed)} / ${fmtInt(total)}`);
         text('[data-ocr-parsed]', fmtInt(parsed));
         text('[data-ocr-skipped]', fmtInt(skipped));
@@ -567,7 +1035,11 @@
             window.clearTimeout(window.FPH?._stopOcrFallback);
             if (window.FPH) window.FPH._stopOcrFallback = 0;
         }
-        appendOcrLog(data.message, data.kind || '');
+        const readable = eventMessage(data);
+        appendOcrLog(readable, data.kind || '');
+        if (ocrErrored) announce(`识别失败：${readable || '请查看诊断信息'}`, 'alert');
+        else if (data.done) announce(`识别完成：成功 ${parsed}，跳过 ${skipped}，失败 ${failed}。`);
+        else announce(`识别进行中：${processed} / ${total}`);
     }
 
     function hasRecognizedResults() {
@@ -600,11 +1072,8 @@
     }
 
     function resetFileProgress(message = '正在准备获取发票文件。') {
-        document.querySelectorAll('[data-file-progress]').forEach((el) => {
-            el.classList.remove('is-idle', 'is-done', 'is-error');
-        });
-        document.querySelectorAll('[data-file-bar]').forEach((el) => {
-            el.style.setProperty('--p', '0%');
+        setProgressState('[data-file-progress]', '[data-file-bar]', {
+            percent: 0, indeterminate: true, label: '正在准备获取发票文件',
         });
         text('[data-file-phase]', '准备获取');
         text('[data-file-counts]', '0 封');
@@ -612,17 +1081,15 @@
         text('[data-file-skipped]', '0');
         text('[data-file-failed]', '0');
         document.querySelectorAll('[data-file-log]').forEach((el) => {
-            el.innerHTML = consoleLine('准备', message);
-            el.scrollTop = el.scrollHeight;
+            appendLogLine(el, consoleLine('准备', message), { reset: true });
         });
+        announce('已开始获取发票文件，正在准备。');
     }
 
     function appendFileLog(message, kind = '') {
         if (!message) return;
         document.querySelectorAll('[data-file-log]').forEach((el) => {
-            el.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
-            el.insertAdjacentHTML('beforeend', consoleLine(kind === 'ok' ? '完成' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
-            el.scrollTop = el.scrollHeight;
+            appendLogLine(el, consoleLine(kind === 'ok' ? '完成' : kind === 'warn' ? '提醒' : kind === 'err' ? '失败' : '进度', message, kind));
         });
     }
 
@@ -634,23 +1101,34 @@
             ? Math.min(96, 12 + (processed + skipped + failed) * 4)
             : Math.max(0, Math.min(100, Number(data.percent) || 0));
         const fileErrored = data.kind === 'err';
-        document.querySelectorAll('[data-file-progress]').forEach((el) => {
-            el.classList.remove('is-idle');
-            el.classList.toggle('is-error', fileErrored);
-            el.classList.toggle('is-done', !fileErrored && (Boolean(data.done) || percent >= 100));
+        const phase = data.phase || (data.done ? '获取完成' : '正在获取');
+        setProgressState('[data-file-progress]', '[data-file-bar]', {
+            percent,
+            done: !fileErrored && (Boolean(data.done) || percent >= 100),
+            error: fileErrored,
+            label: `${phase}，${percent}%`,
         });
-        document.querySelectorAll('[data-file-bar]').forEach((el) => {
-            el.style.setProperty('--p', `${percent}%`);
-        });
-        text('[data-file-phase]', data.phase || (data.done ? '获取完成' : '正在获取'));
+        text('[data-file-phase]', phase);
         text('[data-file-counts]', `${fmtInt(processed)} 封`);
         text('[data-file-processed]', fmtInt(processed));
         text('[data-file-skipped]', fmtInt(skipped));
         text('[data-file-failed]', fmtInt(failed));
-        appendFileLog(data.message, data.kind || '');
+        const readable = eventMessage(data);
+        appendFileLog(readable, data.kind || '');
+        if (fileErrored) announce(`获取发票文件失败：${readable || '请查看诊断信息'}`, 'alert');
+        else if (data.done) announce(`获取发票文件完成：处理 ${processed}，跳过 ${skipped}，失败 ${failed}。`);
+        else announce(`正在获取发票文件：已处理 ${processed}`);
     }
 
-    function applySummary(summary) {
+    /* Backend status enum (src/electron/summary.ts). 已识别 = 完整 only. */
+    const STATUS = {
+        COMPLETE: '完整',
+        PARTIAL: '待补充',
+        ARCHIVED: '已归档',
+        FAILED: '识别失败',
+    };
+
+    function applySummary(summary, opts = {}) {
         window.FPH.summary = summary;
         const inbox = summary.inbox || {};
         const library = summary.library || {};
@@ -658,14 +1136,15 @@
         text('[data-nav-badge="inbox"]', fmtInt(inbox.total));
         text('[data-nav-badge="library"]', fmtInt(library.recognized));
         text('[data-nav-badge="pending"]', fmtInt(pending.total));
-        text('[data-summary="config-path"]', summary.configExists ? '本机配置已加载' : '使用示例配置预览');
+        text('[data-summary="config-path"]', summary.configExists ? '本机配置已加载' : '尚未保存本机配置');
 
         applyDashboardSummary(summary);
         applyInboxSummary(inbox);
         applyLibrarySummary(library);
-        applyPendingSummary(pending);
+        applyPendingSummary(pending, opts);
         applyHistory(summary.history || []);
-        applyCurrentBatch(inbox.rows || []);
+        // The "本次抓取" table is owned by the last run, never by the full INDEX.
+        renderCurrentBatch();
         setOcrControlState('idle');
     }
 
@@ -712,10 +1191,32 @@
         if (total) total.textContent = `${fmtInt(history.length)} 条记录`;
     }
 
-    function applyCurrentBatch(rows) {
+    /* ---------- "本次抓取" is scoped to the batch the backend just returned ---------- */
+    function setCurrentBatch(result) {
+        const rows = result?.batch?.rows ?? result?.batchRows ?? result?.newRows ?? null;
+        const total = result?.batch?.total ?? result?.batchTotal ?? (Array.isArray(rows) ? rows.length : undefined);
+        window.FPH.currentBatch = Array.isArray(rows)
+            ? { rows, total: Number(total ?? rows.length), known: true }
+            : { rows: [], total: Number(total ?? 0), known: total !== undefined };
+        renderCurrentBatch();
+    }
+
+    function renderCurrentBatch() {
         const tbody = document.querySelector('[data-current-batch-rows]');
         if (!tbody) return;
-        tbody.innerHTML = rows.slice(0, 12).map((row, index) => `
+        const batch = window.FPH.currentBatch;
+        const note = document.querySelector('[data-current-batch-note]');
+        if (!batch) {
+            tbody.innerHTML = '<tr><td colspan="7" class="muted">本次还没有运行。点击“开始获取邮件”后，这里只显示这一次新保存的邮件。</td></tr>';
+            if (note) note.textContent = '只显示最近一次运行新增的邮件，不是全部本地缓存。';
+            return;
+        }
+        if (!batch.known) {
+            tbody.innerHTML = '<tr><td colspan="7" class="muted">本次运行没有返回明细，请到「邮件记录」查看全部本地缓存邮件。</td></tr>';
+            if (note) note.textContent = '本次运行没有返回逐封明细。';
+            return;
+        }
+        tbody.innerHTML = batch.rows.map((row, index) => `
             <tr>
                 <td class="faint">${String(index + 1).padStart(2, '0')}</td>
                 <td class="mono">${fmtDateTime(row.date)}</td>
@@ -723,9 +1224,14 @@
                 <td class="small">${escapeHtml(shortSender(row.from))}</td>
                 <td class="mono col-num">${row.hasAttachment ? '有' : '-'}</td>
                 <td class="mono col-num">${fmtInt(row.bodyLinkCount)}</td>
-                <td>${pill('已缓存', 'ok')}</td>
+                <td>${pill('本次新增', 'ok')}</td>
             </tr>
-        `).join('') || '<tr><td colspan="7" class="muted">本地暂无缓存邮件。完成抓取后会在这里显示。</td></tr>';
+        `).join('') || '<tr><td colspan="7" class="muted">本次运行没有新增邮件（命中的邮件此前已经保存过）。</td></tr>';
+        if (note) {
+            note.textContent = batch.total > batch.rows.length
+                ? `本次新增 ${fmtInt(batch.total)} 封，下面列出前 ${fmtInt(batch.rows.length)} 封。完整列表见「邮件记录」。`
+                : `本次新增 ${fmtInt(batch.total)} 封。`;
+        }
     }
 
     function applyInboxSummary(inbox) {
@@ -737,8 +1243,75 @@
         const pct = (n) => total > 0 ? `占比 ${Math.round((Number(n || 0) / total) * 100)}%` : '占比 —';
         text('[data-inbox-delta="attachment"]', pct(inbox.withAttachment));
         text('[data-inbox-delta="links"]', pct(inbox.withLinks));
-        if (Array.isArray(inbox.rows)) window.FPH.inboxRows = inbox.rows.slice();
+        mergeSection('inbox', inbox);
         renderInboxRows();
+    }
+
+    /* ---------- Offset-based paging (contract 5) ---------- */
+    const PAGE_SIZE = 80;
+
+    function rowIdentity(kind, row) {
+        if (kind === 'inbox') {
+            return String(row.messageId || row.hash || `${row.date || ''}|${row.subject || ''}|${row.from || ''}`);
+        }
+        return String(row.filePath || `${row.hash || ''}|${row.filename || ''}|${row.invoiceNo || ''}`);
+    }
+
+    function mergeSection(kind, payload) {
+        const storeKey = kind === 'inbox' ? 'inboxRows' : 'libraryRows';
+        if (!Array.isArray(payload?.rows)) return (window.FPH[storeKey] || []).length;
+        const incoming = payload.rows;
+        const offset = Number(payload.offset || 0);
+        if (offset > 0) {
+            const store = window.FPH[storeKey] || [];
+            const seen = new Set(store.map((row) => rowIdentity(kind, row)));
+            window.FPH[storeKey] = store.concat(incoming.filter((row) => !seen.has(rowIdentity(kind, row))));
+        } else {
+            window.FPH[storeKey] = incoming.slice();
+        }
+        window.FPH[`${kind}Total`] = Number(payload.total ?? window.FPH[storeKey].length);
+        window.FPH[`${kind}Limit`] = Number(payload.limit || PAGE_SIZE) || PAGE_SIZE;
+        return window.FPH[storeKey].length;
+    }
+
+    async function loadMoreRows(kind, button) {
+        const fn = window.mfhBridge?.getSummary;
+        if (typeof fn !== 'function') { bridgeUnavailable(); return; }
+        const storeKey = kind === 'inbox' ? 'inboxRows' : 'libraryRows';
+        const loaded = (window.FPH[storeKey] || []).length;
+        const limit = window.FPH[`${kind}Limit`] || PAGE_SIZE;
+        const args = kind === 'inbox'
+            ? { inboxOffset: loaded, inboxLimit: limit }
+            : { libraryOffset: loaded, libraryLimit: limit };
+        let summary;
+        try {
+            summary = await fn(args);
+        } catch (err) {
+            showToast('加载更多失败', '请稍后重试。', 'err', { detail: err?.message });
+            return;
+        }
+        const section = kind === 'inbox' ? summary?.inbox : summary?.library;
+        const before = loaded;
+        const after = mergeSection(kind, section);
+        if (kind === 'inbox') renderInboxRows(); else { renderLibraryRows(); updateSellerOptions(window.FPH.libraryRows || []); }
+        if (after <= before) {
+            // Backend ignored the offset (older build) or there is genuinely nothing left.
+            if (button) { button.disabled = true; button.textContent = '没有更多记录了'; }
+            announce('没有更多记录了。');
+            return;
+        }
+        announce(`已加载 ${after - before} 条记录，共 ${after} 条。`);
+    }
+
+    function renderLoadMore(kind, loaded, total) {
+        const scope = activeMain();
+        const mount = scope.querySelector(`[data-load-more="${kind}"]`);
+        if (!mount) return;
+        const remaining = Math.max(0, Number(total || 0) - loaded);
+        mount.innerHTML = remaining > 0
+            ? `<button class="btn btn--sm" type="button" data-action="load-more" data-load-kind="${kind}">加载更多（还有 ${fmtInt(remaining)} 条）</button>
+               <span class="small muted">搜索、排序和筛选只作用于已加载的 ${fmtInt(loaded)} 条记录。</span>`
+            : `<span class="small muted">已加载全部 ${fmtInt(loaded)} 条记录。</span>`;
     }
 
     function renderInboxRows() {
@@ -748,25 +1321,28 @@
         const query = String(scope.querySelector('[data-search="inbox"]')?.value || '').trim().toLowerCase();
         const attachmentOnly = scope.querySelector('[data-filter="inbox-attachment"]')?.classList.contains('is-active');
         const linksOnly = scope.querySelector('[data-filter="inbox-links"]')?.classList.contains('is-active');
-        const rows = sortRows((window.FPH.inboxRows || []).filter((row) => {
+        const loadedRows = window.FPH.inboxRows || [];
+        const rows = sortRows(loadedRows.filter((row) => {
             const haystack = `${row.messageId || ''} ${row.from || ''} ${row.subject || ''} ${row.mailbox || ''}`.toLowerCase();
             if (query && !haystack.includes(query)) return false;
             if (attachmentOnly && !row.hasAttachment) return false;
             if (linksOnly && Number(row.bodyLinkCount || 0) <= 0) return false;
             return true;
         }), 'sortInbox');
-        tbody.innerHTML = rows.slice(0, 80).map((row) => `
+        tbody.innerHTML = rows.map((row) => `
             <tr>
                 <td class="mono">${fmtDateTime(row.date)}</td>
                 <td>${escapeHtml(shortSender(row.from))}<br><span class="small muted">${escapeHtml(row.from || '')}</span></td>
-                <td>${escapeHtml(row.subject || '无主题')}</td>
-                <td class="mono col-num">${row.hasAttachment ? '有' : '-'}</td>
-                <td class="mono col-num">${fmtInt(row.bodyLinkCount)}</td>
-                <td><span class="pill">${escapeHtml(row.mailbox || '邮箱')}</span></td>
+                <td>${escapeHtml(row.subject || '无主题')}<span class="cell-sub">${escapeHtml(row.mailbox || '邮箱')} · ${row.hasAttachment ? '有附件' : '无附件'} · 链接 ${fmtInt(row.bodyLinkCount)}</span></td>
+                <td class="mono col-num col-secondary">${row.hasAttachment ? '有' : '-'}</td>
+                <td class="mono col-num col-secondary">${fmtInt(row.bodyLinkCount)}</td>
+                <td class="col-secondary"><span class="pill">${escapeHtml(row.mailbox || '邮箱')}</span></td>
                 <td>${pill('已缓存', 'ok')}</td>
             </tr>
         `).join('') || `<tr><td colspan="7" class="muted">没有找到匹配邮件。你可以换个关键词或取消筛选。</td></tr>`;
-        text('[data-inbox-page]', `显示 ${fmtInt(Math.min(rows.length, 80))} · 共 ${fmtInt(rows.length)} 行`);
+        const total = Number(window.FPH.inboxTotal ?? loadedRows.length);
+        text('[data-inbox-page]', `显示 ${fmtInt(rows.length)} · 已加载 ${fmtInt(loadedRows.length)} · 共 ${fmtInt(total)} 行`);
+        renderLoadMore('inbox', loadedRows.length, total);
     }
 
     function applyLibrarySummary(library) {
@@ -779,7 +1355,7 @@
         text('[data-lib="itinerary"]', fmtInt(library.itinerary));
         text('[data-lib="supporting"]', fmtInt(library.supporting));
 
-        if (Array.isArray(library.rows)) window.FPH.libraryRows = library.rows.slice();
+        mergeSection('library', library);
         renderLibraryRows();
         updateSellerOptions(window.FPH.libraryRows || []);
     }
@@ -791,34 +1367,37 @@
         const query = String(scope.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
         const activeTab = scope.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
         const seller = scope.querySelector('[data-library-seller]')?.value || '';
-        const failedOnly = scope.querySelector('[data-filter="library-failed"]')?.classList.contains('is-on');
-        const rows = sortRows((window.FPH.libraryRows || []).filter((row) => {
+        const loadedRows = window.FPH.libraryRows || [];
+        const rows = sortRows(loadedRows.filter((row) => {
             const haystack = `${row.seller || ''} ${row.invoiceNo || ''} ${row.amount || ''} ${row.filename || ''} ${row.error || ''}`.toLowerCase();
             if (query && !haystack.includes(query)) return false;
             if (seller && row.seller !== seller) return false;
             const status = String(row.status || '');
             const docType = String(row.documentType || '');
-            if (failedOnly && status !== '识别失败') return false;
-            if (activeTab === 'recognized' && status === '识别失败') return false;
-            if (activeTab === 'failed' && status !== '识别失败') return false;
+            // Status semantics come from the backend enum: 已识别 = 完整 only.
+            if (activeTab === 'recognized' && status !== STATUS.COMPLETE) return false;
+            if (activeTab === 'partial' && status !== STATUS.PARTIAL) return false;
+            if (activeTab === 'failed' && status !== STATUS.FAILED) return false;
             if (activeTab === 'supporting' && docType !== 'supporting') return false;
             if (activeTab === 'itinerary' && docType !== 'itinerary') return false;
             return true;
         }), 'sortLibrary');
-        tbody.innerHTML = rows.slice(0, 80).map((row) => `
+        tbody.innerHTML = rows.map((row) => `
             <tr>
                 <td class="mono">${escapeHtml((row.date || '').slice(0, 10))}</td>
-                <td>${escapeHtml(row.seller || '未识别销售方')}</td>
+                <td>${escapeHtml(row.seller || '未识别销售方')}<span class="cell-sub">${escapeHtml(sourceLabel(row.source))} · ${escapeHtml(row.filename || '未记录文件名')}</span></td>
                 <td class="mono">${escapeHtml(row.invoiceNo || '-')}</td>
                 <td class="mono col-num">${escapeHtml(row.amount || '-')}</td>
-                <td><span class="pill">${escapeHtml(sourceLabel(row.source))}</span></td>
-                <td class="mono small">${escapeHtml(row.filename || '')}</td>
+                <td class="col-secondary"><span class="pill">${escapeHtml(sourceLabel(row.source))}</span></td>
+                <td class="mono small col-secondary">${escapeHtml(row.filename || '')}</td>
                 <td>${statusPill(row.status)}</td>
-                <td><button class="btn btn--sm" data-action="open-row-file" data-file-path="${escapeHtml(row.filePath || '')}"${row.filePath ? '' : ' disabled title="该记录没有对应文件路径"'}>打开</button></td>
+                <td><button class="btn btn--sm" type="button" data-action="open-row-file" data-file-path="${escapeHtml(row.filePath || '')}"${row.filePath ? '' : ' disabled title="该记录没有对应文件路径"'}>打开</button></td>
             </tr>
         `).join('') || `<tr><td colspan="8" class="muted">没有找到匹配结果。你可以换个关键词或取消筛选。</td></tr>`;
-        text('[data-library-page]', `显示 ${fmtInt(Math.min(rows.length, 80))} · 共 ${fmtInt(rows.length)} 条`);
-        text('[data-library-sellers]', seller ? `销售方：${seller}` : '销售方：全部');
+        const total = Number(window.FPH.libraryTotal ?? loadedRows.length);
+        text('[data-library-page]', `显示 ${fmtInt(rows.length)} · 已加载 ${fmtInt(loadedRows.length)} · 共 ${fmtInt(total)} 条`);
+        text('[data-library-sellers]', seller ? `销售方：${seller}（仅在已加载记录中筛选）` : '销售方：全部（仅在已加载记录中筛选）');
+        renderLoadMore('library', loadedRows.length, total);
     }
 
     function updateSellerOptions(rows) {
@@ -826,7 +1405,7 @@
         if (!select) return;
         const sellers = Array.from(new Set(rows.map((row) => row.seller).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
         const current = select.value;
-        select.innerHTML = '<option value="">全部销售方</option>' + sellers.map((seller) => `<option value="${escapeHtml(seller)}">${escapeHtml(seller)}</option>`).join('');
+        select.innerHTML = '<option value="">全部销售方（已加载记录）</option>' + sellers.map((seller) => `<option value="${escapeHtml(seller)}">${escapeHtml(seller)}</option>`).join('');
         if (sellers.includes(current)) select.value = current;
     }
 
@@ -839,10 +1418,40 @@
         return ['等待新版本', '当前版本暂未支持这种处理方式'];
     }
 
-    function applyPendingSummary(pending) {
+    /* Internal product notes leaked into user-facing descriptions. Until the
+       backend supplies `userMessage`, drop any sentence that reads like a
+       developer instruction rather than user guidance. */
+    const INTERNAL_NOTE_RE = /(GUI\s*应|界面应|默认保持|保留\s*reason|reason\s*字段|TODO|后续版本再)/i;
+    function cleanDescription(value) {
+        return String(value || '')
+            .split(/(?<=[。；;])/)
+            .filter((sentence) => sentence.trim() && !INTERNAL_NOTE_RE.test(sentence))
+            .join('')
+            .trim();
+    }
+
+    function rowCategory(row) {
+        return String(row?.category || reasonLabel(row?.reason) || '需要确认');
+    }
+    function rowUserMessage(row, group) {
+        if (row?.userMessage) return String(row.userMessage);
+        const desc = cleanDescription(group?.userMessage || group?.description);
+        return desc || '这封邮件没有自动取得发票文件。';
+    }
+    function rowNextStep(row, group) {
+        if (row?.nextStep) return String(row.nextStep);
+        const [, note] = actionText(group?.action);
+        return note;
+    }
+
+    function applyPendingSummary(pending, opts = {}) {
         window.FPH.pending = pending;
-        text('[data-pending="total"]', fmtInt(pending.total));
+        const total = Number(pending.total || 0);
+        text('[data-pending="total"]', fmtInt(total));
         const groups = pending.groups || [];
+        // Zero queue: hide every affordance that only makes sense with records.
+        document.querySelectorAll('[data-pending-nonempty]').forEach((el) => { el.hidden = total === 0; });
+        document.querySelectorAll('[data-pending-empty]').forEach((el) => { el.hidden = total !== 0; });
         document.querySelectorAll('[data-pending-stats]').forEach((mount) => {
             if (groups.length === 0) {
                 mount.innerHTML = `
@@ -865,7 +1474,35 @@
                 `;
             }).join('');
         });
-        renderPendingGroups();
+        // FB-04: a targeted row removal owns the DOM; do not blow the list away.
+        if (!opts.preservePendingDom) renderPendingGroups();
+    }
+
+    function pendingRowMarkup(row, group) {
+        const [primary] = actionText(group.action);
+        const isKnownAction = KNOWN_PENDING_ACTIONS.has(group.action);
+        const disabledAttr = isKnownAction ? '' : ' disabled title="当前版本暂未支持这种处理方式"';
+        const ref = supportRef(row.hash);
+        return `
+            <div class="card card--tight pending-item" data-pending-row="${escapeHtml(row.hash || '')}" data-pending-action="${escapeHtml(group.action || '')}">
+                <div class="row gap-8 mb-12">
+                    ${pill(rowCategory(row), group.action === 'refresh_link' ? 'warn' : '')}
+                    <span class="pill">${escapeHtml(rowNextStep(row, group))}</span>
+                </div>
+                <div class="strong pending-item__subject">${escapeHtml(row.subject || '无主题')}</div>
+                <div class="mono small muted">${escapeHtml((row.date || '').slice(0, 10))} · ${escapeHtml(row.from || '')}</div>
+                <div class="small muted mt-12">${escapeHtml(rowUserMessage(row, group))}</div>
+                <div class="row gap-8 mt-12">
+                    <button class="btn btn--sm btn--primary" type="button" data-action="pending-primary" data-hash="${escapeHtml(row.hash || '')}" data-action-kind="${escapeHtml(group.action)}"${disabledAttr}>${escapeHtml(primary)}</button>
+                    <button class="btn btn--sm btn--ghost" type="button" data-action="copy-diagnostics" data-hash="${escapeHtml(row.hash || '')}">复制诊断信息</button>
+                </div>
+                <details class="toast__detail mt-12">
+                    <summary>诊断信息（已脱敏）</summary>
+                    <pre>支持编号：${escapeHtml(ref)}
+原因：${escapeHtml(sanitizeText(row.reason || '未记录'))}</pre>
+                </details>
+            </div>
+        `;
     }
 
     function renderPendingGroups() {
@@ -879,38 +1516,30 @@
             return group.action === activeTab;
         });
         const emptyMarkup = allGroups.length === 0
-            ? '<div class="card"><div class="strong">暂无待确认邮件</div><div class="small muted mt-12">当前本地队列为空。</div></div>'
+            ? '<div class="card"><div class="strong">待确认队列是空的</div><div class="small muted mt-12">所有邮件都已经自动处理完成，这里不需要你做任何事。</div></div>'
             : '<div class="card"><div class="strong">当前分类暂无邮件</div><div class="small muted mt-12">切换到「全部」可以查看其它分类的邮件。</div></div>';
-        mount.innerHTML = groups.map((group) => {
-            const [primary, note] = actionText(group.action);
-            const isKnownAction = KNOWN_PENDING_ACTIONS.has(group.action);
-            const disabledAttr = isKnownAction ? '' : ' disabled title="当前版本暂未支持这种处理方式"';
-            const rows = (group.rows || []).slice(0, 6).map((row) => `
-                <div class="card card--tight pending-item">
-                    <div class="row gap-8 mb-12">
-                        ${pill(reasonLabel(row.reason), group.action === 'refresh_link' ? 'warn' : '')}
-                        <span class="pill">${escapeHtml(note)}</span>
-                        <span class="mono small muted">${escapeHtml(row.hash)}</span>
-                    </div>
-                    <div class="strong pending-item__subject">${escapeHtml(row.subject || '无主题')}</div>
-                    <div class="mono small muted">${escapeHtml((row.date || '').slice(0, 10))} · ${escapeHtml(row.from || '')}</div>
-                    <div class="row gap-8 mt-12">
-                        <button class="btn btn--sm btn--primary" data-action="pending-primary" data-hash="${escapeHtml(row.hash)}" data-action-kind="${escapeHtml(group.action)}"${disabledAttr}>${primary}</button>
-                        <button class="btn btn--sm btn--ghost" data-action="copy-text" data-copy-text="${escapeHtml(row.reason)}">复制原因</button>
-                    </div>
-                </div>
-            `).join('');
+        mount.innerHTML = groups.map((group, index) => {
+            const headId = `pending-head-${index}`;
+            const bodyId = `pending-body-${index}`;
+            // Every row is rendered: no group is silently truncated.
+            const rows = (group.rows || []).map((row) => pendingRowMarkup(row, group)).join('');
+            const groupTotal = Number(group.total ?? group.count ?? (group.rows || []).length);
+            const shown = (group.rows || []).length;
+            const description = cleanDescription(group.userMessage || group.description);
             return `
-                <div class="group is-open">
-                    <div class="group__head">
-                        ${ICON.chev.replace('class="ic"', 'class="ic group__chev"')}
-                        <div class="group__title">${escapeHtml(group.title)}</div>
-                        <span class="group__count">${fmtInt(group.count)}</span>
-                    </div>
-                    <div class="group__body">
+                <div class="group is-open" data-pending-group="${escapeHtml(group.action || '')}">
+                    <h3 class="group__heading">
+                        <button class="group__head" type="button" id="${headId}" aria-expanded="true" aria-controls="${bodyId}">
+                            ${ICON.chev.replace('class="ic"', 'class="ic group__chev"')}
+                            <span class="group__title">${escapeHtml(group.title)}</span>
+                            <span class="group__count">${fmtInt(groupTotal)}</span>
+                        </button>
+                    </h3>
+                    <div class="group__body" id="${bodyId}" role="region" aria-labelledby="${headId}">
                         <div class="group__inner">
-                            <div class="small muted mb-12">${escapeHtml(group.description || '')}</div>
-                            ${rows || '<div class="card card--tight muted">暂无明细</div>'}
+                            ${description ? `<div class="small muted mb-12">${escapeHtml(description)}</div>` : ''}
+                            <div data-pending-rows>${rows || '<div class="card card--tight muted">暂无明细</div>'}</div>
+                            ${groupTotal > shown ? `<div class="small muted mt-12" data-group-more>本地只取回了 ${fmtInt(shown)} / ${fmtInt(groupTotal)} 条，请点击“刷新列表”重新读取。</div>` : ''}
                         </div>
                     </div>
                 </div>
@@ -918,22 +1547,79 @@
         }).join('') || emptyMarkup;
     }
 
+    /* FB-04: remove a single card in place, keep the rest of the DOM (and the
+       expansion state) alive, and hand focus to a sensible neighbour. */
+    function removePendingRowInPlace(hash, announcement) {
+        const card = document.querySelector(`[data-pending-row="${CSS.escape(String(hash || ''))}"]`);
+        if (!card) return false;
+        const container = card.closest('[data-pending-rows]') || card.parentElement;
+        const group = card.closest('.group');
+        const siblings = Array.from(container?.querySelectorAll(':scope > .pending-item') || []);
+        const index = siblings.indexOf(card);
+        const nextCard = siblings[index + 1] || siblings[index - 1] || null;
+        const focusTarget = nextCard?.querySelector('[data-action="pending-primary"]')
+            || group?.querySelector('.group__head')
+            || document.querySelector('[data-pending-groups]');
+
+        const finish = () => {
+            card.remove();
+            const remaining = Array.from(container?.querySelectorAll(':scope > .pending-item') || []).length;
+            const countEl = group?.querySelector('.group__count');
+            if (countEl) countEl.textContent = fmtInt(remaining);
+            if (remaining === 0 && container) {
+                container.innerHTML = '<div class="card card--tight muted">这一组已经处理完了。</div>';
+            }
+            if (focusTarget) {
+                if (!focusTarget.hasAttribute('tabindex') && !/^(BUTTON|A|INPUT|SELECT)$/.test(focusTarget.tagName)) {
+                    focusTarget.setAttribute('tabindex', '-1');
+                }
+                focusTarget.focus?.({ preventScroll: false });
+            }
+            announce(`${announcement || '已处理这封邮件'}，本组还剩 ${remaining} 封。`);
+        };
+
+        if (prefersReducedMotion()) {
+            finish();
+        } else {
+            card.style.maxHeight = `${card.offsetHeight}px`;
+            requestAnimationFrame(() => card.classList.add('is-removing'));
+            window.setTimeout(finish, 180);
+        }
+        return true;
+    }
+
+    /* Values shipped in config.example.json must never read as "configured". */
+    const PLACEHOLDER_HOSTS = new Set(['imap.example.com', 'smtp.example.com', 'mail.example.com']);
+    const PLACEHOLDER_USERS = new Set(['me@example.com', 'user@example.com', 'you@example.com']);
+    const PLACEHOLDER_SECRETS = new Set(['***', '******', 'your-password', 'changeme', 'password']);
+
+    function credentialStored(secrets, rawPass) {
+        // The IPC boundary redacts secrets; prefer its boolean shadow.
+        if (typeof secrets?.imapPass === 'boolean') return secrets.imapPass;
+        const value = String(rawPass || '').trim();
+        if (!value) return false;
+        return !PLACEHOLDER_SECRETS.has(value);
+    }
+
     function applyMailStatus(cfg, secrets) {
         const imap = cfg?.imap || {};
         const host = typeof imap.host === 'string' ? imap.host.trim() : '';
         const user = typeof imap.user === 'string' ? imap.user.trim() : '';
         const pass = typeof imap.pass === 'string' ? imap.pass.trim() : '';
-        // Secrets are redacted at the IPC boundary; consult the boolean shadow if available.
-        const hasPass = Boolean(secrets?.imapPass ?? pass);
-        const configured = Boolean(host && user && hasPass);
+        const realHost = Boolean(host) && !PLACEHOLDER_HOSTS.has(host.toLowerCase());
+        const realUser = Boolean(user) && !PLACEHOLDER_USERS.has(user.toLowerCase());
+        const configured = realHost && realUser && credentialStored(secrets, pass);
+        const verified = configured && window.FPH.credentialsVerified === true;
         document.querySelectorAll('[data-mail-status-label]').forEach((el) => {
-            el.textContent = configured ? `已配置 · ${user}` : '邮箱未配置';
+            el.textContent = verified ? `已连接 · ${user}` : configured ? `已保存 · ${user}` : '邮箱未配置';
         });
         document.querySelectorAll('[data-mail-status-dot]').forEach((el) => {
             el.classList.toggle('is-off', !configured);
         });
         document.querySelectorAll('[data-mail-status-meta]').forEach((el) => {
-            el.textContent = configured ? `邮箱已配置 · ${host}` : '请先在「配置」页填写邮箱';
+            el.textContent = verified ? `邮箱已连接 · ${host}`
+                : configured ? '邮箱设置已保存，建议先点“测试邮箱连接”'
+                : '请先在「邮箱与保存」页填写邮箱';
         });
     }
 
@@ -961,13 +1647,13 @@
             }
         }
         document.querySelectorAll('[data-config-check="imap.tls"]').forEach((el) => {
-            el.classList.toggle('is-on', cfg.imap?.tls !== false);
+            setChecked(el, cfg.imap?.tls !== false);
         });
         set('[data-config="filter.keywords"]', Array.isArray(cfg.filter?.keywords) ? cfg.filter.keywords.join(', ') : '');
         const matchSubject = cfg.filter?.matchSubject !== false;
         const matchBody = cfg.filter?.matchBody !== false;
-        document.querySelectorAll('[data-fetch-check="matchSubject"]').forEach((el) => el.classList.toggle('is-on', matchSubject));
-        document.querySelectorAll('[data-fetch-check="matchBody"]').forEach((el) => el.classList.toggle('is-on', matchBody));
+        document.querySelectorAll('[data-fetch-check="matchSubject"]').forEach((el) => setChecked(el, matchSubject));
+        document.querySelectorAll('[data-fetch-check="matchBody"]').forEach((el) => setChecked(el, matchBody));
         set('[data-config="paths.samples"]', cfg.paths?.samples);
         set('[data-config="paths.invoices"]', cfg.paths?.invoices);
         set('[data-config="paths.pending"]', cfg.paths?.pending);
@@ -985,13 +1671,13 @@
         set('[data-config="rename.typeDirRule"]', cfg.rename?.typeDirRule);
         window.MFH_UPDATE_RENAME_PREVIEW?.();
         document.querySelectorAll('[data-config-check="rename.avoidConflictBeforeOcr"]').forEach((el) => {
-            el.classList.toggle('is-on', cfg.rename?.avoidConflictBeforeOcr !== false);
+            setChecked(el, cfg.rename?.avoidConflictBeforeOcr !== false);
         });
         document.querySelectorAll('[data-config-check="rename.applyAfterOcr"]').forEach((el) => {
-            el.classList.toggle('is-on', cfg.rename?.applyAfterOcr === true);
+            setChecked(el, cfg.rename?.applyAfterOcr === true);
         });
         document.querySelectorAll('[data-config-check="rename.organizeByType"]').forEach((el) => {
-            el.classList.toggle('is-on', cfg.rename?.organizeByType === true);
+            setChecked(el, cfg.rename?.organizeByType === true);
         });
         set('[data-config="network.retries"]', cfg.network?.retries);
         set('[data-config="network.retryDelayMs"]', cfg.network?.retryDelayMs);
@@ -1014,8 +1700,10 @@
         setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretId"]', Boolean(secrets.tencentSecretId ?? cfg.ocr?.credentials?.tencentSecretId ?? cfg.ocr?.credentials?.secretId));
         setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretKey"]', Boolean(secrets.tencentSecretKey ?? cfg.ocr?.credentials?.tencentSecretKey ?? cfg.ocr?.credentials?.secretKey));
         set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || 'ap-shanghai');
-        set('[data-config="playwright.browserManagement"]', cfg.playwright?.browserManagement || 'app-managed');
+        // playwright.browserManagement is intentionally not surfaced: the setting
+        // was never read by the CLI (APP-19). Chrome/Edge must exist on the system.
         set('[data-config="playwright.timeoutMs"]', cfg.playwright?.timeoutMs);
+        applyOcrStatusCards();
     }
 
     function wireSearch() {
@@ -1033,6 +1721,7 @@
                 input.value = q;
                 if (targetPage === 'inbox') renderInboxRows();
                 else renderLibraryRows();
+                announce(`已在${targetPage === 'inbox' ? '邮件记录' : '发票库'}的已加载记录中搜索「${q}」`);
             }
         });
         document.addEventListener('keydown', (event) => {
@@ -1071,6 +1760,7 @@
         'pending-primary',
         'discard-config',
         'ocr-toggle',
+        'load-more',
     ]);
     const BUSY_LABELS = {
         'test-connection': '正在连接邮箱…',
@@ -1083,6 +1773,7 @@
         'rerun-pipeline': '正在重新获取…',
         'pending-primary': '处理中…',
         'discard-config': '正在读取…',
+        'load-more': '正在加载…',
     };
 
     async function withBusyButton(button, runner) {
@@ -1130,7 +1821,9 @@
         if (name === 'preview-fetch') { showFetchPreview(); return; }
         if (name === 'export-log') { exportVisibleLog(); return; }
         if (name === 'export-table') { exportVisibleTable(action); return; }
-        if (name === 'copy-text') { await copyText(action.dataset.copyText || ''); return; }
+        if (name === 'load-more') { await loadMoreRows(action.dataset.loadKind || 'inbox', action); return; }
+        if (name === 'copy-diagnostics') { await copyPendingDiagnostics(action.dataset.hash || ''); return; }
+        if (name === 'copy-text') { await copyText(sanitizeText(action.dataset.copyText || '')); return; }
         if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
         if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
@@ -1148,7 +1841,9 @@
             const emptyTitle = '没有可整理的识别结果';
             const title = result?.ok ? (empty ? emptyTitle : successTitle) : '运行失败';
             const okFallback = applyRename ? '已按当前规则改名并整理输出。' : '已按当前规则整理输出。';
-            showToast(title, result?.message || (result?.ok ? okFallback : '请查看最近运行记录。'), kind);
+            showToast(title, eventMessage(result) || (result?.ok ? okFallback : '请查看最近运行记录。'), kind, {
+                detail: result?.ok ? '' : eventDetail(result),
+            });
             return;
         }
         if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: false }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
@@ -1194,13 +1889,15 @@
         }
         cur[parts[parts.length - 1]] = '';
         try {
-            await window.mfhBridge.saveConfig(patch);
+            const saved = await saveConfigChecked(patch);
+            if (!saved.ok) return;
+            window.FPH.credentialsVerified = false;
             await loadBridgeConfig();
             const input = document.querySelector(`[data-config="${key}"]`);
             if (input) input.value = '';
             showToast('已清除', `${label}已从本机配置中移除。`, 'warn');
         } catch (err) {
-            showToast('清除失败', err?.message || '请重试。', 'err');
+            showToast('清除失败', '没能清除这项凭据，请重试。', 'err', { detail: err?.message });
         }
     }
 
@@ -1211,7 +1908,8 @@
     }
 
     function downloadRenameEnabled() {
-        return activeMain().querySelector('[data-download-rename-toggle]')?.classList.contains('is-on') !== false;
+        const el = activeMain().querySelector('[data-download-rename-toggle]');
+        return el ? isChecked(el) : true;
     }
 
     async function handleOcrToggle(action) {
@@ -1270,7 +1968,12 @@
             }, 5000);
             if (window.FPH) window.FPH._stopOcrFallback = timer;
         }
-        showToast(result?.ok ? '正在停止识别' : '停止失败', result?.message || '', result?.ok ? 'warn' : 'err');
+        showToast(
+            result?.ok ? '正在停止识别' : '停止失败',
+            eventMessage(result) || (result?.ok ? '已经发出停止指令，正在等待引擎退出。' : '没能停止识别，请稍后重试。'),
+            result?.ok ? 'warn' : 'err',
+            { detail: result?.ok ? '' : eventDetail(result) },
+        );
     }
 
     function bridgeUnavailable() {
@@ -1289,8 +1992,14 @@
             cur = cur[parts[i]];
         }
         cur[parts[parts.length - 1]] = value;
-        Promise.resolve(fn(patch)).catch((err) => {
-            showToast('保存失败', err?.message || '请稍后重试。', 'err');
+        Promise.resolve(fn(patch)).then((result) => {
+            if (result && result.ok === false) {
+                if (result.configError) showConfigError(result.configError);
+                else applyFieldErrors(result.fieldErrors);
+                showToast('这项设置没有保存', eventMessage(result) || '请到「邮箱与保存」页检查设置。', 'err');
+            }
+        }).catch((err) => {
+            showToast('保存失败', '这项设置没有写入本机，请稍后重试。', 'err', { detail: err?.message });
         });
     }
 
@@ -1303,6 +2012,7 @@
         try {
             result = await fn(payload);
         } catch (err) {
+            const failMessage = '操作没有完成，本地数据没有变化。';
             if (method === 'runOcr') {
                 applyOcrProgress({
                     phase: '识别失败',
@@ -1312,7 +2022,7 @@
                     parsed: 0,
                     skipped: 0,
                     failed: 0,
-                    message: err?.message || '识别失败，请查看最近运行记录。',
+                    message: failMessage,
                     kind: 'err',
                     done: true,
                 });
@@ -1321,20 +2031,24 @@
                 applyFileProgress({
                     phase: '获取失败',
                     percent: 100,
-                    message: err?.message || '获取发票文件失败，请查看最近运行记录。',
+                    message: failMessage,
                     kind: 'err',
                     done: true,
                 });
             }
-            showToast('运行失败', err?.message || '请查看最近运行记录。', 'err');
+            showToast('运行失败', failMessage, 'err', { detail: err?.message });
             return;
         }
         if (result?.summary) applySummary(result.summary);
+        if (result?.normalizedFilter) applyNormalizedFilter(result.normalizedFilter);
+        if (method === 'runPipeline') setCurrentBatch(result);
+        const readable = eventMessage(result);
+        const detail = eventDetail(result);
         if (method === 'runOcr' && !result?.ok && !result?.summary) {
             applyOcrProgress({
                 phase: '识别失败',
                 percent: 100,
-                message: result?.message || result?.stderr || result?.error || '识别失败，请查看最近运行记录。',
+                message: readable || '识别失败，请查看诊断信息。',
                 kind: 'err',
                 done: true,
             });
@@ -1343,12 +2057,17 @@
             applyFileProgress({
                 phase: '获取失败',
                 percent: 100,
-                message: result?.message || result?.stderr || result?.error || '获取发票文件失败，请查看最近运行记录。',
+                message: readable || '获取发票文件失败，请查看诊断信息。',
                 kind: 'err',
                 done: true,
             });
         }
-        showToast(result?.ok ? okTitle : '运行失败', result?.ok ? (result?.message || okMessage) : (result?.message || result?.stderr || result?.error || '请查看最近运行记录。'), result?.ok ? 'ok' : 'err');
+        showToast(
+            result?.ok ? okTitle : '运行失败',
+            result?.ok ? (readable || okMessage) : (readable || '操作没有完成。展开诊断信息可以查看技术细节。'),
+            result?.ok ? 'ok' : 'err',
+            { detail: result?.ok ? '' : detail },
+        );
     }
 
     async function openConfiguredPath(key, fallback) {
@@ -1356,7 +2075,12 @@
         const value = key.split('.').reduce((cur, part) => cur?.[part], cfg) || fallback;
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
         const result = await window.mfhBridge.openPath({ path: value });
-        showToast(result?.ok ? '已打开文件夹' : '打开失败', result?.ok ? value : (result?.error || value), result?.ok ? 'ok' : 'err');
+        showToast(
+            result?.ok ? '已打开文件夹' : '打开失败',
+            result?.ok ? '已在系统文件管理器中打开。' : '无法打开这个文件夹，请确认它仍然存在。',
+            result?.ok ? 'ok' : 'err',
+            { detail: result?.ok ? '' : eventDetail(result) },
+        );
     }
 
     async function openRowFile(action) {
@@ -1367,7 +2091,33 @@
         }
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
         const result = await window.mfhBridge.openPath({ path: value, reveal: true });
-        showToast(result?.ok ? '已打开文件位置' : '打开失败', result?.ok ? '已定位到对应文件。' : (result?.error || value), result?.ok ? 'ok' : 'err');
+        showToast(
+            result?.ok ? '已打开文件位置' : '打开失败',
+            result?.ok ? '已定位到对应文件。' : '无法定位这个文件，它可能已经被移动或删除。',
+            result?.ok ? 'ok' : 'err',
+            { detail: result?.ok ? '' : eventDetail(result) },
+        );
+    }
+
+    /* Diagnostics are always redacted before they reach the clipboard. */
+    async function copyPendingDiagnostics(hash) {
+        const groups = window.FPH.pending?.groups || [];
+        let found = null;
+        let owner = null;
+        for (const group of groups) {
+            const row = (group.rows || []).find((item) => String(item.hash || '') === String(hash));
+            if (row) { found = row; owner = group; break; }
+        }
+        if (!found) { showToast('没有找到这条记录', '请先点击“刷新列表”。', 'warn'); return; }
+        const lines = [
+            `支持编号：${supportRef(found.hash)}`,
+            `分类：${rowCategory(found)}`,
+            `下一步：${rowNextStep(found, owner)}`,
+            `主题：${found.subject || '无主题'}`,
+            `日期：${(found.date || '').slice(0, 10)}`,
+            `原因：${sanitizeText(found.reason || '未记录')}`,
+        ];
+        await copyText(lines.join('\n'), '诊断信息');
     }
 
     async function copyText(value, label) {
@@ -1380,10 +2130,113 @@
                 throw new Error('当前环境没有剪贴板权限');
             }
         } catch (err) {
-            showToast('复制失败', err?.message || '请改用桌面版或检查权限。', 'err');
+            showToast('复制失败', '当前环境不允许写入剪贴板，请改用桌面版或检查权限。', 'err', { detail: err?.message });
             return;
         }
         showToast('已复制', label ? `${label}已复制到剪贴板。` : '内容已复制到剪贴板。');
+    }
+
+    /* ---------- Config save contract (APP-08 / UI-06) ----------
+       { ok: false, fieldErrors: [{ path, message }] } → block and show the
+       error next to each field; { ok: false, configError } → blocking repair
+       entry point; { ok: true, config } → apply. */
+    /* An invalid field inside a collapsed 高级设置 section must not stay hidden. */
+    function revealField(el) {
+        let node = el?.parentElement;
+        while (node) {
+            if (node.tagName === 'DETAILS') node.open = true;
+            node = node.parentElement;
+        }
+    }
+
+    function applyFieldErrors(fieldErrors) {
+        document.querySelectorAll('[data-config]').forEach((el) => {
+            el.classList.remove('is-invalid');
+            el.removeAttribute('aria-invalid');
+        });
+        document.querySelectorAll('[data-field-error]').forEach((el) => { el.remove(); });
+        const summary = document.querySelector('[data-config-error-summary]');
+        if (summary) { summary.hidden = true; summary.innerHTML = ''; }
+        const errors = Array.isArray(fieldErrors) ? fieldErrors : [];
+        if (errors.length === 0) return false;
+        const links = [];
+        errors.forEach((error, index) => {
+            const path = String(error?.path || '');
+            const message = String(error?.message || '这个值无法保存。');
+            const input = path ? document.querySelector(`[data-config="${path}"]`) : null;
+            const errorId = `config-error-${index}`;
+            if (input) {
+                if (!input.id) input.id = `config-field-${index}`;
+                revealField(input);
+                input.classList.add('is-invalid');
+                input.setAttribute('aria-invalid', 'true');
+                const note = document.createElement('div');
+                note.className = 'field__error';
+                note.id = errorId;
+                note.dataset.fieldError = 'true';
+                note.textContent = message;
+                input.insertAdjacentElement('afterend', note);
+                const describedBy = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+                if (!describedBy.includes(errorId)) describedBy.push(errorId);
+                input.setAttribute('aria-describedby', describedBy.join(' '));
+                links.push(`<li><a href="#${input.id}" data-config-error-link="${escapeHtml(input.id)}">${escapeHtml(message)}</a></li>`);
+            } else {
+                links.push(`<li>${escapeHtml(message)}</li>`);
+            }
+        });
+        if (summary) {
+            summary.hidden = false;
+            summary.innerHTML = `
+                <div class="error-summary__title">有 ${errors.length} 项设置没有保存</div>
+                <ul>${links.join('')}</ul>
+            `;
+            summary.setAttribute('role', 'alert');
+            summary.setAttribute('tabindex', '-1');
+            summary.focus?.({ preventScroll: false });
+        }
+        return true;
+    }
+
+    function showConfigError(configError) {
+        const signature = String(configError?.message || 'config-error');
+        const repeated = window.FPH._configErrorSignature === signature;
+        window.FPH._configErrorSignature = signature;
+        const mount = document.querySelector('[data-config-blocker]');
+        const backup = configError?.backupPath ? '已经为你保留了一份备份。' : '';
+        const message = configError?.message || '本机配置文件无法读取。';
+        if (mount) {
+            mount.hidden = false;
+            mount.innerHTML = `
+                <div class="strong">配置文件损坏，暂时不能使用</div>
+                <div class="small mt-12">${escapeHtml(sanitizeText(message))}${backup ? ` ${escapeHtml(backup)}` : ''}</div>
+                <div class="row gap-8 mt-12">
+                    <button class="btn btn--sm btn--primary" type="button" data-action="discard-config">重新读取配置</button>
+                    <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
+                </div>
+            `;
+            mount.setAttribute('role', 'alert');
+        }
+        text('[data-summary="config-path"]', '配置文件损坏');
+        if (!repeated) showToast('配置文件损坏', '请在「邮箱与保存」页按提示修复后再运行。', 'err');
+    }
+
+    /* Shared entry point used by the config page's autosave and by
+       testConnection: a failed save must never be treated as success. */
+    async function saveConfigChecked(payload) {
+        const fn = window.mfhBridge?.saveConfig;
+        if (typeof fn !== 'function') return { ok: true, skipped: true };
+        const result = await fn(payload);
+        // Older builds resolve with undefined on success.
+        if (result && result.ok === false) {
+            if (result.configError) showConfigError(result.configError);
+            else if (!applyFieldErrors(result.fieldErrors)) {
+                showToast('保存失败', eventMessage(result) || '这次修改没有保存到本机。', 'err', { detail: eventDetail(result) });
+            }
+            return { ok: false, result };
+        }
+        applyFieldErrors([]);
+        document.querySelectorAll('[data-config-blocker]').forEach((el) => { el.hidden = true; });
+        return { ok: true, result };
     }
 
     async function testConnection() {
@@ -1391,15 +2244,27 @@
         if (!fn) { bridgeUnavailable(); return; }
         const payload = typeof window.collectConfigPayload === 'function' ? window.collectConfigPayload() : undefined;
         if (payload && window.mfhBridge?.saveConfig) {
-            await window.mfhBridge.saveConfig(payload);
+            const saved = await saveConfigChecked(payload);
+            if (!saved.ok) {
+                // Saving failed, so the backend would test the *old* values.
+                showToast('还不能测试连接', '请先修好上面标红的设置，保存成功后再测试。', 'err');
+                return;
+            }
         }
         const result = await fn(payload);
         const toastKind = result?.ok ? (result.kind === 'warn' ? 'warn' : 'ok') : 'err';
         const toastTitle = result?.ok
             ? (result.kind === 'warn' ? '连接成功，但需要调整' : '邮箱连接正常')
             : '邮箱连接失败';
-        showToast(toastTitle, result?.message || '', toastKind);
-        if (result?.ok) await reloadMailboxes({ silent: true });
+        showToast(toastTitle, eventMessage(result) || (result?.ok ? '已成功连接邮箱。' : '无法连接邮箱，请检查账号、授权码和主机地址。'), toastKind, {
+            detail: result?.ok ? '' : eventDetail(result),
+        });
+        if (result?.ok) {
+            // Only a real successful connection may mark credentials as configured.
+            window.FPH.credentialsVerified = true;
+            await reloadMailboxes({ silent: true });
+            await loadBridgeConfig();
+        }
     }
 
     function setMailboxOptions(mailboxes, selected) {
@@ -1429,21 +2294,43 @@
             if (statusEl) statusEl.textContent = `已读取 ${result.mailboxes.length} 个文件夹`;
             if (!opts.silent) showToast('已读取邮箱文件夹', `共 ${result.mailboxes.length} 个，可在列表中多选`);
         } else {
-            if (statusEl) statusEl.textContent = result?.message || '读取失败';
-            if (!opts.silent) showToast('读取失败', result?.message || '请先填写邮箱主机、账号和授权码。', 'err');
+            if (statusEl) statusEl.textContent = eventMessage(result) || '读取失败';
+            if (!opts.silent) showToast('读取失败', eventMessage(result) || '请先填写邮箱主机、账号和授权码。', 'err', { detail: eventDetail(result) });
         }
     }
 
     async function developerReset() {
-        const confirmed = window.confirm('确认删除本机缓存、已归档发票、待确认队列、识别结果、运行历史和邮箱增量同步状态吗？下次运行将作为首次同步，可能会重新抓取大量旧邮件。该操作不能撤销。');
-        if (!confirmed) return;
+        const first = window.confirm([
+            '重置应用数据（将删除所有本机数据）',
+            '',
+            '以下内容会被永久删除，且不能撤销：',
+            '· 已归档的发票和行程单原件（财务原件，删除后无法恢复）',
+            '· 本机缓存的邮件原文',
+            '· 待确认队列',
+            '· 识别结果清册和 CSV',
+            '· 运行历史记录',
+            '· 邮箱增量同步状态（下次运行会当作首次同步）',
+            '',
+            '不会删除：邮箱与保存设置。',
+            '',
+            '确认继续吗？',
+        ].join('\n'));
+        if (!first) return;
+        const second = window.confirm('再次确认：已归档的发票原件会被删除。请先自行备份需要保留的文件。确定要删除吗？');
+        if (!second) return;
         if (!window.mfhBridge?.developerReset) { bridgeUnavailable(); return; }
         const result = await window.mfhBridge.developerReset();
         if (result?.summary) applySummary(result.summary);
-        showToast(
-            '已重置本机数据',
-            `删除 ${fmtInt(result?.removed?.length || 0)} 个位置。邮箱配置保留，邮件缓存已清除。`,
-        );
+        // Reset only touches paths inside the app-managed data directory.
+        const skipped = Array.isArray(result?.skippedExternal) ? result.skippedExternal : [];
+        const removedCount = fmtInt(result?.removed?.length || 0);
+        const sub = skipped.length > 0
+            ? `已删除 ${removedCount} 个应用管理的位置。有 ${fmtInt(skipped.length)} 个位置保存在应用目录之外，没有被删除，需要你自行处理。`
+            : `已删除 ${removedCount} 个应用管理的位置。邮箱与保存设置已保留。`;
+        showToast('仅重置了应用管理的数据', sub, skipped.length > 0 ? 'warn' : 'ok', {
+            detail: skipped.length > 0 ? `未删除的外部位置：\n${skipped.map((item) => sanitizeText(item)).join('\n')}` : '',
+            sticky: skipped.length > 0,
+        });
     }
 
     async function handlePendingAction(action) {
@@ -1457,7 +2344,12 @@
             const fn = window.mfhBridge?.pendingRefreshLink;
             if (!fn) { bridgeUnavailable(); return; }
             const result = await fn({ hash });
-            showToast(result?.ok ? '已打开原始邮件' : '没有找到原始邮件', result?.message || '', result?.ok ? 'ok' : 'err');
+            showToast(
+                result?.ok ? '已打开原始邮件' : '没有找到原始邮件',
+                eventMessage(result) || (result?.ok ? '请在邮件里重新获取下载链接后再回来重试。' : '本机缓存里找不到这封邮件，可以先刷新列表。'),
+                result?.ok ? 'ok' : 'err',
+                { detail: result?.ok ? '' : eventDetail(result) },
+            );
             return;
         }
         if (kind === 'ignore') {
@@ -1466,8 +2358,16 @@
             const fn = window.mfhBridge?.pendingIgnore;
             if (!fn) { bridgeUnavailable(); return; }
             const result = await fn({ hash });
-            if (result?.summary) applySummary(result.summary);
-            showToast(result?.ok ? '已忽略' : '忽略失败', result?.message || '', result?.ok ? 'ok' : 'warn');
+            // Update the affected row in place, then refresh counters without
+            // rebuilding the whole list (keeps focus and expansion state).
+            const removed = result?.ok ? removePendingRowInPlace(hash, '已从待确认队列中移除') : false;
+            if (result?.summary) applySummary(result.summary, { preservePendingDom: removed });
+            showToast(
+                result?.ok ? '已忽略' : '忽略失败',
+                eventMessage(result) || (result?.ok ? '这封邮件已从待确认队列移除，原始邮件仍保留在缓存里。' : '没能更新待确认队列，请重试。'),
+                result?.ok ? 'ok' : 'err',
+                { detail: result?.ok ? '' : eventDetail(result) },
+            );
             return;
         }
         if (kind && kind !== 'manual_archive') {
@@ -1479,20 +2379,27 @@
         const fn = window.mfhBridge?.pendingManualArchive;
         if (!fn) { bridgeUnavailable(); return; }
         const result = await fn({ hash });
-        if (result?.summary) applySummary(result.summary);
         if (result?.canceled) {
+            if (result?.summary) applySummary(result.summary);
             showToast('已取消归档', '没有选择文件，待确认队列保持不变。', 'warn');
             return;
         }
-        showToast(result?.ok ? '已归档' : '归档失败', result?.message || '', result?.ok ? 'ok' : 'err');
+        const removed = result?.ok ? removePendingRowInPlace(hash, '已归档并移出待确认队列') : false;
+        if (result?.summary) applySummary(result.summary, { preservePendingDom: removed });
+        showToast(
+            result?.ok ? '已归档' : '归档失败',
+            eventMessage(result) || (result?.ok ? '文件已复制到归档目录，并加入识别队列。' : '文件没有归档成功，待确认记录保持不变。'),
+            result?.ok ? 'ok' : 'err',
+            { detail: result?.ok ? '' : eventDetail(result) },
+        );
     }
 
     function showFetchPreview() {
         const from = document.getElementById('date-from')?.value || '开始日期';
         const to = document.getElementById('date-to')?.value || '结束日期';
-        const matchSubject = document.querySelector('[data-fetch-check="matchSubject"]')?.classList.contains('is-on');
-        const matchBody = document.querySelector('[data-fetch-check="matchBody"]')?.classList.contains('is-on');
-        const dryRun = document.querySelector('[data-fetch-check="dryRun"]')?.classList.contains('is-on');
+        const matchSubject = checkedBySelector('[data-fetch-check="matchSubject"]');
+        const matchBody = checkedBySelector('[data-fetch-check="matchBody"]');
+        const dryRun = checkedBySelector('[data-fetch-check="dryRun"]');
         const cfg = window.FPH.configPayload?.config || {};
         const keywords = Array.isArray(cfg.filter?.keywords) && cfg.filter.keywords.length > 0
             ? cfg.filter.keywords.join('、')
@@ -1503,15 +2410,19 @@
         const matchParts = [];
         if (matchSubject) matchParts.push('主题');
         if (matchBody) matchParts.push('正文');
-        const matchText = matchParts.length > 0 ? matchParts.join(' + ') : '关键词不匹配';
+        if (matchParts.length === 0) {
+            showToast('还不能运行', '“匹配主题”和“匹配正文”至少要选一个，否则不会命中任何邮件。', 'warn');
+            return;
+        }
+        const matchText = matchParts.join(' + ');
         const lines = [
-            `日期：${from} 至 ${to}`,
+            `日期：${from} 至 ${to}（按本机日历日，含起止当天全天）`,
             `关键词：${keywords}`,
             `匹配范围：${matchText}`,
             `邮箱文件夹：${mailboxes}`,
             dryRun ? '模式：只预览，不保存原件' : '模式：保存命中邮件到本机',
         ];
-        showToast('将要执行的抓取', lines.join(' · '));
+        showToast('将要执行的抓取', lines.join(' · '), 'ok', { duration: 6000 });
     }
 
     function exportVisibleLog() {
@@ -1531,7 +2442,10 @@
             if (lines.length === 0) return '';
             return `# ${block.name}\n${lines.join('\n')}`;
         }).filter(Boolean);
-        copyText(parts.join('\n\n') || '暂无实时日志', '运行日志');
+        // Redact before the log ever reaches the clipboard (URLs with tokens,
+        // absolute local paths, full content hashes).
+        const body = sanitizeText(parts.join('\n\n'));
+        copyText(body ? `${body}\n\n（已移除链接参数、本机绝对路径和完整编号）` : '暂无实时日志', '运行日志');
     }
 
     function tableSourceLabel() {
@@ -1548,7 +2462,7 @@
         const csvField = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
         if (page === 'pending') {
             const groups = window.FPH.pending?.groups || [];
-            const lines = [['分组', '动作', '主题', '日期', '发件人', '原因', '编号'].map(csvField).join(',')];
+            const lines = [['分组', '下一步', '主题', '日期', '发件人', '原因分类', '支持编号', '诊断原因（已脱敏）'].map(csvField).join(',')];
             for (const group of groups) {
                 const [primary] = actionText(group.action);
                 for (const row of group.rows || []) {
@@ -1558,8 +2472,9 @@
                         row.subject || '',
                         (row.date || '').slice(0, 10),
                         row.from || '',
-                        row.reason || '',
-                        row.hash || '',
+                        rowCategory(row),
+                        supportRef(row.hash),
+                        sanitizeText(row.reason || ''),
                     ].map(csvField).join(','));
                 }
             }
@@ -1627,20 +2542,62 @@
         })[ch]);
     }
 
-    function showToast(title, sub, kind = 'ok', duration = 2600) {
+    /* showToast(title, sub, kind, options)
+       options: number (legacy duration) | { duration, detail, sticky }
+       - success/info → role="status", auto-dismiss
+       - failures that need action (kind === 'err') → role="alert", never
+         auto-dismiss, always closable
+       - hover/focus pauses the dismissal timer
+       - technical output only appears inside the redacted「诊断信息」disclosure */
+    function showToast(title, sub, kind = 'ok', options) {
+        const opts = typeof options === 'number'
+            ? { duration: options }
+            : (options && typeof options === 'object' ? options : {});
+        const isError = kind === 'err';
+        const sticky = opts.sticky ?? isError;
+        const duration = Math.max(1500, Number(opts.duration) || (kind === 'warn' ? 4200 : 2600));
+        const detail = opts.detail ? sanitizeText(opts.detail) : '';
+
         let stack = document.querySelector('.toast-stack');
         if (!stack) {
             stack = document.createElement('div');
             stack.className = 'toast-stack';
-            stack.setAttribute('aria-live', 'polite');
             document.body.appendChild(stack);
         }
         const toast = document.createElement('div');
         toast.className = `toast ${kind}`;
-        // title/sub often carry backend result.message / stderr / paths — escape both.
-        toast.innerHTML = `<div>${escapeHtml(title)}</div><div class="toast__sub">${escapeHtml(sub)}</div>`;
+        toast.setAttribute('role', isError ? 'alert' : 'status');
+        toast.setAttribute('aria-live', isError ? 'assertive' : 'polite');
+        toast.tabIndex = -1;
+        const detailMarkup = detail
+            ? `<details class="toast__detail"><summary>诊断信息（已脱敏）</summary><pre>${escapeHtml(detail)}</pre></details>
+               <div class="toast__actions"><button class="btn btn--sm btn--ghost" type="button" data-toast-copy>复制诊断信息</button></div>`
+            : '';
+        toast.innerHTML = `
+            <button class="toast__close" type="button" aria-label="关闭提示">×</button>
+            <div class="strong">${escapeHtml(title)}</div>
+            ${sub ? `<div class="toast__sub">${escapeHtml(sanitizeText(sub))}</div>` : ''}
+            ${detailMarkup}
+        `;
         stack.appendChild(toast);
-        window.setTimeout(() => toast.remove(), Math.max(1500, Number(duration) || 2600));
+
+        let timer = 0;
+        const dismiss = () => { window.clearTimeout(timer); toast.remove(); };
+        const schedule = () => {
+            if (sticky) return;
+            window.clearTimeout(timer);
+            timer = window.setTimeout(dismiss, duration);
+        };
+        toast.querySelector('.toast__close')?.addEventListener('click', dismiss);
+        toast.querySelector('[data-toast-copy]')?.addEventListener('click', () => {
+            copyText(`${title}\n${sanitizeText(sub || '')}\n\n${detail}`, '诊断信息');
+        });
+        toast.addEventListener('mouseenter', () => window.clearTimeout(timer));
+        toast.addEventListener('mouseleave', schedule);
+        toast.addEventListener('focusin', () => window.clearTimeout(timer));
+        toast.addEventListener('focusout', schedule);
+        schedule();
+        return toast;
     }
 
     if (document.readyState === 'loading') {
@@ -1661,6 +2618,16 @@
         bridge: window.mfhBridge || null,
         applyOcrProgress,
         applyFileProgress,
+        applyNormalizedFilter,
+        setCurrentBatch,
+        saveConfigChecked,
+        applyFieldErrors,
+        showConfigError,
+        isChecked,
+        setChecked,
+        announce,
+        sanitizeText,
+        upgradeStaticMarkup,
         whenConfigReady,
         ICON,
     });

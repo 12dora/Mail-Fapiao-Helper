@@ -14,9 +14,9 @@
     <main class="main">
         <div class="toolbar">
             <span class="toolbar__crumb">设置</span>
-            <span class="toolbar__title">关于</span>
+            <h1 class="toolbar__title" tabindex="-1">关于</h1>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta">本地预览版</span>
+            <span class="toolbar__meta" data-about-channel>读取中…</span>
         </div>
 
         <div class="page stagger">
@@ -27,13 +27,16 @@
                         <div class="small muted mt-4">从邮箱保存发票、行程单和识别结果</div>
                     </div>
                     <div class="right">
-                        <div class="mono strong" style="font-size: 18px;">v0.1.0</div>
-                        <div class="small muted mt-4">桌面端预览</div>
+                        <div class="mono strong" style="font-size: 18px;" data-about-version>版本读取中…</div>
+                        <div class="small muted mt-4" data-about-channel>读取中…</div>
                     </div>
                 </div>
                 <div class="row gap-12 mt-16" style="padding: 12px 16px; background: var(--ok-soft); border-radius: var(--radius-sm);">
-                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" style="color: var(--ok);"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-                    <div class="small">邮件、附件、识别结果默认只保存在本机。除非你主动配置云端识别服务，否则不会上传邮件内容。</div>
+                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" style="color: var(--ok);" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                    <div class="small">
+                        <div>邮件原文、附件和识别结果都保存在这台电脑上。</div>
+                        <div class="mt-4"><strong>如果你填写了腾讯云密钥并启用云端识别：待识别的发票和行程单文件本身会被发送到腾讯云进行识别。</strong>邮件正文不会发送；密钥只保存在本设备，不会写入发票文件或上传到我们的服务器。</div>
+                    </div>
                 </div>
             </div>
 
@@ -71,24 +74,24 @@
                     <div class="h3 mb-16">识别与隐私</div>
                     <div class="setting-row">
                         <div class="setting-row__main">
-                            <div class="setting-row__title">默认识别引擎</div>
-                            <div class="setting-row__desc">使用本机内置 efapiao，引擎启动后可批量处理文件</div>
+                            <div class="setting-row__title">识别引擎</div>
+                            <div class="setting-row__desc">在本机运行，负责读取已归档的发票和行程单</div>
                         </div>
-                        <span class="pill pill--ok">已配置</span>
+                        <span class="pill" data-about-engine>读取中…</span>
                     </div>
                     <div class="setting-row">
                         <div class="setting-row__main">
-                            <div class="setting-row__title">腾讯云鉴权</div>
-                            <div class="setting-row__desc">如启用腾讯识别，密钥只保存在本机并透传给 efapiao</div>
+                            <div class="setting-row__title">腾讯云识别</div>
+                            <div class="setting-row__desc">启用后，<strong>待识别的发票文件会被发送到腾讯云</strong>；邮件正文不会发送，密钥只保存在本设备</div>
                         </div>
-                        <span class="pill">可选</span>
+                        <span class="pill" data-about-cloud>读取中…</span>
                     </div>
                     <div class="setting-row">
                         <div class="setting-row__main">
-                            <div class="setting-row__title">云端服务</div>
-                            <div class="setting-row__desc">只有你在“邮箱与保存”里填写鉴权后才会使用</div>
+                            <div class="setting-row__title">当前识别模式</div>
+                            <div class="setting-row__desc" data-about-ocr-mode>读取中…</div>
                         </div>
-                        <span class="pill pill--warn">用户控制</span>
+                        <span class="pill">来自本机配置</span>
                     </div>
                     <div class="row gap-8 mt-16">
                         <a class="btn btn--sm" href="config.html" data-spa-page="config">管理识别设置</a>
