@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Electron/V8 需要可写可执行内存。 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- 主进程通过 ELECTRON_RUN_AS_NODE / 环境变量拉起 CLI 子进程。 -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- vendor/efapiao 下的 OCR 可执行文件是独立签名的嵌套二进制。 -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- IMAP 出站连接 + 本机 `efapiao serve` 监听回环端口。 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- 用户选择的发票归档目录。 -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

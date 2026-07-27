@@ -55,24 +55,32 @@
 
 ## 三、首次打开（绕过系统拦截）
 
-桌面包**未做代码签名**（个人项目无证书），首次启动会被 macOS Gatekeeper / Windows SmartScreen 拦一次。放行一次后即可正常双击使用。
+### 先看这里：当前发布物是**未签名的开发构建**
+
+本项目暂时没有 Apple Developer ID / Windows Authenticode 证书，Releases 页面上文件名带 **`-unsigned`** 后缀的安装包即为未签名构建。发布说明（release notes）里也会逐个平台列出签名状态与源码 commit。
+
+这意味着：
+
+- **系统无法替你验证来源和完整性。** Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
+- 请**只从本仓库的 [Releases](../../releases) 页面下载**，并核对发布说明里的 commit；不要从转发的网盘、群文件安装。
+- **受管设备、公司电脑、处理敏感票据的机器不建议安装未签名构建**——请等待签名版本，或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
+
+一旦仓库配置了签名证书，发布流水线会自动产出已签名 + 已公证的包，文件名不再带 `-unsigned`，下面的放行步骤也就不再需要。
 
 ### macOS
 
 1. 双击 `.dmg`，把"发票助手"拖进 **应用程序**。
 2. 第一次打开：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），在弹窗里再点 **打开**。
-3. 如果新版 macOS 提示"已损坏，无法打开"，开一次终端执行：
+3. 系统记住这一次授权后，之后正常双击即可。
 
-   ```bash
-   xattr -dr com.apple.quarantine "/Applications/发票助手.app"
-   ```
-
-   然后回到"应用程序"里双击即可。
+> **不要**执行 `xattr -dr com.apple.quarantine` 之类的递归命令去"修好"它。那会把整个目录下所有文件的隔离标记一起清掉——包括你并不打算信任的东西——而且会掩盖掉真正的损坏/篡改提示。上面的"右键 → 打开"只对这一个 app 生效，是范围最小的做法。
+>
+> 如果右键打开后系统仍然坚持"已损坏"，请把下载的文件删掉并重新从 Releases 下载：这通常说明文件在传输中被截断或被改动过。
 
 ### Windows
 
 1. 双击 `发票助手 Setup <version>.exe`，按引导安装。
-2. SmartScreen 提示"Windows 已保护你的电脑"时，点 **更多信息 → 仍要运行**。
+2. SmartScreen 提示"Windows 已保护你的电脑"时，先确认文件确实来自本仓库 Releases，再点 **更多信息 → 仍要运行**。
 3. 从开始菜单找到"发票助手"打开。
 
 > 免安装方案：下载 `发票助手-<version>-win.zip`，解压到任意目录，双击 `发票助手.exe`，第一次同样会触发 SmartScreen。
@@ -164,13 +172,13 @@ pending/               # 待确认邮件（含原 .eml 与索引）
 <details>
 <summary>macOS 提示"应用已损坏，无法打开"</summary>
 
-新版本 macOS 对未签名应用的标准提示。在终端执行：
+这是 macOS 对**未签名应用**的标准提示（当前发布物即为未签名开发构建，见 [第三节](#三首次打开绕过系统拦截)）。
 
-```bash
-xattr -dr com.apple.quarantine "/Applications/发票助手.app"
-```
+正确做法：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。这只对这一个 app 放行。
 
-然后再次双击即可。
+**请不要**用 `xattr -dr com.apple.quarantine <目录>` 递归清除隔离标记：它会连带信任你没打算信任的文件，并且会让真正的"文件损坏/被篡改"提示也一并消失。
+
+如果右键打开仍然失败，说明文件很可能在下载中损坏或被改动——删掉重新从 [Releases](../../releases) 下载，并核对发布说明里的 commit。
 </details>
 
 <details>
@@ -235,18 +243,53 @@ node dist/index.js organize   # 按规则整理输出
 
 CLI 读取项目根目录的 `config.json`（参考 `config.example.json`）。
 
+### 跑测试
+
+```bash
+npm test                  # build + typecheck + CLI 回归 + Electron 端到端
+npm run test:browser      # 渲染进程 E2E，需要 Playwright Chromium，单独跑
+```
+
+每个 `test:*` 前都会执行 `scripts/check-test-prereqs.mjs` 做前置检查（是否已编译、Electron 二进制是否安装、Chromium 是否就位、Linux 上有没有显示服务）。**缺少前置条件时会直接失败并说明原因，不会静默跳过。** Linux 上跑 GUI 相关套件请用 `xvfb-run -a npm test`。
+
 ### 打包本地安装包
 
 ```bash
 npm run dist:mac          # macOS dmg + zip（arm64）
 npm run dist:win          # Windows nsis + zip（x64）
+npm run verify:artifacts -- --platform mac   # 校验产物
 ```
 
 产物写入 `release/`（已 gitignore）。
 
+打包经由 [scripts/build-release.mjs](scripts/build-release.mjs)：环境里有签名证书就签名（macOS 还会在有 Apple 凭据时公证），没有则产出**未签名构建**并在文件名上加 `-unsigned` 后缀，同时写出 `release/build-info-<platform>-<arch>.json` 记录签名状态。`verify:artifacts` 会拒绝包含异平台可执行文件、异平台 OCR 引擎、测试代码或 dev fake backend 的产物。
+
+macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitlements.mac.plist)（hardened runtime + 嵌套 OCR 二进制所需的 library validation 豁免）。
+
+### 持续集成
+
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — 每个 PR 和 push 到 main：在 macOS + Windows 上跑 `npm audit --omit=dev` 与 `npm test`；Chromium 浏览器 E2E 作为单独的可选 job。
+- [.github/workflows/release.yml](.github/workflows/release.yml) — 打包前同样跑 `npm test`。
+
 ### 发布到 GitHub Release
 
-推一个 `v*` tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)，在 macOS + Windows runner 上并行构建并把 dmg / zip / exe 上传到对应 tag 的 Release。
+推一个 `v*` tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)。也可以用 `workflow_dispatch` 手动指定 tag，此时流水线会先做校验：
+
+1. tag 必须**已经存在**于远端，并解析成唯一的 commit SHA；
+2. tag 的 semver 必须与该 commit 上 `package.json` 的 `version` 一致；
+3. 该 tag 不能已经有已发布的 Release（避免悄悄替换用户已下载的二进制）；
+4. 所有 matrix job 用 `actions/checkout` 显式 checkout 同一个 commit SHA，构建完成后再次确认 tag 没有被移动。
+
+解析出的 commit SHA 会写进发布说明，和每个平台的签名状态一起展示（见 [scripts/compose-release-notes.mjs](scripts/compose-release-notes.mjs)）。
+
+签名相关的 secrets（全部可选，缺失即降级为未签名构建）：
+
+| Secret | 用途 |
+|---|---|
+| `MACOS_CERTIFICATE_P12` / `MACOS_CERTIFICATE_PASSWORD` | macOS Developer ID 证书（base64 的 .p12）与密码 |
+| `APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | App Store Connect API key 公证（推荐） |
+| `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 公证（备选） |
+| `WINDOWS_CERTIFICATE_PFX` / `WINDOWS_CERTIFICATE_PASSWORD` | Windows Authenticode 证书（base64 的 .pfx）与密码 |
 
 ### 其他文档
 

@@ -1,0 +1,78 @@
+name: CI
+
+# CODE-01: every PR and every push to main must clear typecheck + the
+# deterministic CLI/Electron suites before anything can be released.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck + tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+          - name: Windows x64
+            os: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        # APP-09: the runtime dependency tree must stay free of known advisories.
+        run: npm audit --omit=dev --audit-level=moderate
+
+      # `npm test` = build + typecheck + test:cli + test:electron.
+      # Each suite has a pretest:* preflight that fails loudly when a runtime
+      # prerequisite (build output, Electron binary, display) is missing, so a
+      # skipped suite can never masquerade as a passing one.
+      - name: Test
+        run: npm test
+
+  browser-tests:
+    # Optional gate: needs a Playwright Chromium download, so it runs as its own
+    # job instead of being folded into `npm test`.
+    name: Browser E2E (Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser E2E
+        # pretest:browser hard-fails if Chromium is somehow still missing.
+        run: xvfb-run -a npm run test:browser
