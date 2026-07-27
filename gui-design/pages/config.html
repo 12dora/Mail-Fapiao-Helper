@@ -477,20 +477,34 @@
         el.setAttribute('aria-describedby', described.join(' '));
     }
 
+    /* Built with DOM APIs + textContent only. `message` embeds the raw value the
+       user typed (the inputs are plain text fields), so string-concatenating it
+       into innerHTML would be a script-injection sink inside the Electron
+       renderer, where window.mfhBridge is reachable. */
     function renderErrorSummary(errors) {
         const summary = document.querySelector('[data-config-error-summary]');
         if (!summary) return;
+        summary.replaceChildren();
         if (errors.length === 0) {
             summary.hidden = true;
-            summary.innerHTML = '';
             return;
         }
         summary.hidden = false;
         summary.setAttribute('role', 'alert');
-        summary.innerHTML = `
-            <div class="error-summary__title">有 ${errors.length} 项设置填写不正确，这些改动还没有保存</div>
-            <ul>${errors.map((item) => `<li><a href="#${item.id}" data-error-jump="${item.id}">${item.message}</a></li>`).join('')}</ul>
-        `;
+        const title = document.createElement('div');
+        title.className = 'error-summary__title';
+        title.textContent = `有 ${errors.length} 项设置填写不正确，这些改动还没有保存`;
+        const list = document.createElement('ul');
+        for (const item of errors) {
+            const li = document.createElement('li');
+            const link = document.createElement('a');
+            link.href = `#${encodeURIComponent(String(item.id || ''))}`;
+            link.dataset.errorJump = String(item.id || '');
+            link.textContent = String(item.message || '');
+            li.appendChild(link);
+            list.appendChild(li);
+        }
+        summary.append(title, list);
     }
 
     function validateNumericFields() {
@@ -523,7 +537,9 @@
         const state = document.getElementById('save-state');
         if (!state) return;
         state.className = `pill pill--${kind}`;
-        state.innerHTML = `<span class="pill__dot"></span>${label}`;
+        const dot = document.createElement('span');
+        dot.className = 'pill__dot';
+        state.replaceChildren(dot, document.createTextNode(String(label)));
     }
 
     window.MFH_CONFIG_CANCEL_PENDING_SAVE = () => {
@@ -646,14 +662,28 @@
     window.MFH_UPDATE_RENAME_PREVIEW = updateRenamePreview;
 
     function wireRenamePreview() {
-        const rule = document.querySelector('[data-config="rename.rule"]');
-        const fallback = document.querySelector('[data-config="rename.fallback"]');
-        rule?.addEventListener('input', updateRenamePreview);
-        fallback?.addEventListener('input', updateRenamePreview);
+        for (const selector of ['rename.rule', 'rename.fallback']) {
+            const el = document.querySelector(`[data-config="${selector}"]`);
+            if (!el || el.dataset.previewWired === 'true') continue;
+            el.dataset.previewWired = 'true';
+            el.addEventListener('input', updateRenamePreview);
+        }
         updateRenamePreview();
     }
 
+    /* Single idempotent entry point. When the SPA loader injects this inline
+       script it runs immediately (readyState is already 'complete') AND the
+       loader calls PAGE_SCRIPT_INIT.config() right afterwards, so the guard
+       lives on the concrete page root rather than on the call site. */
+    function configPageRoot() {
+        return document.querySelector('main.main[data-spa-page="config"]')
+            || (document.body.dataset.page === 'config' ? document.querySelector('main.main') : null);
+    }
+
     function initConfigPage() {
+        const root = configPageRoot();
+        if (!root || root.dataset.configInit === 'true') return;
+        root.dataset.configInit = 'true';
         wireAutoSave();
         wireRenamePreview();
     }

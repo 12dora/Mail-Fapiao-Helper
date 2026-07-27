@@ -356,7 +356,6 @@
         loadBridgeConfig();
         wireOperationProgress();
         wireOpState();
-        loadAppInfo();
         window.addEventListener('popstate', () => {
             const page = pageIdFromPath(location.pathname);
             if (page) showPage(page, null, { push: false });
@@ -366,6 +365,7 @@
         updateActiveNav(initialPage);
         upgradeStaticMarkup(document);
         wireLogFollow();
+        applyLiveState(initialPage);
     }
 
     /* ---------- Progressive upgrade of static page markup ----------
@@ -436,46 +436,67 @@
     }
 
     /* ---------- Mutually exclusive operations (contract: 'op-state') ---------- */
-    const MUTEX_ACTIONS = ['run-pipeline', 'rerun-pipeline', 'ocr-toggle', 'organize', 'rename-organize'];
-    function wireOpState() {
+    const MUTEX_GROUPS = [
+        { kind: 'fetch',    selector: '#run-btn' },
+        { kind: 'pipeline', selector: '[data-action="run-pipeline"], [data-action="rerun-pipeline"]' },
+        { kind: 'ocr',      selector: '[data-action="ocr-toggle"]' },
+        { kind: 'organize', selector: '[data-action="organize"], [data-action="rename-organize"]' },
+    ];
+
+    async function wireOpState() {
         const subscribe = window.mfhBridge?.onOpState;
-        if (typeof subscribe !== 'function') return; // Graceful degradation.
-        subscribe((payload) => {
-            const running = payload?.running || null;
-            window.FPH.opState = running;
-            applyOpState(running);
-        });
-    }
-    function applyOpState(running) {
-        const busyKind = running?.kind || '';
-        document.querySelectorAll('#run-btn').forEach((el) => {
-            if (!busyKind) { el.removeAttribute('data-op-locked'); return; }
-            if (busyKind !== 'fetch') { el.disabled = true; el.dataset.opLocked = 'true'; }
-        });
-        MUTEX_ACTIONS.forEach((name) => {
-            document.querySelectorAll(`[data-action="${name}"]`).forEach((el) => {
-                if (!busyKind) {
-                    if (el.dataset.opLocked === 'true') { el.disabled = false; delete el.dataset.opLocked; }
-                    return;
-                }
-                const ownKind = name === 'ocr-toggle' ? 'ocr' : name.includes('organize') ? 'organize' : 'pipeline';
-                if (ownKind === busyKind) return; // Its own stop/progress control stays live.
-                el.disabled = true;
-                el.dataset.opLocked = 'true';
-                el.title = '另一个任务正在运行，完成后可再操作。';
+        if (typeof subscribe === 'function') {
+            subscribe((payload) => {
+                const running = payload?.running || null;
+                window.FPH.opState = running;
+                applyOpState(running);
             });
-        });
-        if (!busyKind) {
-            document.querySelectorAll('[data-op-locked="true"]').forEach((el) => {
-                el.disabled = false;
-                delete el.dataset.opLocked;
-                el.removeAttribute('title');
-            });
+        }
+        // Subscribing only sees FUTURE transitions. Ask for the current state so
+        // a window opened mid-run does not render idle controls (FB-01).
+        const read = window.mfhBridge?.getOpState;
+        if (typeof read !== 'function') return;
+        try {
+            const state = await read();
+            window.FPH.opState = state?.running || null;
+            applyOpState(window.FPH.opState);
+        } catch {
+            // Older main process without the handler: stay in degraded mode.
         }
     }
 
+    function applyOpState(running) {
+        const busyKind = running?.kind || '';
+        for (const group of MUTEX_GROUPS) {
+            document.querySelectorAll(group.selector).forEach((el) => {
+                const conflicts = Boolean(busyKind) && busyKind !== group.kind;
+                if (conflicts) {
+                    el.disabled = true;
+                    el.dataset.opLocked = 'true';
+                    el.title = '另一个任务正在运行，完成后可再操作。';
+                } else if (el.dataset.opLocked === 'true') {
+                    el.disabled = false;
+                    delete el.dataset.opLocked;
+                    el.removeAttribute('title');
+                }
+            });
+        }
+        // The OCR toggle must show "停止识别" for a job that started before this
+        // page (or this window) existed.
+        if (busyKind === 'ocr') setOcrControlState('running');
+        // Let the dashboard re-apply its own date-range validity after unlocking.
+        if (!busyKind) window.MFH_DASHBOARD_REFRESH_RUN_BTN?.();
+    }
+
+    function ocrJobRunning() {
+        return window.FPH.opState?.kind === 'ocr';
+    }
+
     /* ---------- About / version metadata (COPY-07B) ---------- */
-    async function loadAppInfo() {
+    let appInfoLoaded = false;
+
+    async function loadAppInfo(opts = {}) {
+        if (appInfoLoaded && !opts.force) { renderAppInfo(); return; }
         let info = null;
         try {
             const fn = window.mfhBridge?.getAppInfo;
@@ -484,6 +505,17 @@
             info = null;
         }
         window.FPH.appInfo = info || null;
+        appInfoLoaded = true;
+        renderAppInfo();
+    }
+
+    /**
+     * 把已取到的应用信息写进当前 DOM。SPA 新插入的 About 页不会重新执行
+     * `loadAppInfo()`，若不在 commit 后重渲染，版本/渠道会一直停在 HTML 里的
+     * 「读取中…」占位符——那样 COPY-07B 在用户唯一的进入路径上等于没修。
+     */
+    function renderAppInfo() {
+        const info = window.FPH.appInfo;
         const version = info?.version ? `v${info.version}` : '版本未知';
         const channel = info?.channel || (window.mfhBridge ? '桌面版' : '静态预览');
         document.querySelectorAll('[data-app-version]').forEach((el) => { el.textContent = version; });
@@ -601,17 +633,22 @@
         }
     }
 
-    function setNavPending(pageId, pending) {
+    /* The link and the content own their pending state separately: a stale
+       navigation may only clear what it set itself, otherwise finishing first
+       would wipe the newer navigation's feedback (FB-03). */
+    function setNavLinkPending(pageId, pending) {
         document.querySelectorAll('.nav-item[data-spa-page]').forEach((link) => {
             if (link.dataset.spaPage !== pageId) return;
             if (pending) link.setAttribute('aria-busy', 'true');
             else link.removeAttribute('aria-busy');
         });
+    }
+
+    function setContentPending(pending) {
         const current = document.querySelector('main.main:not([style*="display: none"])');
-        if (current) {
-            if (pending) current.setAttribute('aria-busy', 'true');
-            else current.removeAttribute('aria-busy');
-        }
+        if (!current) return;
+        if (pending) current.setAttribute('aria-busy', 'true');
+        else current.removeAttribute('aria-busy');
     }
 
     function showLoadingHint(pageId, token) {
@@ -623,21 +660,27 @@
             if (!current || current.querySelector('.page-skeleton')) return;
             const hint = document.createElement('div');
             hint.className = 'page-skeleton';
-            hint.dataset.navSkeleton = 'true';
-            hint.innerHTML = `
-                <div class="page-skeleton__note">正在打开「${escapeHtml(PAGE_META[pageId]?.heading || '页面')}」…</div>
-                <div class="skeleton" style="height: 14px; width: 40%;"></div>
-                <div class="skeleton" style="height: 10px;"></div>
-                <div class="skeleton" style="height: 10px; width: 80%;"></div>
-            `;
+            hint.dataset.navSkeleton = String(token);
+            const note = document.createElement('div');
+            note.className = 'page-skeleton__note';
+            note.textContent = `正在打开「${PAGE_META[pageId]?.heading || '页面'}」…`;
+            hint.appendChild(note);
+            for (const width of ['40%', '100%', '80%']) {
+                const bar = document.createElement('div');
+                bar.className = 'skeleton';
+                bar.style.height = width === '40%' ? '14px' : '10px';
+                bar.style.width = width;
+                hint.appendChild(bar);
+            }
             current.appendChild(hint);
             announce(`正在打开${PAGE_META[pageId]?.heading || '页面'}`);
         }, 150);
     }
 
-    function clearLoadingHint(timer) {
+    /* Only removes the skeleton this navigation created. */
+    function clearLoadingHint(timer, token) {
         window.clearTimeout(timer);
-        document.querySelectorAll('[data-nav-skeleton]').forEach((el) => el.remove());
+        document.querySelectorAll(`[data-nav-skeleton="${token}"]`).forEach((el) => el.remove());
     }
 
     async function showPage(pageId, href, opts = {}) {
@@ -645,7 +688,8 @@
         const current = document.querySelector('main.main:not([style*="display: none"])');
         if (current?.dataset.spaPage === pageId) return;
         const token = ++navToken;
-        setNavPending(pageId, true);
+        setNavLinkPending(pageId, true);
+        setContentPending(true);
         const hintTimer = showLoadingHint(pageId, token);
         try {
             const target = await loadPageMain(pageId, href);
@@ -672,17 +716,28 @@
                 heading.focus({ preventScroll: true });
             }
             wireLogFollow();
+            // Page-scoped errors belong to the page the user just left.
+            dismissPageToasts();
+            // A freshly inserted page must reflect the live state (running job,
+            // real app version/channel) instead of its static placeholders.
+            applyLiveState(pageId);
             announce(`${meta?.heading || pageId} 已打开`);
             if (opts.push !== false) {
                 history.pushState({ page: pageId }, '', pathForPage(pageId));
             }
             await loadBridgeSummary();
             await loadBridgeConfig();
+            // Replay again once the summary/config payloads have landed: the
+            // OCR status cards and the mutex locks depend on them.
+            if (token === navToken) applyLiveState(pageId);
         } catch (err) {
             if (token === navToken) showToast('页面加载失败', '请重试，或重启应用。', 'err', { detail: err?.message });
         } finally {
-            clearLoadingHint(hintTimer);
-            setNavPending(pageId, false);
+            // Never clear a newer navigation's feedback: the skeleton is keyed by
+            // token and the content busy flag only belongs to the current one.
+            clearLoadingHint(hintTimer, token);
+            setNavLinkPending(pageId, false);
+            if (token === navToken) setContentPending(false);
         }
     }
 
@@ -730,26 +785,61 @@
 
     /* ---------- Redaction (COPY-01 / COPY-05) ----------
        Anything that can reach a toast, the log export, a history entry or the
-       clipboard passes through here first: URL query/fragment, absolute local
-       paths and full content hashes are removed. */
-    const URL_RE = /\b(?:https?|ftp):\/\/[^\s"'<>]+/gi;
-    const WIN_PATH_RE = /\b[A-Za-z]:\\[^\s"'<>]+/g;
-    const POSIX_PATH_RE = /(?:^|[\s(:])(\/(?:Users|home|var|tmp|private|Applications|opt|etc|mnt)\/[^\s"'<>)]*)/g;
-    const HASH_RE = /\b[0-9a-f]{12,}\b/gi;
+       clipboard passes through here first. This mirrors the rule set of
+       src/electron/sanitize.ts so that the renderer fallback path (err.message,
+       legacy stderr/error) is redacted just as strictly as main-process events:
+       URL query/fragment, credential-looking assignments, ANY absolute
+       POSIX/Windows/UNC path, and long content hashes. */
+    const SECRET_PARAM_RE = /(token|secret|key|sign|signature|auth|password|passwd|pass|credential|session|ticket|code)/i;
+    const SECRET_ASSIGN_RE = /\b(token|secret|secretid|secretkey|apikey|api_key|key|sign|signature|auth|authorization|password|passwd|pass|credential)(\s*[=:]\s*)("?)([^\s"',;&)]+)\3/gi;
+    const URL_RE = /\b(?:https?|ftp|file):\/\/[^\s"'<>）)\]，。；]+/gi;
+    const UNC_PATH_RE = /\\\\[A-Za-z0-9._$-]+(?:\\[^\s"'<>|,;]+)+/g;
+    const WIN_PATH_RE = /\b[A-Za-z]:\\[^\s"'<>|,;]+/g;
+    // Any absolute POSIX path with at least two segments. The lookbehind keeps
+    // date-like `2026/05/21` and relative `a/b/c` out.
+    const POSIX_PATH_RE = /(?<![A-Za-z0-9])(?:\/[A-Za-z0-9._@+\u4e00-\u9fa5-]+){2,}\/?/g;
+    const HASH_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{12,}\b/gi;
+    // Private-use sentinel for already-redacted fragments. Never a NUL byte:
+    // a literal 0x00 makes the source file look binary to git and tooling.
+    const KEEP_MARK = '\uE000';
 
-    function sanitizeText(value) {
-        let out = String(value ?? '');
-        out = out.replace(URL_RE, (match) => {
-            try {
-                const url = new URL(match);
-                return `${url.origin}${url.pathname}`;
-            } catch {
-                return match.split(/[?#]/)[0];
-            }
-        });
-        out = out.replace(WIN_PATH_RE, (match) => `…\\${match.split(/[\\/]/).filter(Boolean).pop() || ''}`);
-        out = out.replace(POSIX_PATH_RE, (match, path) => match.replace(path, `…/${path.split('/').filter(Boolean).pop() || ''}`));
+    function redactUrlText(raw) {
+        try {
+            const url = new URL(raw);
+            const hasSecret = Array.from(url.searchParams.keys()).some((key) => SECRET_PARAM_RE.test(key));
+            const base = `${url.protocol}//${url.host}${url.pathname}`;
+            if (url.search || url.hash) return `${base}${hasSecret ? '?<凭据参数已隐藏>' : '?…'}`;
+            return base;
+        } catch {
+            return raw.replace(/[?#].*$/, '');
+        }
+    }
+
+    function redactPathText(raw) {
+        const parts = String(raw).trim().split(/[\\/]/).filter(Boolean);
+        const base = parts.length > 0 ? parts[parts.length - 1] : '';
+        return raw.includes('\\') ? `…\\${base}` : `…/${base}`;
+    }
+
+    function sanitizeText(value, opts = {}) {
+        if (value === undefined || value === null) return '';
+        let out = typeof value === 'string' ? value : String(value);
+        // Park each redacted fragment so later rules cannot re-slice a URL path
+        // or an already-shortened filename.
+        const kept = [];
+        const keep = (replacement) => {
+            kept.push(replacement);
+            return `${KEEP_MARK}${kept.length - 1}${KEEP_MARK}`;
+        };
+        out = out.replace(URL_RE, (match) => keep(redactUrlText(match)));
+        out = out.replace(UNC_PATH_RE, (match) => keep(redactPathText(match)));
+        out = out.replace(WIN_PATH_RE, (match) => keep(redactPathText(match)));
+        out = out.replace(POSIX_PATH_RE, (match) => keep(redactPathText(match)));
+        out = out.replace(SECRET_ASSIGN_RE, (_m, key, sep) => `${key}${sep}***`);
         out = out.replace(HASH_RE, (match) => `${match.slice(0, 6)}…`);
+        out = out.replace(new RegExp(`${KEEP_MARK}(\\d+)${KEEP_MARK}`, 'g'), (_m, index) => kept[Number(index)] ?? '');
+        const max = Number(opts.maxLength) || 1200;
+        if (out.length > max) out = `${out.slice(0, max)}…`;
         return out;
     }
 
@@ -854,7 +944,7 @@
             window.FPH.configPayload = payload;
             // A corrupted config must show a blocking repair entry point, never "已加载".
             if (payload?.configError) showConfigError(payload.configError);
-            else document.querySelectorAll('[data-config-blocker]').forEach((el) => { el.hidden = true; });
+            else clearConfigError();
             applyConfig(payload.config || {}, payload.secrets || {});
         } catch (err) {
             showConfigError({ message: '无法读取本机配置文件。' });
@@ -1145,7 +1235,10 @@
         applyHistory(summary.history || []);
         // The "本次抓取" table is owned by the last run, never by the full INDEX.
         renderCurrentBatch();
-        setOcrControlState('idle');
+        // A plain summary refresh must not reset the controls of a job that is
+        // still running (FB-01 / APP-05).
+        setOcrControlState(ocrJobRunning() ? 'running' : 'idle');
+        applyOpState(window.FPH.opState || null);
     }
 
     function applyDashboardSummary(summary) {
@@ -1257,6 +1350,10 @@
         return String(row.filePath || `${row.hash || ''}|${row.filename || ''}|${row.invoiceNo || ''}`);
     }
 
+    /* The paging cursor is always derived from what the SERVER reported
+       (`offset + rows.length`), never from the locally de-duplicated row count.
+       Using the local length skips boundary rows whenever the dataset shifts
+       between two requests, and makes `loaded < total` stall forever. */
     function mergeSection(kind, payload) {
         const storeKey = kind === 'inbox' ? 'inboxRows' : 'libraryRows';
         if (!Array.isArray(payload?.rows)) return (window.FPH[storeKey] || []).length;
@@ -1266,23 +1363,47 @@
             const store = window.FPH[storeKey] || [];
             const seen = new Set(store.map((row) => rowIdentity(kind, row)));
             window.FPH[storeKey] = store.concat(incoming.filter((row) => !seen.has(rowIdentity(kind, row))));
+            window.FPH[`${kind}Cursor`] = Math.max(Number(window.FPH[`${kind}Cursor`] || 0), offset + incoming.length);
         } else {
             window.FPH[storeKey] = incoming.slice();
+            window.FPH[`${kind}Cursor`] = incoming.length;
         }
         window.FPH[`${kind}Total`] = Number(payload.total ?? window.FPH[storeKey].length);
         window.FPH[`${kind}Limit`] = Number(payload.limit || PAGE_SIZE) || PAGE_SIZE;
         return window.FPH[storeKey].length;
     }
 
+    function sectionCursor(kind) {
+        const storeKey = kind === 'inbox' ? 'inboxRows' : 'libraryRows';
+        const cursor = window.FPH[`${kind}Cursor`];
+        return Number.isFinite(Number(cursor)) ? Number(cursor) : (window.FPH[storeKey] || []).length;
+    }
+
+    async function reloadSectionFromStart(kind, limit) {
+        const fn = window.mfhBridge?.getSummary;
+        if (typeof fn !== 'function') return;
+        const args = kind === 'inbox'
+            ? { inboxOffset: 0, inboxLimit: limit }
+            : { libraryOffset: 0, libraryLimit: limit };
+        const summary = await fn(args);
+        const section = kind === 'inbox' ? summary?.inbox : summary?.library;
+        window.FPH[`${kind}Total`] = undefined;
+        window.FPH[`${kind}Cursor`] = 0;
+        window.FPH[kind === 'inbox' ? 'inboxRows' : 'libraryRows'] = [];
+        mergeSection(kind, section && { ...section, offset: 0 });
+        if (kind === 'inbox') renderInboxRows();
+        else { renderLibraryRows(); updateSellerOptions(window.FPH.libraryRows || []); }
+    }
+
     async function loadMoreRows(kind, button) {
         const fn = window.mfhBridge?.getSummary;
         if (typeof fn !== 'function') { bridgeUnavailable(); return; }
-        const storeKey = kind === 'inbox' ? 'inboxRows' : 'libraryRows';
-        const loaded = (window.FPH[storeKey] || []).length;
         const limit = window.FPH[`${kind}Limit`] || PAGE_SIZE;
+        const cursor = sectionCursor(kind);
+        const prevTotal = Number(window.FPH[`${kind}Total`] ?? NaN);
         const args = kind === 'inbox'
-            ? { inboxOffset: loaded, inboxLimit: limit }
-            : { libraryOffset: loaded, libraryLimit: limit };
+            ? { inboxOffset: cursor, inboxLimit: limit }
+            : { libraryOffset: cursor, libraryLimit: limit };
         let summary;
         try {
             summary = await fn(args);
@@ -1291,27 +1412,58 @@
             return;
         }
         const section = kind === 'inbox' ? summary?.inbox : summary?.library;
-        const before = loaded;
+        const total = Number(section?.total ?? prevTotal);
+        // The dataset moved under us (a run added/removed records): every
+        // server-side slice shifted, so anything we keep would silently skip or
+        // duplicate boundary rows. Restart from page one.
+        if (Number.isFinite(prevTotal) && Number.isFinite(total) && total !== prevTotal) {
+            await reloadSectionFromStart(kind, limit);
+            showToast('列表已更新', `记录数量变成了 ${fmtInt(total)} 条，已重新从第一页加载。`, 'warn');
+            announce('记录数量发生变化，已重新从第一页加载。');
+            return;
+        }
+        const serverOffset = Number(section?.offset ?? cursor);
+        const returned = Array.isArray(section?.rows) ? section.rows.length : 0;
+        const before = (window.FPH[kind === 'inbox' ? 'inboxRows' : 'libraryRows'] || []).length;
         const after = mergeSection(kind, section);
         if (kind === 'inbox') renderInboxRows(); else { renderLibraryRows(); updateSellerOptions(window.FPH.libraryRows || []); }
-        if (after <= before) {
-            // Backend ignored the offset (older build) or there is genuinely nothing left.
+        if (returned === 0 || serverOffset + returned >= total) {
+            // Only the server cursor may declare the end of the dataset.
             if (button) { button.disabled = true; button.textContent = '没有更多记录了'; }
             announce('没有更多记录了。');
             return;
         }
-        announce(`已加载 ${after - before} 条记录，共 ${after} 条。`);
+        announce(after > before
+            ? `已加载 ${after - before} 条记录，共 ${after} 条。`
+            : `已读取 ${returned} 条记录，其中没有新内容。`);
     }
 
     function renderLoadMore(kind, loaded, total) {
         const scope = activeMain();
         const mount = scope.querySelector(`[data-load-more="${kind}"]`);
         if (!mount) return;
-        const remaining = Math.max(0, Number(total || 0) - loaded);
-        mount.innerHTML = remaining > 0
-            ? `<button class="btn btn--sm" type="button" data-action="load-more" data-load-kind="${kind}">加载更多（还有 ${fmtInt(remaining)} 条）</button>
-               <span class="small muted">搜索、排序和筛选只作用于已加载的 ${fmtInt(loaded)} 条记录。</span>`
-            : `<span class="small muted">已加载全部 ${fmtInt(loaded)} 条记录。</span>`;
+        // Remaining is measured against the server cursor, not the de-duplicated
+        // local length, so dedupe can never hide reachable records.
+        const cursor = sectionCursor(kind);
+        const remaining = Math.max(0, Number(total || 0) - cursor);
+        mount.replaceChildren();
+        if (remaining > 0) {
+            const button = document.createElement('button');
+            button.className = 'btn btn--sm';
+            button.type = 'button';
+            button.dataset.action = 'load-more';
+            button.dataset.loadKind = kind;
+            button.textContent = `加载更多（还有 ${fmtInt(remaining)} 条）`;
+            const note = document.createElement('span');
+            note.className = 'small muted';
+            note.textContent = `搜索、排序和筛选只作用于已加载的 ${fmtInt(loaded)} 条记录。`;
+            mount.append(button, note);
+        } else {
+            const note = document.createElement('span');
+            note.className = 'small muted';
+            note.textContent = `已加载全部 ${fmtInt(loaded)} 条记录。`;
+            mount.append(note);
+        }
     }
 
     function renderInboxRows() {
@@ -1516,8 +1668,8 @@
             return group.action === activeTab;
         });
         const emptyMarkup = allGroups.length === 0
-            ? '<div class="card"><div class="strong">待确认队列是空的</div><div class="small muted mt-12">所有邮件都已经自动处理完成，这里不需要你做任何事。</div></div>'
-            : '<div class="card"><div class="strong">当前分类暂无邮件</div><div class="small muted mt-12">切换到「全部」可以查看其它分类的邮件。</div></div>';
+            ? '<div class="card"><div class="strong" tabindex="-1" data-pending-empty-focus>待确认队列是空的</div><div class="small muted mt-12">所有邮件都已经自动处理完成，这里不需要你做任何事。</div></div>'
+            : '<div class="card"><div class="strong" tabindex="-1" data-pending-empty-focus>当前分类暂无邮件</div><div class="small muted mt-12">切换到「全部」可以查看其它分类的邮件。</div></div>';
         mount.innerHTML = groups.map((group, index) => {
             const headId = `pending-head-${index}`;
             const bodyId = `pending-body-${index}`;
@@ -1547,6 +1699,22 @@
         }).join('') || emptyMarkup;
     }
 
+    /* Terminal state after the last queued item is handled: rebuild the region
+       so the user sees the real empty state instead of a stale group whose body
+       just says "这一组已经处理完了" (FB-04 / UI-08C). */
+    function showPendingTerminalState(announcement) {
+        renderPendingGroups();
+        const focusTarget = activeMain().querySelector('[data-pending-empty-focus]')
+            || document.querySelector('[data-pending-empty] [data-action="reload-summary"]');
+        if (focusTarget) {
+            if (!focusTarget.hasAttribute('tabindex') && !/^(BUTTON|A|INPUT|SELECT)$/.test(focusTarget.tagName)) {
+                focusTarget.setAttribute('tabindex', '-1');
+            }
+            focusTarget.focus?.({ preventScroll: false });
+        }
+        announce(`${announcement || '已处理这封邮件'}，待确认队列已经清空。`);
+    }
+
     /* FB-04: remove a single card in place, keep the rest of the DOM (and the
        expansion state) alive, and hand focus to a sensible neighbour. */
     function removePendingRowInPlace(hash, announcement) {
@@ -1561,13 +1729,27 @@
             || group?.querySelector('.group__head')
             || document.querySelector('[data-pending-groups]');
 
+        const groupsMount = group?.closest('[data-pending-groups]');
+
         const finish = () => {
             card.remove();
             const remaining = Array.from(container?.querySelectorAll(':scope > .pending-item') || []).length;
             const countEl = group?.querySelector('.group__count');
             if (countEl) countEl.textContent = fmtInt(remaining);
-            if (remaining === 0 && container) {
-                container.innerHTML = '<div class="card card--tight muted">这一组已经处理完了。</div>';
+            if (remaining === 0) {
+                // An emptied group is stale: drop it. When it was the last one,
+                // fall through to the real empty state instead of leaving a
+                // hollow accordion behind.
+                group?.remove();
+                const groupsLeft = groupsMount?.querySelectorAll('.group').length || 0;
+                if (groupsLeft === 0) {
+                    showPendingTerminalState(announcement);
+                    return;
+                }
+                const nextHead = groupsMount?.querySelector('.group__head');
+                nextHead?.focus?.({ preventScroll: false });
+                announce(`${announcement || '已处理这封邮件'}，这一组已经处理完，还有 ${groupsLeft} 组待确认。`);
+                return;
             }
             if (focusTarget) {
                 if (!focusTarget.hasAttribute('tabindex') && !/^(BUTTON|A|INPUT|SELECT)$/.test(focusTarget.tagName)) {
@@ -1706,6 +1888,23 @@
         applyOcrStatusCards();
     }
 
+    /* ---------- Page-commit hook ----------
+       One place for "re-render the current real state onto this DOM".
+       A page inserted by the SPA loader starts from the static placeholders in
+       its HTML, so every piece of state that does NOT arrive through the
+       summary/config payloads must be replayed here. FB-01 (a running job's
+       controls) and COPY-07B (About version/channel) are the same root cause,
+       so they deliberately share this hook instead of separate call sites.
+       Runs once from wire() and after every showPage() commit. */
+    function applyLiveState(pageId) {
+        applyOpState(window.FPH.opState || null);
+        renderAppInfo();
+        if (!appInfoLoaded || pageId === 'settings') {
+            // Also recovers when the bridge only became available after wire().
+            Promise.resolve(loadAppInfo({ force: pageId === 'settings' })).catch(() => {});
+        }
+    }
+
     function wireSearch() {
         document.querySelector('[data-global-search]')?.addEventListener('keydown', async (event) => {
             if (event.key !== 'Enter') return;
@@ -1761,6 +1960,7 @@
         'discard-config',
         'ocr-toggle',
         'load-more',
+        'repair-config',
     ]);
     const BUSY_LABELS = {
         'test-connection': '正在连接邮箱…',
@@ -1774,6 +1974,7 @@
         'pending-primary': '处理中…',
         'discard-config': '正在读取…',
         'load-more': '正在加载…',
+        'repair-config': '正在重建…',
     };
 
     async function withBusyButton(button, runner) {
@@ -1867,6 +2068,7 @@
             showToast('已重新读取配置', '已从本机恢复最新配置。');
             return;
         }
+        if (name === 'repair-config') { await repairConfig(); return; }
         if (name === 'developer-reset') { await developerReset(); return; }
         if (name === 'pending-primary') { await handlePendingAction(action); return; }
         if (name === 'clear-secret') { await clearSecret(action); return; }
@@ -2036,7 +2238,7 @@
                     done: true,
                 });
             }
-            showToast('运行失败', failMessage, 'err', { detail: err?.message });
+            showToast('运行失败', failMessage, 'err', { detail: err?.message, scope: 'global' });
             return;
         }
         if (result?.summary) applySummary(result.summary);
@@ -2066,7 +2268,7 @@
             result?.ok ? okTitle : '运行失败',
             result?.ok ? (readable || okMessage) : (readable || '操作没有完成。展开诊断信息可以查看技术细节。'),
             result?.ok ? 'ok' : 'err',
-            { detail: result?.ok ? '' : detail },
+            { detail: result?.ok ? '' : detail, scope: 'global' },
         );
     }
 
@@ -2156,10 +2358,13 @@
         });
         document.querySelectorAll('[data-field-error]').forEach((el) => { el.remove(); });
         const summary = document.querySelector('[data-config-error-summary]');
-        if (summary) { summary.hidden = true; summary.innerHTML = ''; }
+        if (summary) { summary.hidden = true; summary.replaceChildren(); }
         const errors = Array.isArray(fieldErrors) ? fieldErrors : [];
         if (errors.length === 0) return false;
-        const links = [];
+        // DOM APIs + textContent throughout: `message`/`path` come from IPC and
+        // may echo values the user typed, so they must never be concatenated
+        // into innerHTML.
+        const list = document.createElement('ul');
         errors.forEach((error, index) => {
             const path = String(error?.path || '');
             const message = String(error?.message || '这个值无法保存。');
@@ -2179,17 +2384,25 @@
                 const describedBy = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
                 if (!describedBy.includes(errorId)) describedBy.push(errorId);
                 input.setAttribute('aria-describedby', describedBy.join(' '));
-                links.push(`<li><a href="#${input.id}" data-config-error-link="${escapeHtml(input.id)}">${escapeHtml(message)}</a></li>`);
+                const li = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = `#${encodeURIComponent(input.id)}`;
+                link.dataset.configErrorLink = input.id;
+                link.textContent = message;
+                li.appendChild(link);
+                list.appendChild(li);
             } else {
-                links.push(`<li>${escapeHtml(message)}</li>`);
+                const li = document.createElement('li');
+                li.textContent = message;
+                list.appendChild(li);
             }
         });
         if (summary) {
+            const title = document.createElement('div');
+            title.className = 'error-summary__title';
+            title.textContent = `有 ${errors.length} 项设置没有保存`;
+            summary.replaceChildren(title, list);
             summary.hidden = false;
-            summary.innerHTML = `
-                <div class="error-summary__title">有 ${errors.length} 项设置没有保存</div>
-                <ul>${links.join('')}</ul>
-            `;
             summary.setAttribute('role', 'alert');
             summary.setAttribute('tabindex', '-1');
             summary.focus?.({ preventScroll: false });
@@ -2201,23 +2414,104 @@
         const signature = String(configError?.message || 'config-error');
         const repeated = window.FPH._configErrorSignature === signature;
         window.FPH._configErrorSignature = signature;
+        window.FPH.configError = configError || { message: '本机配置文件无法读取。' };
         const mount = document.querySelector('[data-config-blocker]');
-        const backup = configError?.backupPath ? '已经为你保留了一份备份。' : '';
         const message = configError?.message || '本机配置文件无法读取。';
         if (mount) {
+            const title = document.createElement('div');
+            title.className = 'strong';
+            title.textContent = '配置文件损坏，需要重建后才能继续使用';
+            const detail = document.createElement('div');
+            detail.className = 'small mt-12';
+            detail.textContent = sanitizeText(message);
+            const guide = document.createElement('div');
+            guide.className = 'small mt-12';
+            guide.textContent = '「备份并重建配置」会把损坏的文件另存为备份，再用本页当前填写的内容重新写一份可用的配置。除配置文件外不会删除任何数据。';
+            const actions = document.createElement('div');
+            actions.className = 'row gap-8 mt-12';
+            const repair = document.createElement('button');
+            repair.className = 'btn btn--sm btn--primary';
+            repair.type = 'button';
+            repair.dataset.action = 'repair-config';
+            repair.textContent = '备份并重建配置';
+            const reload = document.createElement('button');
+            reload.className = 'btn btn--sm';
+            reload.type = 'button';
+            reload.dataset.action = 'discard-config';
+            reload.textContent = '再试一次读取';
+            actions.append(repair, reload);
+            mount.replaceChildren(title, detail, guide, actions);
             mount.hidden = false;
-            mount.innerHTML = `
-                <div class="strong">配置文件损坏，暂时不能使用</div>
-                <div class="small mt-12">${escapeHtml(sanitizeText(message))}${backup ? ` ${escapeHtml(backup)}` : ''}</div>
-                <div class="row gap-8 mt-12">
-                    <button class="btn btn--sm btn--primary" type="button" data-action="discard-config">重新读取配置</button>
-                    <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
-                </div>
-            `;
             mount.setAttribute('role', 'alert');
         }
         text('[data-summary="config-path"]', '配置文件损坏');
-        if (!repeated) showToast('配置文件损坏', '请在「邮箱与保存」页按提示修复后再运行。', 'err');
+        if (!repeated) {
+            showToast('配置文件损坏', '请到「邮箱与保存」页点击「备份并重建配置」后再运行。', 'err', { scope: 'global' });
+        }
+    }
+
+    function clearConfigError() {
+        window.FPH.configError = null;
+        window.FPH._configErrorSignature = '';
+        document.querySelectorAll('[data-config-blocker]').forEach((el) => {
+            el.hidden = true;
+            el.replaceChildren();
+        });
+    }
+
+    /* APP-08: the only way out of a corrupted config file. Plain saves keep
+       returning `configError`, so the repair must explicitly ask the main
+       process to quarantine the broken file and rebuild from this payload. */
+    async function repairConfig() {
+        if (!window.mfhBridge?.saveConfig) { bridgeUnavailable(); return; }
+        if (typeof window.collectConfigPayload !== 'function') {
+            // The form lives on the config page; go there first so the rebuild
+            // uses real values instead of an empty object.
+            await showPage('config');
+        }
+        if (typeof window.collectConfigPayload !== 'function') {
+            showToast('无法重建配置', '请先打开「邮箱与保存」页，再点击「备份并重建配置」。', 'err');
+            return;
+        }
+        const confirmed = window.confirm([
+            '备份并重建配置',
+            '',
+            '将会：',
+            '· 把当前损坏的配置文件另存为备份文件',
+            '· 用本页现在填写的内容重新生成一份配置',
+            '',
+            '不会删除邮件缓存、已归档发票或识别结果。',
+            '',
+            '确认继续吗？',
+        ].join('\n'));
+        if (!confirmed) return;
+        const payload = { ...window.collectConfigPayload(), repairCorrupt: true };
+        let result;
+        try {
+            result = await window.mfhBridge.saveConfig(payload);
+        } catch (err) {
+            showToast('重建失败', '配置文件没有被修改，请重试。', 'err', { detail: err?.message });
+            return;
+        }
+        if (result && result.ok === false) {
+            if (result.configError) showConfigError(result.configError);
+            else applyFieldErrors(result.fieldErrors);
+            showToast('重建失败', eventMessage(result) || '配置文件还是无法写入，请检查磁盘权限。', 'err', { detail: eventDetail(result) });
+            return;
+        }
+        clearConfigError();
+        applyFieldErrors([]);
+        await loadBridgeConfig();
+        const backupPath = result?.backupPath || result?.configError?.backupPath || '';
+        showToast(
+            '配置已重建',
+            backupPath
+                ? `已用当前填写的内容重新生成配置，损坏的旧文件已另存为备份：${sanitizeText(backupPath)}`
+                : '已用当前填写的内容重新生成配置，损坏的旧文件已另存为备份。',
+            'ok',
+            { duration: 8000 },
+        );
+        announce('配置已重建，可以继续使用。');
     }
 
     /* Shared entry point used by the config page's autosave and by
@@ -2235,7 +2529,7 @@
             return { ok: false, result };
         }
         applyFieldErrors([]);
-        document.querySelectorAll('[data-config-blocker]').forEach((el) => { el.hidden = true; });
+        clearConfigError();
         return { ok: true, result };
     }
 
@@ -2330,7 +2624,15 @@
         showToast('仅重置了应用管理的数据', sub, skipped.length > 0 ? 'warn' : 'ok', {
             detail: skipped.length > 0 ? `未删除的外部位置：\n${skipped.map((item) => sanitizeText(item)).join('\n')}` : '',
             sticky: skipped.length > 0,
+            scope: 'global',
         });
+    }
+
+    /* Queue is empty after this operation: the summary must own the DOM so the
+       real empty state renders (a preserved DOM would keep the stale group). */
+    function pendingQueueEmptyAfter(result) {
+        const total = result?.summary?.pending?.total;
+        return Number.isFinite(Number(total)) && Number(total) === 0;
     }
 
     async function handlePendingAction(action) {
@@ -2360,8 +2662,12 @@
             const result = await fn({ hash });
             // Update the affected row in place, then refresh counters without
             // rebuilding the whole list (keeps focus and expansion state).
-            const removed = result?.ok ? removePendingRowInPlace(hash, '已从待确认队列中移除') : false;
+            // When it was the last queued item, let the summary re-render and
+            // show the real empty state instead.
+            const emptied = pendingQueueEmptyAfter(result);
+            const removed = result?.ok && !emptied ? removePendingRowInPlace(hash, '已从待确认队列中移除') : false;
             if (result?.summary) applySummary(result.summary, { preservePendingDom: removed });
+            if (result?.ok && emptied) showPendingTerminalState('已从待确认队列中移除');
             showToast(
                 result?.ok ? '已忽略' : '忽略失败',
                 eventMessage(result) || (result?.ok ? '这封邮件已从待确认队列移除，原始邮件仍保留在缓存里。' : '没能更新待确认队列，请重试。'),
@@ -2384,8 +2690,10 @@
             showToast('已取消归档', '没有选择文件，待确认队列保持不变。', 'warn');
             return;
         }
-        const removed = result?.ok ? removePendingRowInPlace(hash, '已归档并移出待确认队列') : false;
+        const emptied = pendingQueueEmptyAfter(result);
+        const removed = result?.ok && !emptied ? removePendingRowInPlace(hash, '已归档并移出待确认队列') : false;
         if (result?.summary) applySummary(result.summary, { preservePendingDom: removed });
+        if (result?.ok && emptied) showPendingTerminalState('已归档并移出待确认队列');
         showToast(
             result?.ok ? '已归档' : '归档失败',
             eventMessage(result) || (result?.ok ? '文件已复制到归档目录，并加入识别队列。' : '文件没有归档成功，待确认记录保持不变。'),
@@ -2549,37 +2857,118 @@
          auto-dismiss, always closable
        - hover/focus pauses the dismissal timer
        - technical output only appears inside the redacted「诊断信息」disclosure */
-    function showToast(title, sub, kind = 'ok', options) {
-        const opts = typeof options === 'number'
-            ? { duration: options }
-            : (options && typeof options === 'object' ? options : {});
-        const isError = kind === 'err';
-        const sticky = opts.sticky ?? isError;
-        const duration = Math.max(1500, Number(opts.duration) || (kind === 'warn' ? 4200 : 2600));
-        const detail = opts.detail ? sanitizeText(opts.detail) : '';
+    const MAX_VISIBLE_TOASTS = 4;
 
+    function toastStack() {
         let stack = document.querySelector('.toast-stack');
         if (!stack) {
             stack = document.createElement('div');
             stack.className = 'toast-stack';
             document.body.appendChild(stack);
         }
+        return stack;
+    }
+
+    /* Sticky errors used to grow without bound: with no cap, no dedupe and no
+       scroll the oldest toasts left the viewport and their close buttons became
+       unreachable (FB-02). */
+    function trimToastStack(stack) {
+        const toasts = Array.from(stack.querySelectorAll('.toast'));
+        const excess = toasts.length - MAX_VISIBLE_TOASTS;
+        if (excess <= 0) return;
+        // Drop auto-dismissing toasts first; only then the oldest sticky ones.
+        const disposable = toasts.filter((el) => el.dataset.toastSticky !== 'true');
+        const ordered = disposable.concat(toasts.filter((el) => el.dataset.toastSticky === 'true'));
+        ordered.slice(0, excess).forEach((el) => el.remove());
+    }
+
+    /* Close every page-scoped toast; background job failures are marked
+       `scope: 'global'` and survive navigation. */
+    function dismissPageToasts() {
+        document.querySelectorAll('.toast[data-toast-scope="page"]').forEach((el) => el.remove());
+    }
+
+    function showToast(title, sub, kind = 'ok', options) {
+        const opts = typeof options === 'number'
+            ? { duration: options }
+            : (options && typeof options === 'object' ? options : {});
+        const isError = kind === 'err';
+        const sticky = opts.sticky ?? isError;
+        const scope = opts.scope === 'global' ? 'global' : 'page';
+        const duration = Math.max(1500, Number(opts.duration) || (kind === 'warn' ? 4200 : 2600));
+        const detail = opts.detail ? sanitizeText(opts.detail) : '';
+        const safeSub = sub ? sanitizeText(sub) : '';
+        const signature = `${kind}|${title}|${safeSub}|${detail}`;
+
+        const stack = toastStack();
+
+        // Merge repeats of the same message instead of stacking copies.
+        const existing = Array.from(stack.querySelectorAll('.toast'))
+            .find((el) => el.dataset.toastSignature === signature);
+        if (existing) {
+            const count = Number(existing.dataset.toastCount || 1) + 1;
+            existing.dataset.toastCount = String(count);
+            let badge = existing.querySelector('[data-toast-repeat]');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'toast__repeat';
+                badge.dataset.toastRepeat = 'true';
+                existing.querySelector('[data-toast-title]')?.appendChild(badge);
+            }
+            badge.textContent = ` ×${count}`;
+            stack.appendChild(existing); // Re-sort to the bottom so it stays visible.
+            existing.dispatchEvent(new CustomEvent('mfh:toast-repeat'));
+            return existing;
+        }
+
         const toast = document.createElement('div');
         toast.className = `toast ${kind}`;
         toast.setAttribute('role', isError ? 'alert' : 'status');
         toast.setAttribute('aria-live', isError ? 'assertive' : 'polite');
         toast.tabIndex = -1;
-        const detailMarkup = detail
-            ? `<details class="toast__detail"><summary>诊断信息（已脱敏）</summary><pre>${escapeHtml(detail)}</pre></details>
-               <div class="toast__actions"><button class="btn btn--sm btn--ghost" type="button" data-toast-copy>复制诊断信息</button></div>`
-            : '';
-        toast.innerHTML = `
-            <button class="toast__close" type="button" aria-label="关闭提示">×</button>
-            <div class="strong">${escapeHtml(title)}</div>
-            ${sub ? `<div class="toast__sub">${escapeHtml(sanitizeText(sub))}</div>` : ''}
-            ${detailMarkup}
-        `;
+        toast.dataset.toastSignature = signature;
+        toast.dataset.toastScope = scope;
+        toast.dataset.toastSticky = sticky ? 'true' : 'false';
+        toast.dataset.toastCount = '1';
+
+        const close = document.createElement('button');
+        close.className = 'toast__close';
+        close.type = 'button';
+        close.setAttribute('aria-label', '关闭提示');
+        close.textContent = '\u00d7';
+
+        const titleEl = document.createElement('div');
+        titleEl.className = 'strong';
+        titleEl.dataset.toastTitle = 'true';
+        titleEl.textContent = String(title ?? '');
+
+        toast.append(close, titleEl);
+        if (safeSub) {
+            const subEl = document.createElement('div');
+            subEl.className = 'toast__sub';
+            subEl.textContent = safeSub;
+            toast.appendChild(subEl);
+        }
+        if (detail) {
+            const details = document.createElement('details');
+            details.className = 'toast__detail';
+            const summaryEl = document.createElement('summary');
+            summaryEl.textContent = '诊断信息（已脱敏）';
+            const pre = document.createElement('pre');
+            pre.textContent = detail;
+            details.append(summaryEl, pre);
+            const actions = document.createElement('div');
+            actions.className = 'toast__actions';
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'btn btn--sm btn--ghost';
+            copyBtn.type = 'button';
+            copyBtn.dataset.toastCopy = 'true';
+            copyBtn.textContent = '复制诊断信息';
+            actions.appendChild(copyBtn);
+            toast.append(details, actions);
+        }
         stack.appendChild(toast);
+        trimToastStack(stack);
 
         let timer = 0;
         const dismiss = () => { window.clearTimeout(timer); toast.remove(); };
@@ -2588,14 +2977,15 @@
             window.clearTimeout(timer);
             timer = window.setTimeout(dismiss, duration);
         };
-        toast.querySelector('.toast__close')?.addEventListener('click', dismiss);
+        close.addEventListener('click', dismiss);
         toast.querySelector('[data-toast-copy]')?.addEventListener('click', () => {
-            copyText(`${title}\n${sanitizeText(sub || '')}\n\n${detail}`, '诊断信息');
+            copyText(`${title}\n${safeSub}\n\n${detail}`, '诊断信息');
         });
         toast.addEventListener('mouseenter', () => window.clearTimeout(timer));
         toast.addEventListener('mouseleave', schedule);
         toast.addEventListener('focusin', () => window.clearTimeout(timer));
         toast.addEventListener('focusout', schedule);
+        toast.addEventListener('mfh:toast-repeat', schedule);
         schedule();
         return toast;
     }
@@ -2623,6 +3013,13 @@
         saveConfigChecked,
         applyFieldErrors,
         showConfigError,
+        clearConfigError,
+        repairConfig,
+        applyOpState,
+        applyLiveState,
+        loadAppInfo,
+        renderAppInfo,
+        dismissPageToasts,
         isChecked,
         setChecked,
         announce,

@@ -929,7 +929,9 @@ kbd {
   opacity: 0;
   animation: logIn 320ms var(--ease-out) forwards;
 }
-.console__time { color: #5f636b; flex-shrink: 0; }
+/* The console keeps a fixed near-black background in both themes, so this
+   metadata colour is a literal rather than a theme token. #5f636b was 3.26:1. */
+.console__time { color: #8b939f; flex-shrink: 0; }
 .console__tag { color: #8fbcff; flex-shrink: 0; min-width: 60px; }
 /* The console keeps a fixed near-black background in both themes, so these
    stay on the bright (dark-surface) variants regardless of the active theme. */
@@ -1029,6 +1031,12 @@ kbd {
   flex-direction: column;
   gap: 8px;
   z-index: 80;
+  /* Sticky errors must never push older toasts (and their close buttons) past
+     the top of the window; the stack scrolls instead. */
+  max-height: calc(100vh - var(--titlebar-h) - 36px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
 }
 .toast {
   position: relative;
@@ -1087,6 +1095,12 @@ kbd {
   padding: 6px 8px;
 }
 .toast__actions { margin-top: 8px; display: flex; gap: 6px; }
+.toast__repeat {
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.toast { flex-shrink: 0; }
 @keyframes toastIn {
   from { opacity: 0; transform: translateX(20px); }
   to   { opacity: 1; transform: translateX(0);   }
