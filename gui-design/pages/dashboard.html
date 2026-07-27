@@ -14,7 +14,7 @@
     <main class="main">
         <div class="toolbar">
             <span class="toolbar__crumb">工作流</span>
-            <span class="toolbar__title">运行控制台</span>
+            <h1 class="toolbar__title" tabindex="-1">运行控制台</h1>
             <div class="toolbar__spacer"></div>
             <span class="toolbar__meta"><span data-mail-status-meta>请先在「配置」页填写邮箱</span> · <span data-clock>--:--</span></span>
         </div>
@@ -49,20 +49,21 @@
                     <h3 class="card__title">第一步：获取邮件</h3>
                     <p class="card__sub">连接邮箱，按当前条件搜索邮件，并把命中的原始邮件保存到本地</p>
 
-                    <div class="field">
-                        <label class="field__label">处理日期范围</label>
+                    <fieldset class="field" style="border: 0; padding: 0; margin-inline: 0;">
+                        <legend class="field__label">处理日期范围</legend>
+                        <div class="field__hint" style="margin-bottom: 8px;">按本机日历日计算，包含开始日和结束日当天全天（00:00–24:00）。选择同一天即表示只处理那一天。</div>
                         <div class="field-row field-row--3">
                             <div class="field" style="margin-bottom: 0;">
-                                <label class="field__label">开始日期</label>
-                                <input class="input" id="date-from" type="date">
+                                <label class="field__label" for="date-from">开始日期</label>
+                                <input class="input" id="date-from" type="date" aria-describedby="date-range-preview">
                             </div>
                             <div class="field" style="margin-bottom: 0;">
-                                <label class="field__label">结束日期</label>
-                                <input class="input" id="date-to" type="date">
+                                <label class="field__label" for="date-to">结束日期</label>
+                                <input class="input" id="date-to" type="date" aria-describedby="date-range-preview">
                             </div>
                             <div class="field" style="margin-bottom: 0;">
-                                <label class="field__label">快捷选择</label>
-                                <select class="select" id="range-preset" aria-label="快捷选择日期范围">
+                                <label class="field__label" for="range-preset">快捷选择</label>
+                                <select class="select" id="range-preset">
                                     <option value="month" selected>本月以来</option>
                                     <option value="today">今天</option>
                                     <option value="week">本周以来</option>
@@ -72,29 +73,30 @@
                                 </select>
                             </div>
                         </div>
-                        <div class="row gap-8 mt-12" id="date-preset-buttons">
+                        <div class="row gap-8 mt-12" id="date-preset-buttons" role="group" aria-label="常用日期范围">
                             <button class="btn btn--sm" type="button" data-range="today">今天</button>
                             <button class="btn btn--sm" type="button" data-range="week">本周以来</button>
                             <button class="btn btn--sm btn--primary" type="button" data-range="month">本月以来</button>
                             <button class="btn btn--sm" type="button" data-range="quarter">本季以来</button>
                             <button class="btn btn--sm" type="button" data-range="year">今年以来</button>
                         </div>
-                    </div>
+                    </fieldset>
 
                     <div class="row gap-8 mb-12">
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                            <div class="check is-on" data-fetch-check="matchSubject"></div>
+                        <label class="check-label" for="fetch-match-subject">
+                            <input class="check" type="checkbox" id="fetch-match-subject" data-fetch-check="matchSubject" checked>
                             匹配主题
                         </label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                            <div class="check is-on" data-fetch-check="matchBody"></div>
+                        <label class="check-label" for="fetch-match-body">
+                            <input class="check" type="checkbox" id="fetch-match-body" data-fetch-check="matchBody" checked>
                             匹配正文
                         </label>
-                        <label style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-muted);">
-                            <div class="check" data-fetch-check="dryRun"></div>
+                        <label class="check-label" for="fetch-dry-run">
+                            <input class="check" type="checkbox" id="fetch-dry-run" data-fetch-check="dryRun">
                             只预览，不保存
                         </label>
                     </div>
+                    <div class="small muted mb-12" data-normalized-filter></div>
 
                     <div class="row gap-8 mb-12">
                         <button class="btn btn--primary" id="run-btn" type="button">
@@ -106,7 +108,8 @@
                         <span class="mono small muted" id="range-preview">--</span>
                     </div>
 
-                    <div class="progress is-idle" id="run-progress">
+                    <div class="progress is-idle" id="run-progress" role="progressbar"
+                         aria-label="获取邮件进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="尚未开始">
                         <div class="progress__bar" id="prog-bar" style="--p: 0%"></div>
                     </div>
 
@@ -115,7 +118,7 @@
                         <span>已存 <strong style="color: var(--ok);" id="m-saved">0</strong></span>
                         <span>跳过 <strong class="muted" id="m-skip">0</strong></span>
                         <div style="flex: 1;"></div>
-                        <span id="run-status">
+                        <span id="run-status" role="status" aria-live="polite">
                             <span class="pill"><span class="pill__dot"></span>就绪</span>
                         </span>
                     </div>
@@ -140,8 +143,8 @@
                         </div>
                         <span class="pill pill--ok">先下载原件</span>
                     </div>
-                    <label style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12.5px; color: var(--fg-muted);">
-                        <div class="check is-on" data-download-rename-toggle data-config-check="rename.avoidConflictBeforeOcr"></div>
+                    <label class="check-label" for="dash-avoid-conflict" style="margin-bottom: 12px;">
+                        <input class="check" type="checkbox" id="dash-avoid-conflict" data-download-rename-toggle data-config-check="rename.avoidConflictBeforeOcr" checked>
                         先重命名避免冲突
                     </label>
                     <div class="grid-3">
@@ -203,7 +206,8 @@
                         <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别发票文件</button>
                         <button class="btn btn--sm" type="button" data-action="rename-organize">一键改名</button>
                         <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
-                        <select class="select" data-ocr-parallel style="width: 120px;">
+                        <label class="sr-only" for="dash-ocr-parallel">识别并行数</label>
+                        <select class="select" id="dash-ocr-parallel" data-ocr-parallel style="width: 120px;">
                             <option value="1" selected>1 个并行</option>
                             <option value="2">2 个并行</option>
                             <option value="4">4 个并行</option>
@@ -242,7 +246,7 @@
                     <div class="row row--between">
                         <div>
                             <h3 class="card__title" style="margin: 0 0 4px;">本次抓取邮件清单</h3>
-                            <p class="card__sub" style="margin: 0;">本次运行保存的邮件</p>
+                            <p class="card__sub" style="margin: 0;" data-current-batch-note>只显示最近一次运行新增的邮件，不是全部本地缓存。</p>
                         </div>
                     </div>
                 </div>
@@ -261,7 +265,7 @@
                             </tr>
                         </thead>
                         <tbody data-current-batch-rows>
-                            <tr><td colspan="7" class="muted">本地暂无缓存邮件。完成抓取后会在这里显示。</td></tr>
+                            <tr><td colspan="7" class="muted">本次还没有运行。点击“开始获取邮件”后，这里只显示这一次新保存的邮件。</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -290,216 +294,294 @@
 
 <script src="../scripts/shell.js"></script>
 <script>
-const runBtn = document.getElementById('run-btn');
-const progress = document.getElementById('run-progress');
-const progBar = document.getElementById('prog-bar');
-const matched = document.getElementById('m-matched');
-const saved = document.getElementById('m-saved');
-const skip = document.getElementById('m-skip');
-const status = document.getElementById('run-status');
-const consoleOut = document.getElementById('console-out');
-const dateFrom = document.getElementById('date-from');
-const dateTo = document.getElementById('date-to');
-const rangePreset = document.getElementById('range-preset');
-const rangePreview = document.getElementById('range-preview');
-const presetButtons = document.getElementById('date-preset-buttons');
+/* Wrapped in an IIFE with a one-shot guard: the SPA loader may execute this
+   inline script again after a fast double navigation, and a repeated top-level
+   `const` would throw and leave the page half-wired (APP-15). */
+(function () {
+    'use strict';
+    if (window.MFH_DASHBOARD_WIRED) return;
+    window.MFH_DASHBOARD_WIRED = true;
 
-function fmt(d) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-}
+    const runBtn = document.getElementById('run-btn');
+    const progress = document.getElementById('run-progress');
+    const progBar = document.getElementById('prog-bar');
+    const matched = document.getElementById('m-matched');
+    const saved = document.getElementById('m-saved');
+    const skip = document.getElementById('m-skip');
+    const status = document.getElementById('run-status');
+    const consoleOut = document.getElementById('console-out');
+    const dateFrom = document.getElementById('date-from');
+    const dateTo = document.getElementById('date-to');
+    const rangePreset = document.getElementById('range-preset');
+    const rangePreview = document.getElementById('range-preview');
+    const presetButtons = document.getElementById('date-preset-buttons');
+    if (!runBtn || !dateFrom || !dateTo) return;
 
-function startOfWeek(d) {
-    const out = new Date(d);
-    const day = out.getDay() || 7;
-    out.setDate(out.getDate() - day + 1);
-    return out;
-}
+    /* Local calendar day only. The value is handed to the backend exactly as
+       `YYYY-MM-DD`; no UTC conversion and no ±1 day arithmetic happens here. */
+    function fmt(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    }
 
-function rangeFor(preset) {
-    if (preset === 'custom') return null;
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const from = new Date(today);
-    if (preset === 'today') return [today, today];
-    if (preset === 'week') return [startOfWeek(today), today];
-    if (preset === 'quarter') {
-        from.setMonth(Math.floor(today.getMonth() / 3) * 3, 1);
+    function startOfWeek(d) {
+        const out = new Date(d);
+        const day = out.getDay() || 7;
+        out.setDate(out.getDate() - day + 1);
+        return out;
+    }
+
+    function rangeFor(preset) {
+        if (preset === 'custom') return null;
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const from = new Date(today);
+        // "今天" is a single local calendar day: from === to, and the backend
+        // treats it as that whole day.
+        if (preset === 'today') return [today, today];
+        if (preset === 'week') return [startOfWeek(today), today];
+        if (preset === 'quarter') {
+            from.setMonth(Math.floor(today.getMonth() / 3) * 3, 1);
+            return [from, today];
+        }
+        if (preset === 'year') {
+            from.setMonth(0, 1);
+            return [from, today];
+        }
+        from.setDate(1);
         return [from, today];
     }
-    if (preset === 'year') {
-        from.setMonth(0, 1);
-        return [from, today];
-    }
-    from.setDate(1);
-    return [from, today];
-}
 
-function setRange(preset) {
-    const range = rangeFor(preset);
-    if (range) {
-        const [from, to] = range;
-        dateFrom.value = fmt(from);
-        dateTo.value = fmt(to);
+    function setRange(preset) {
+        const range = rangeFor(preset);
+        if (range) {
+            const [from, to] = range;
+            dateFrom.value = fmt(from);
+            dateTo.value = fmt(to);
+        }
+        rangePreset.value = preset;
+        presetButtons.querySelectorAll('[data-range]').forEach((button) => {
+            const active = button.dataset.range === preset;
+            button.classList.toggle('btn--primary', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        updatePreview();
     }
-    rangePreset.value = preset;
-    presetButtons.querySelectorAll('[data-range]').forEach((button) => {
-        button.classList.toggle('btn--primary', button.dataset.range === preset);
-    });
-    updatePreview();
-}
 
-function updatePreview() {
-    const hasBoth = Boolean(dateFrom.value && dateTo.value);
-    const reversed = hasBoth && dateFrom.value > dateTo.value;
-    if (reversed) {
-        rangePreview.textContent = `开始日期 ${dateFrom.value} 晚于结束日期 ${dateTo.value}`;
-        rangePreview.classList.add('is-invalid');
-        dateFrom.classList.add('is-invalid');
-        dateTo.classList.add('is-invalid');
-    } else {
-        rangePreview.textContent = `${dateFrom.value} 至 ${dateTo.value}`;
-        rangePreview.classList.remove('is-invalid');
-        dateFrom.classList.remove('is-invalid');
-        dateTo.classList.remove('is-invalid');
-    }
-    if (runBtn && runBtn.dataset.busy !== 'true') {
-        runBtn.disabled = reversed || !hasBoth;
-        if (reversed) runBtn.title = '开始日期晚于结束日期，请先调整';
-        else if (!hasBoth) runBtn.title = '请先选择开始与结束日期';
-        else runBtn.removeAttribute('title');
-    }
-    if (rangePreset.value !== 'custom') {
-        const [from, to] = rangeFor(rangePreset.value);
-        if (dateFrom.value !== fmt(from) || dateTo.value !== fmt(to)) {
-            rangePreset.value = 'custom';
-            presetButtons.querySelectorAll('[data-range]').forEach((button) => button.classList.remove('btn--primary'));
+    function updatePreview() {
+        const hasBoth = Boolean(dateFrom.value && dateTo.value);
+        const reversed = hasBoth && dateFrom.value > dateTo.value;
+        const sameDay = hasBoth && dateFrom.value === dateTo.value;
+        if (reversed) {
+            rangePreview.textContent = `开始日期 ${dateFrom.value} 晚于结束日期 ${dateTo.value}`;
+            rangePreview.classList.add('is-invalid');
+            dateFrom.classList.add('is-invalid');
+            dateTo.classList.add('is-invalid');
+            dateFrom.setAttribute('aria-invalid', 'true');
+            dateTo.setAttribute('aria-invalid', 'true');
+        } else {
+            rangePreview.textContent = hasBoth
+                ? (sameDay ? `${dateFrom.value} 当天全天` : `${dateFrom.value} 至 ${dateTo.value}（含首尾两天全天）`)
+                : '--';
+            rangePreview.classList.remove('is-invalid');
+            dateFrom.classList.remove('is-invalid');
+            dateTo.classList.remove('is-invalid');
+            dateFrom.removeAttribute('aria-invalid');
+            dateTo.removeAttribute('aria-invalid');
+        }
+        if (runBtn && runBtn.dataset.busy !== 'true' && runBtn.dataset.opLocked !== 'true') {
+            runBtn.disabled = reversed || !hasBoth;
+            if (reversed) runBtn.title = '开始日期晚于结束日期，请先调整';
+            else if (!hasBoth) runBtn.title = '请先选择开始与结束日期';
+            else runBtn.removeAttribute('title');
+        }
+        if (rangePreset.value !== 'custom') {
+            const [from, to] = rangeFor(rangePreset.value);
+            if (dateFrom.value !== fmt(from) || dateTo.value !== fmt(to)) {
+                rangePreset.value = 'custom';
+                presetButtons.querySelectorAll('[data-range]').forEach((button) => {
+                    button.classList.remove('btn--primary');
+                    button.setAttribute('aria-pressed', 'false');
+                });
+            }
         }
     }
-}
 
-const ALLOWED_LOG_KINDS = new Set(['', 'ok', 'warn', 'err']);
-function appendLog(tag, message, kind = '') {
-    consoleOut.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
-    const line = document.createElement('div');
-    line.className = 'console__line';
-    const now = new Date();
-    const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-    const safeKind = ALLOWED_LOG_KINDS.has(kind) ? kind : '';
-    // Build with textContent so raw subprocess/CLI output can never inject markup.
-    const timeSpan = document.createElement('span');
-    timeSpan.className = 'console__time';
-    timeSpan.textContent = time;
-    const tagSpan = document.createElement('span');
-    tagSpan.className = `console__tag ${safeKind}`;
-    tagSpan.textContent = String(tag);
-    const msgSpan = document.createElement('span');
-    msgSpan.className = 'console__msg';
-    msgSpan.textContent = String(message);
-    line.append(timeSpan, tagSpan, msgSpan);
-    consoleOut.appendChild(line);
-    consoleOut.scrollTop = consoleOut.scrollHeight;
-}
-
-function applyProgress(data) {
-    const pct = Math.max(0, Math.min(100, data.percent || 0));
-    progBar.style.setProperty('--p', `${pct}%`);
-    matched.textContent = data.matched ?? matched.textContent;
-    saved.textContent = data.saved ?? saved.textContent;
-    skip.textContent = data.skipped ?? skip.textContent;
-    if (data.message) appendLog(data.step || '进度', data.message, data.kind || '');
-    const errored = data.kind === 'err';
-    progress.classList.toggle('is-error', errored);
-    if (errored) {
-        status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
-        runBtn.dataset.busy = '';
-        runBtn.disabled = false;
-        return;
+    const NEAR_BOTTOM_PX = 24;
+    function nearBottom(el) {
+        return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
     }
-    if (pct >= 100 || data.done) {
-        progress.classList.add('is-done');
-        status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
-        runBtn.dataset.busy = '';
-        runBtn.disabled = false;
+
+    const ALLOWED_LOG_KINDS = new Set(['', 'ok', 'warn', 'err']);
+    function appendLog(tag, message, kind = '') {
+        // Only follow the tail when the user is already at the bottom (FB-05).
+        const stick = nearBottom(consoleOut);
+        consoleOut.querySelectorAll('[data-placeholder]').forEach((p) => p.remove());
+        const line = document.createElement('div');
+        line.className = 'console__line';
+        const now = new Date();
+        const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+        const safeKind = ALLOWED_LOG_KINDS.has(kind) ? kind : '';
+        // Build with textContent so raw subprocess/CLI output can never inject markup.
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'console__time';
+        timeSpan.textContent = time;
+        const tagSpan = document.createElement('span');
+        tagSpan.className = `console__tag ${safeKind}`;
+        tagSpan.textContent = String(tag);
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'console__msg';
+        msgSpan.textContent = window.FPH?.sanitizeText ? window.FPH.sanitizeText(message) : String(message);
+        line.append(timeSpan, tagSpan, msgSpan);
+        consoleOut.appendChild(line);
+        const jump = consoleOut.parentElement?.querySelector('.log-jump');
+        if (stick) {
+            consoleOut.scrollTop = consoleOut.scrollHeight;
+            if (jump) jump.hidden = true;
+        } else if (jump) {
+            jump.hidden = false;
+        }
     }
-}
 
-async function startRun() {
-    runBtn.disabled = true;
-    runBtn.dataset.busy = 'true';
-    progress.classList.remove('is-idle', 'is-done', 'is-error');
-    progBar.style.setProperty('--p', '0%');
-    matched.textContent = '0';
-    saved.textContent = '0';
-    skip.textContent = '0';
-    consoleOut.innerHTML = '';
-    status.innerHTML = '<span class="pill pill--info"><span class="pill__dot"></span>运行中</span>';
+    function setProgressValue(pct, label) {
+        progBar.style.setProperty('--p', `${pct}%`);
+        progress.setAttribute('aria-valuenow', String(Math.round(pct)));
+        progress.setAttribute('aria-valuetext', label || `${Math.round(pct)}%`);
+    }
 
-    // Make sure the bridge config has been applied before reading the checks, so we
-    // never send the hardcoded HTML defaults when the user has saved something else.
-    await window.FPH?.whenConfigReady?.();
-
-    const fetchCheck = (key) => document.querySelector(`[data-fetch-check="${key}"]`)?.classList.contains('is-on') === true;
-    const payload = {
-        from: dateFrom.value,
-        to: dateTo.value,
-        matchSubject: fetchCheck('matchSubject'),
-        matchBody: fetchCheck('matchBody'),
-        dryRun: fetchCheck('dryRun'),
-    };
-    appendLog('开始', `正在${payload.dryRun ? '预览' : '获取'} ${payload.from} 至 ${payload.to} 的邮件`);
-
-    if (window.mfhBridge?.startFetch) {
-        window.mfhBridge.onFetchProgress?.(applyProgress);
-        let result;
-        try {
-            result = await window.mfhBridge.startFetch(payload);
-        } catch (err) {
-            appendLog('失败', err?.message || '抓取过程异常中断。', 'err');
+    function applyProgress(data) {
+        const pct = Math.max(0, Math.min(100, data.percent || 0));
+        progress.classList.remove('is-indeterminate');
+        setProgressValue(pct, `${data.step || '获取邮件'}，${pct}%`);
+        matched.textContent = data.matched ?? matched.textContent;
+        saved.textContent = data.saved ?? saved.textContent;
+        skip.textContent = data.skipped ?? skip.textContent;
+        if (data.message) appendLog(data.step || '进度', data.message, data.kind || '');
+        const errored = data.kind === 'err';
+        progress.classList.toggle('is-error', errored);
+        if (errored) {
             status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
-            progress.classList.add('is-error');
             runBtn.dataset.busy = '';
-        runBtn.disabled = false;
+            runBtn.disabled = false;
+            window.FPH?.announce?.('获取邮件失败。', 'alert');
             return;
         }
-        if (result?.summary) window.FPH?.applySummary?.(result.summary);
-        if (!result?.ok) {
-            appendLog('失败', result?.message || result?.stderr || '抓取失败，请检查配置。', 'err');
-            status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
-            progress.classList.add('is-error');
-            runBtn.dataset.busy = '';
-        runBtn.disabled = false;
-            return;
-        }
-        // Fallback in case no final progress event arrived: guarantee the UI lands on "完成".
-        if (!progress.classList.contains('is-done')) {
-            progBar.style.setProperty('--p', '100%');
+        if (pct >= 100 || data.done) {
             progress.classList.add('is-done');
             status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
             runBtn.dataset.busy = '';
-        runBtn.disabled = false;
+            runBtn.disabled = false;
+            window.FPH?.announce?.(`获取邮件完成：命中 ${matched.textContent}，已存 ${saved.textContent}，跳过 ${skip.textContent}。`);
+        } else {
+            window.FPH?.announce?.(`正在获取邮件，${pct}%`);
         }
-        return;
     }
 
-    appendLog('未运行', '请在桌面版中使用“开始获取邮件”，静态预览不会连接邮箱。', 'warn');
-    status.innerHTML = '<span class="pill pill--warn"><span class="pill__dot"></span>未运行</span>';
-    runBtn.disabled = false;
-}
+    async function startRun() {
+        const fetchCheck = (key) => {
+            const el = document.querySelector(`[data-fetch-check="${key}"]`);
+            return window.FPH?.isChecked ? window.FPH.isChecked(el) : el?.checked === true;
+        };
+        // Guard before we lock the UI: with both scopes off nothing can match.
+        if (!fetchCheck('matchSubject') && !fetchCheck('matchBody')) {
+            window.FPH?.showToast?.('还不能运行', '“匹配主题”和“匹配正文”至少要选一个。', 'warn');
+            return;
+        }
+        runBtn.disabled = true;
+        runBtn.dataset.busy = 'true';
+        progress.classList.remove('is-idle', 'is-done', 'is-error');
+        progress.classList.add('is-indeterminate');
+        progress.removeAttribute('aria-valuenow');
+        progress.setAttribute('aria-valuetext', '正在连接邮箱…');
+        progBar.style.setProperty('--p', '0%');
+        matched.textContent = '0';
+        saved.textContent = '0';
+        skip.textContent = '0';
+        consoleOut.innerHTML = '';
+        status.innerHTML = '<span class="pill pill--info"><span class="pill__dot"></span>运行中</span>';
+        window.FPH?.announce?.('已开始获取邮件，正在连接邮箱。');
 
-rangePreset.addEventListener('change', () => {
-    if (rangePreset.value !== 'custom') setRange(rangePreset.value);
-});
-presetButtons.addEventListener('click', (event) => {
-    const button = event.target.closest('[data-range]');
-    if (button) setRange(button.dataset.range);
-});
-dateFrom.addEventListener('input', updatePreview);
-dateTo.addEventListener('input', updatePreview);
-runBtn?.addEventListener('click', startRun);
-setRange(rangePreset.value || 'month');
+        // Make sure the bridge config has been applied before reading the checks, so we
+        // never send the hardcoded HTML defaults when the user has saved something else.
+        await window.FPH?.whenConfigReady?.();
+
+        const payload = {
+            // Local calendar days, passed through verbatim.
+            from: dateFrom.value,
+            to: dateTo.value,
+            matchSubject: fetchCheck('matchSubject'),
+            matchBody: fetchCheck('matchBody'),
+            dryRun: fetchCheck('dryRun'),
+        };
+        appendLog('开始', `正在${payload.dryRun ? '预览' : '获取'} ${payload.from} 至 ${payload.to} 的邮件`);
+
+        if (window.mfhBridge?.startFetch) {
+            window.mfhBridge.onFetchProgress?.(applyProgress);
+            let result;
+            try {
+                result = await window.mfhBridge.startFetch(payload);
+            } catch (err) {
+                appendLog('失败', '获取邮件没有完成。', 'err');
+                status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+                progress.classList.remove('is-indeterminate');
+                progress.classList.add('is-error');
+                runBtn.dataset.busy = '';
+                runBtn.disabled = false;
+                window.FPH?.showToast?.('获取邮件失败', '没有连接成功，本机数据没有变化。', 'err', { detail: err?.message });
+                return;
+            }
+            progress.classList.remove('is-indeterminate');
+            if (result?.summary) window.FPH?.applySummary?.(result.summary);
+            if (result?.normalizedFilter) window.FPH?.applyNormalizedFilter?.(result.normalizedFilter);
+            // "本次抓取" only ever shows what this run actually returned.
+            window.FPH?.setCurrentBatch?.(result);
+            if (!result?.ok) {
+                appendLog('失败', result?.message || '抓取失败，请检查配置。', 'err');
+                status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+                progress.classList.add('is-error');
+                runBtn.dataset.busy = '';
+                runBtn.disabled = false;
+                window.FPH?.showToast?.('获取邮件失败', result?.message || '请检查邮箱设置后重试。', 'err', {
+                    detail: result?.detail || result?.stderr || result?.error || '',
+                });
+                return;
+            }
+            // Fallback in case no final progress event arrived: guarantee the UI lands on "完成".
+            if (!progress.classList.contains('is-done')) {
+                setProgressValue(100, '获取完成');
+                progress.classList.add('is-done');
+                status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+                runBtn.dataset.busy = '';
+                runBtn.disabled = false;
+                window.FPH?.announce?.('获取邮件完成。');
+            }
+            return;
+        }
+
+        progress.classList.remove('is-indeterminate');
+        appendLog('未运行', '请在桌面版中使用“开始获取邮件”，静态预览不会连接邮箱。', 'warn');
+        status.innerHTML = '<span class="pill pill--warn"><span class="pill__dot"></span>未运行</span>';
+        runBtn.dataset.busy = '';
+        runBtn.disabled = false;
+    }
+
+    rangePreset.addEventListener('change', () => {
+        if (rangePreset.value !== 'custom') setRange(rangePreset.value);
+    });
+    presetButtons.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-range]');
+        if (button) setRange(button.dataset.range);
+    });
+    dateFrom.addEventListener('input', updatePreview);
+    dateTo.addEventListener('input', updatePreview);
+    runBtn.addEventListener('click', startRun);
+    setRange(rangePreset.value || 'month');
+})();
+
+window.MFH_PAGE_INIT = window.MFH_PAGE_INIT || {};
+window.MFH_PAGE_INIT.dashboard = () => {};
 </script>
 </body>
 </html>
