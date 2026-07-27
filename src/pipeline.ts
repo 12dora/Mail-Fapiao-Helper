@@ -7,10 +7,17 @@ import type { Logger } from './log.js';
 import type { State } from './state.js';
 import { contentHash as contentHashOf, msgIdHash as msgIdHashFn } from './util/hash.js';
 import { csvCell, parseCsv } from './util/csv.js';
-import { attemptDeadlineSignal, isTimeoutError } from './util/net.js';
+import {
+  assertPublicResponse,
+  attemptDeadlineSignal,
+  bufferedResponse,
+  isTimeoutError,
+  readCappedBuffer,
+} from './util/net.js';
 import { extractors } from './extract/registry.js';
 import type { Ctx, ExtractIssue, PdfArtifact } from './extract/types.js';
 import { ensureSecureDir, stageDocuments } from './download/downloader.js';
+import { beginArchiveTransaction, recoverArchiveTransactions } from './download/archiveJournal.js';
 import { supportingReason } from './extract/classify.js';
 
 interface CsvRow {
@@ -97,38 +104,50 @@ function withCsvRetry(fn: () => void): void {
 // CSV 事务原语（APP-03）
 // ---------------------------------------------------------------------------
 
-/** 文件本次由我们新建时的回滚标记：回滚等于整个删除。 */
-const CSV_CREATED = -1;
-
 /**
  * 一次性追加整批 CSV 行，并返回追加前的文件大小作为回滚标记。整批只做一次
  * `appendFileSync`，避免逐行追加在中途失败留下“半个批次”。
  */
-function appendCsvBlock(csvPath: string, header: string, lines: string[]): number {
-  if (lines.length === 0) return fs.existsSync(csvPath) ? fs.statSync(csvPath).size : CSV_CREATED;
+function appendCsvBlock(csvPath: string, header: string, lines: string[]): void {
+  if (lines.length === 0) return;
   ensureDir(path.dirname(csvPath));
   const body = lines.join('');
   if (!fs.existsSync(csvPath)) {
     withCsvRetry(() => fs.writeFileSync(csvPath, '﻿' + header + body, 'utf8'));
     hardenFile(csvPath);
-    return CSV_CREATED;
+    return;
   }
-  const previousSize = fs.statSync(csvPath).size;
   withCsvRetry(() => fs.appendFileSync(csvPath, body, 'utf8'));
   hardenFile(csvPath);
-  return previousSize;
 }
 
-/** 把 CSV 回滚到 `appendCsvBlock` 之前的状态。 */
-function rollbackCsvBlock(csvPath: string, marker: number, log: Logger): void {
+/** CSV 当前字节长度；文件不存在时为 0（journal 回滚的基准）。 */
+function csvLength(csvPath: string): number {
   try {
-    if (marker === CSV_CREATED) {
-      fs.rmSync(csvPath, { force: true });
-    } else {
-      fs.truncateSync(csvPath, marker);
+    return fs.statSync(csvPath).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 每个 invoices 目录只做一次崩溃恢复：进程内的并发 worker 共享同一次结果，
+ * 避免同一批 journal 被重复扫描。
+ */
+const recoveredInvoiceDirs = new Set<string>();
+
+function recoverArchiveTransactionsOnce(invoicesDir: string, log: Logger): void {
+  const key = path.resolve(invoicesDir);
+  if (recoveredInvoiceDirs.has(key)) return;
+  recoveredInvoiceDirs.add(key);
+  try {
+    const { rolledBack, skipped } = recoverArchiveTransactions(key);
+    if (rolledBack > 0 || skipped > 0) {
+      log.warn(`Archive journal recovery: rolledBack=${rolledBack}, skipped=${skipped}`);
     }
   } catch (err) {
-    log.warn(`CSV rollback failed for ${csvPath}: ${err instanceof Error ? err.message : String(err)}`);
+    // 恢复失败不能阻断本次归档，最坏情况只是残留文件留待人工处理。
+    log.warn(`Archive journal recovery failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -322,7 +341,18 @@ function requestMethod(init: FetchInit): string {
   return (init?.method ?? 'GET').toUpperCase();
 }
 
-function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
+/**
+ * 这些失败与网络抖动无关，重试只会放大伤害/浪费时间，必须原样上抛：
+ * - `blocked_url:` SSRF 判定（调用方按前缀区分并降级）
+ * - `response_too_large:` 超出 50MB 硬上限
+ */
+function isNonRetryableFetchError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.startsWith('blocked_url:') || msg.startsWith('response_too_large:');
+}
+
+/** 导出仅用于测试：构造带 per-attempt deadline 与重试的 fetch。 */
+export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
   return (async (input: FetchInput, init?: FetchInit): Promise<Response> => {
     const attempts = cfg.network.retries + 1;
     const url = requestUrl(input);
@@ -339,22 +369,32 @@ function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
           signal: attemptDeadlineSignal(init?.signal, timeoutMs),
         } as FetchInit;
         const response = await fetch(input, attemptInit);
-        if (!isRetryableStatus(response.status)) {
-          return response;
+        if (isRetryableStatus(response.status)) {
+          lastError = `http_${response.status}`;
+          // Drain the discarded error body so undici can release the socket back to
+          // the pool instead of leaking a connection on every retry.
+          await response.body?.cancel().catch(() => {});
+          if (attempt === attempts) {
+            throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
+          }
+          log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
+        } else {
+          // 读 body 之前先复核最终 URL：公网链接跳转到内网时绝不能消费 body。
+          await assertPublicResponse(response);
+          // 关键：body 的消费必须留在同一个 attempt 内，否则 deadline 虽然会中断
+          // body，超时却发生在重试器之外，永远不会按 network.retries 重试（APP-13）。
+          const data = await readCappedBuffer(response);
+          return bufferedResponse(response, data);
         }
-        lastError = `http_${response.status}`;
-        // Drain the discarded error body so undici can release the socket back to
-        // the pool instead of leaking a connection on every retry.
-        await response.body?.cancel().catch(() => {});
-        if (attempt === attempts) {
-          throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
-        }
-        log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
       } catch (err) {
         if (err instanceof Error && err.message.startsWith('network_retry_failed:')) {
           throw err;
         }
-        // 超时属于可重试失败；fetch 在 abort 时已经取消底层 body。
+        if (isNonRetryableFetchError(err)) {
+          throw err;
+        }
+        // 超时属于可重试失败：header 阶段由 fetch 抛出，body 阶段由
+        // readCappedBuffer 转成 `response_timeout:*`，两者现在走同一条重试路径。
         lastError = isTimeoutError(err)
           ? `timeout_${timeoutMs}ms`
           : (err instanceof Error ? err.message : String(err));
@@ -382,8 +422,14 @@ interface AggregatedExtraction {
   artifacts: PdfArtifact[];
   /** 所有候选来源的失败记录，含被跳过的附件、失败的链接和抛异常的提取器。 */
   issues: ExtractIssue[];
-  /** 参与提取的提取器名。 */
+  /** `canHandle()` 为真、因而实际运行过的提取器名。 */
   matched: string[];
+  /**
+   * 判定为“与本邮件无关”的提取器原因。它们只在整封邮件零产出时用于 pending
+   * 说明，**绝不**参与部分成功判定：常见的「有效附件 + 退订/隐私政策链接」邮件
+   * 不能因为 directLink 找不到 PDF 就整封变成待确认（APP-01）。
+   */
+  notApplicable: string[];
   /** 返回 `skip` 的提取器数量。 */
   skipped: number;
 }
@@ -399,6 +445,7 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
   const artifacts: PdfArtifact[] = [];
   const issues: ExtractIssue[] = [];
   const matched: string[] = [];
+  const notApplicable: string[] = [];
   const seen = new Set<string>();
   let skipped = 0;
 
@@ -427,6 +474,10 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
       skipped++;
       continue;
     }
+    if (result.kind === 'not_applicable') {
+      notApplicable.push(result.reason ?? `${extractor.name}:not_applicable`);
+      continue;
+    }
     if (result.kind === 'manual') {
       issues.push({ reason: result.reason, retryable: result.reason.includes('network_retry_failed') });
       continue;
@@ -441,13 +492,16 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
     }
   }
 
-  return { artifacts, issues, matched, skipped };
+  return { artifacts, issues, matched, notApplicable, skipped };
+}
+
+function summarizeReasons(reasons: string[]): string {
+  const head = reasons[0] ?? 'unknown';
+  return reasons.length > 1 ? `${head} (+${reasons.length - 1})` : head;
 }
 
 function summarizeIssues(issues: ExtractIssue[]): string {
-  const reasons = issues.map((issue) => issue.reason);
-  const head = reasons[0] ?? 'unknown';
-  return reasons.length > 1 ? `${head} (+${reasons.length - 1})` : head;
+  return summarizeReasons(issues.map((issue) => issue.reason));
 }
 
 // ---------------------------------------------------------------------------
@@ -503,15 +557,21 @@ export async function processMail(
   log.info(`Matched extractors: ${extraction.matched.join('+')} for ${hash}`);
 
   if (extraction.artifacts.length === 0) {
-    if (extraction.issues.length === 0) {
-      // 所有匹配的提取器都明确返回 skip：这封邮件无需归档。
-      log.info(`Skipped ${hash}`);
-      commitProcessed(state, hash, saveState);
-      return { ...baseResult, outcome: 'skip' };
+    if (extraction.issues.length > 0) {
+      const reason = summarizeIssues(extraction.issues);
+      log.info(`Manual ${hash}: ${reason}`);
+      return degradeToManual(reason);
     }
-    const reason = summarizeIssues(extraction.issues);
-    log.info(`Manual ${hash}: ${reason}`);
-    return degradeToManual(reason);
+    if (extraction.notApplicable.length > 0) {
+      // 没有任何提取器适用，且整封邮件零产出：仍然入待确认，让用户能补票。
+      const reason = summarizeReasons(extraction.notApplicable);
+      log.info(`Manual ${hash}: ${reason}`);
+      return degradeToManual(reason);
+    }
+    // 所有匹配的提取器都明确返回 skip：这封邮件无需归档。
+    log.info(`Skipped ${hash}`);
+    commitProcessed(state, hash, saveState);
+    return { ...baseResult, outcome: 'skip' };
   }
 
   const csvPath = path.resolve(cfg.output.csv);
@@ -519,6 +579,9 @@ export async function processMail(
 
   let downloadsCount = 0;
   try {
+    // 0) 崩溃恢复：先把上次强杀留下的半成品事务清掉，再开始本次归档。
+    recoverArchiveTransactionsOnce(cfg.paths.invoices, log);
+
     // 1) 预校验所有写入目标：先确认目录可写、两个 CSV 都能追加，再动任何文件。
     assertWritableDir(cfg.paths.invoices);
     assertAppendableCsv(csvPath);
@@ -534,11 +597,32 @@ export async function processMail(
       alreadyArchived: archived.byContentHash,
     });
 
-    // 4) 原子提交文件（中途失败由 batch 自行整批回滚）。
-    const downloads = batch.commit();
+    // 从这里到 tx.commit() 之间没有任何 await：同进程的其他 worker 不会插进来
+    // 追加 CSV，因此 journal 里记录的 baseLength 在提交前始终有效。
+    // 4) 预留最终路径并写出持久化 journal：journal 落盘（fsync）之后才安装文件，
+    //    进程被强杀也能由下一次 recoverArchiveTransactions() 清掉半成品（APP-03）。
+    const reservedFiles = batch.reserve();
+    const tx = beginArchiveTransaction(cfg.paths.invoices, {
+      files: reservedFiles,
+      csv: [
+        { path: csvPath, baseLength: csvLength(csvPath) },
+        { path: ocrPendingCsvPath, baseLength: csvLength(ocrPendingCsvPath) },
+      ],
+    });
+
+    let downloads;
+    try {
+      // 5) 把内容写进已预留的最终文件。
+      downloads = batch.commit();
+      tx.markStage('files-installed');
+    } catch (err) {
+      tx.rollback();
+      batch.dispose();
+      throw err;
+    }
     downloadsCount = downloads.length;
 
-    // 5) 提交元数据：整批各写一次，失败则回滚 CSV 与本批次文件。
+    // 6) 提交元数据：整批各写一次，失败则由 journal 回滚 CSV 与本批次文件。
     const invoiceLines: string[] = [];
     const ocrLines: string[] = [];
     for (const dl of downloads) {
@@ -581,17 +665,18 @@ export async function processMail(
       }
     }
 
-    let invoiceMarker: number | undefined;
     try {
-      invoiceMarker = appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines);
+      appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines);
       appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines);
+      // 台账已全部落盘：即使这之后被强杀，恢复也只会清理 journal 本身。
+      tx.markStage('ledger-committed');
     } catch (err) {
-      if (invoiceMarker !== undefined && invoiceLines.length > 0) {
-        rollbackCsvBlock(csvPath, invoiceMarker, log);
-      }
-      batch.rollback();
+      // journal 同时负责删除本批次文件并把两个 CSV 截回追加前的长度。
+      tx.rollback();
+      batch.dispose();
       throw err;
     }
+    tx.commit();
   } catch (err) {
     // Iron rule: a filesystem / CSV-lock failure during download or archive must
     // NOT abort the run. Degrade this email to the manual queue and continue.

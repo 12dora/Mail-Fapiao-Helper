@@ -37,7 +37,14 @@ export interface ExtractIssue {
 
 export type ExtractResult =
   | { kind: 'pdf'; pdfs: PdfArtifact[]; issues?: ExtractIssue[] }
+  /** 确实尝试过、但没能取到本应存在的票：会形成待确认记录。 */
   | { kind: 'manual'; reason: string }
+  /**
+   * 这个提取器与本邮件无关（例如正文只有退订/隐私政策链接）。
+   * 与 `manual` 的区别是：它不是「候选发票提取失败」，因此在同一封邮件里其他
+   * 提取器成功时**不得**把整封邮件降级为部分成功（APP-01）。
+   */
+  | { kind: 'not_applicable'; reason?: string }
   | { kind: 'skip' };
 
 export interface Extractor {

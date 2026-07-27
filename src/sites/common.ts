@@ -4,7 +4,10 @@ import { assertPublicUrl, assertPublicResponse, readCappedBuffer, MAX_DOC_BYTES 
 import { decodeHtmlEntities } from '../util/url.js';
 
 /** ZIP 解压防护上限（APP-09）：条目数、单条解压大小、总解压大小、压缩比。 */
-const MAX_ZIP_ENTRIES = 512;
+/** 中央目录项总数的硬上限，在物化任何 ZipEntry 之前判定。 */
+const MAX_ZIP_TOTAL_ENTRIES = 4096;
+/** 实际取出的受支持文档数量上限。 */
+const MAX_ZIP_DOCUMENTS = 512;
 const MAX_ZIP_ENTRY_BYTES = MAX_DOC_BYTES;
 const MAX_ZIP_TOTAL_BYTES = MAX_DOC_BYTES;
 /** 超过该压缩比且解压后超过 `ZIP_RATIO_FLOOR_BYTES` 的条目视为 zip bomb。 */
@@ -141,16 +144,28 @@ export interface ZipExtraction {
  * （APP-10C）；同时它在调用 `getData()` 前只检查声明大小，缺少条目数以外的
  * 压缩比防护（APP-09）。这里在解压前用声明大小 + 压缩比预筛，解压后再用实际
  * 大小复核（ZIP 头里的声明大小并不可信）。
+ *
+ * 条目数硬上限必须在 `getEntries()` **之前**用 `getEntryCount()` 判定：adm-zip 的
+ * 构造函数只读中央目录主头（`readEntries: false`），`getEntryCount()` 直接返回
+ * `mainHeader.diskEntries`，而 `getEntries()` 会为声明的每一个目录项物化 ZipEntry
+ * 对象。只在循环里对“受支持后缀”计数，等于让几十万个不支持后缀的目录项绕过上限，
+ * 在解压前就吃掉大量 CPU/内存（APP-09）。
  */
 export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
   const documents: PdfArtifact[] = [];
   const skipped: string[] = [];
   let total = 0;
-  let entryCount = 0;
+  let supportedCount = 0;
 
   let entries: ReturnType<AdmZip['getEntries']>;
   try {
-    entries = new AdmZip(data).getEntries();
+    const zip = new AdmZip(data);
+    // 先按“全部中央目录项”硬上限拒绝，再物化条目。
+    const declaredEntries = zip.getEntryCount();
+    if (declaredEntries > MAX_ZIP_TOTAL_ENTRIES) {
+      throw new Error(`zip_entry_count_${declaredEntries}_over_${MAX_ZIP_TOTAL_ENTRIES}`);
+    }
+    entries = zip.getEntries();
   } catch (err) {
     throw new Error(`zip_unreadable:${err instanceof Error ? err.message : String(err)}`);
   }
@@ -161,8 +176,8 @@ export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
     const format = formatForEntry(entryName);
     if (!format) continue;
 
-    if (++entryCount > MAX_ZIP_ENTRIES) {
-      skipped.push(`${source}/*:zip_entry_limit_${MAX_ZIP_ENTRIES}`);
+    if (++supportedCount > MAX_ZIP_DOCUMENTS) {
+      skipped.push(`${source}/*:zip_document_limit_${MAX_ZIP_DOCUMENTS}`);
       break;
     }
 

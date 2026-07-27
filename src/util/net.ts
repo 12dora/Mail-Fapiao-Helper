@@ -24,6 +24,9 @@ export function attemptDeadlineSignal(
   return AbortSignal.any([existing, deadline]);
 }
 
+/** body 读取阶段命中 per-attempt deadline 时的错误前缀。 */
+export const RESPONSE_TIMEOUT_PREFIX = 'response_timeout:';
+
 /** 判断一个错误是否来自 per-attempt deadline / abort，用于决定是否重试。 */
 export function isTimeoutError(err: unknown): boolean {
   if (!err) return false;
@@ -34,6 +37,27 @@ export function isTimeoutError(err: unknown): boolean {
   if (causeName === 'TimeoutError' || causeName === 'AbortError') return true;
   const msg = err instanceof Error ? err.message : String(err);
   return /timed out|timeout|operation was aborted|the operation was aborted/i.test(msg);
+}
+
+/**
+ * 用一份已读完的字节重建 Response，供“把 body 消费放进同一个 attempt”的重试器
+ * 返回给调用方（APP-13）。`url` 是 Response 原型上的只读 getter，这里用同名自有
+ * 属性遮蔽它，使 `response.url`（短链解析、SSRF 复核都依赖）保持原值。
+ */
+export function bufferedResponse(original: Response, data: Buffer): Response {
+  const headers = new Headers(original.headers);
+  // body 已被解码并物化：把长度对齐到真实字节数，并去掉会误导二次读取的编码头。
+  headers.delete('content-encoding');
+  headers.set('content-length', String(data.length));
+  // 204/205/304 在 Response 构造器里必须是 null body。
+  const nullBody = data.length === 0 || original.status === 204 || original.status === 205 || original.status === 304;
+  const rebuilt = new Response(nullBody ? null : new Uint8Array(data), {
+    status: original.status,
+    statusText: original.statusText,
+    headers,
+  });
+  Object.defineProperty(rebuilt, 'url', { value: original.url, enumerable: true, configurable: true });
+  return rebuilt;
 }
 
 function ipv4Blocked(ip: string): boolean {
@@ -205,7 +229,7 @@ export async function readCappedBuffer(response: Response, cap = MAX_DOC_BYTES):
     // per-attempt deadline 到期会在 body 读取中途 abort：主动取消 reader 释放
     // socket，并转成明确的超时错误，便于上层形成可读的 pending reason（APP-13）。
     await reader.cancel().catch(() => {});
-    if (isTimeoutError(err)) throw new Error(`response_timeout:${total}`);
+    if (isTimeoutError(err)) throw new Error(`${RESPONSE_TIMEOUT_PREFIX}${total}`);
     throw err;
   }
   return Buffer.concat(chunks);
