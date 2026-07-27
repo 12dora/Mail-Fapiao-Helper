@@ -1,0 +1,242 @@
+name: Unsigned prerelease
+
+# Temporary distribution path for projects that do not yet have Apple
+# Developer ID / notarization and Windows Authenticode credentials.
+#
+# This workflow is intentionally separate from release.yml:
+#   * it can only be started manually for an existing immutable semver tag;
+#   * every downloadable binary is built through the development channel and
+#     carries an `-unsigned` suffix;
+#   * the GitHub Release is always marked prerelease;
+#   * no auto-update metadata is published;
+#   * release notes explain the missing trust chain and the safest per-app
+#     Gatekeeper override. The stable Release workflow remains fail-closed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的未签名 tag，例如 v0.0.5-unsigned.1（必须已推送，且与 package.json 一致）'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-prerelease-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve unsigned prerelease ref
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      sha: ${{ steps.ref.outputs.sha }}
+      version: ${{ steps.ref.outputs.version }}
+    steps:
+      - name: Resolve tag to an immutable commit
+        id: ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${INPUT_TAG}"
+          if ! printf '%s' "${TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-unsigned\.(0|[1-9][0-9]*)$'; then
+            echo "::error::Tag '${TAG}' must use the explicit unsigned prerelease form vX.Y.Z-unsigned.N"
+            exit 1
+          fi
+
+          if ! REF_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" 2>/dev/null)"; then
+            echo "::error::Tag '${TAG}' does not exist in ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+          OBJ_TYPE="$(printf '%s' "${REF_JSON}" | jq -r '.object.type')"
+          OBJ_SHA="$(printf '%s' "${REF_JSON}" | jq -r '.object.sha')"
+          if [ "${OBJ_TYPE}" = "tag" ]; then
+            SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJ_SHA}" --jq '.object.sha')"
+          else
+            SHA="${OBJ_SHA}"
+          fi
+
+          if ! printf '%s' "${SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Could not resolve '${TAG}' to a commit SHA"
+            exit 1
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::A GitHub Release already exists for '${TAG}'"
+            exit 1
+          fi
+
+          {
+            echo "tag=${TAG}"
+            echo "sha=${SHA}"
+            echo "version=${TAG#v}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.sha }}
+          persist-credentials: false
+
+      - name: Enforce tag/package version agreement
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "${PKG_VERSION}" != "${{ steps.ref.outputs.version }}" ]; then
+            echo "::error::Tag ${{ steps.ref.outputs.tag }} implies ${{ steps.ref.outputs.version }}, package.json says ${PKG_VERSION}"
+            exit 1
+          fi
+
+  build:
+    name: Build unsigned ${{ matrix.name }}
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            platform: mac
+            os: macos-15
+          - name: Windows x64
+            platform: win
+            os: windows-2025
+
+    steps:
+      - name: Checkout resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Test
+        run: npm test
+
+      - name: Build explicitly unsigned package
+        shell: bash
+        env:
+          MFH_RELEASE_CHANNEL: development
+          MFH_RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          MFH_RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:${{ matrix.platform }}
+
+      - name: Verify unsigned package identity and contents
+        run: npm run verify:artifacts -- --platform ${{ matrix.platform }} --channel development
+
+      - name: Upload unsigned build
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-prerelease-${{ matrix.platform }}
+          path: |
+            release/*-unsigned.dmg
+            release/*-unsigned.zip
+            release/*-unsigned.exe
+            release/build-info-*.json
+          if-no-files-found: error
+
+  prerelease:
+    name: Publish unsigned GitHub prerelease
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Re-verify immutable tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.resolve.outputs.tag }}"
+          EXPECTED="${{ needs.resolve.outputs.sha }}"
+          REF_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")"
+          OBJ_TYPE="$(printf '%s' "${REF_JSON}" | jq -r '.object.type')"
+          OBJ_SHA="$(printf '%s' "${REF_JSON}" | jq -r '.object.sha')"
+          if [ "${OBJ_TYPE}" = "tag" ]; then
+            CURRENT="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${OBJ_SHA}" --jq '.object.sha')"
+          else
+            CURRENT="${OBJ_SHA}"
+          fi
+          if [ "${CURRENT}" != "${EXPECTED}" ]; then
+            echo "::error::Tag ${TAG} moved from ${EXPECTED} to ${CURRENT}"
+            exit 1
+          fi
+
+      - name: Download unsigned artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: unsigned-prerelease-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Compose warning-rich prerelease notes
+        run: |
+          node scripts/compose-release-notes.mjs \
+            --dir release-artifacts \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --sha "${{ needs.resolve.outputs.sha }}" \
+            --version "${{ needs.resolve.outputs.version }}" \
+            --channel development \
+            --out release-notes.md
+          cat release-notes.md
+
+      - name: Create SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          shopt -s nullglob
+          FILES=(./*-unsigned.dmg ./*-unsigned.zip ./*-unsigned.exe)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::No unsigned distributables were downloaded"
+            exit 1
+          fi
+          sha256sum "${FILES[@]}" | sort -k2 > SHA256SUMS.txt
+          test -s SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.sha }}
+          name: 发票助手 ${{ needs.resolve.outputs.tag }}（未签名预发布版）
+          body_path: release-notes.md
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: |
+            release-artifacts/*-unsigned.dmg
+            release-artifacts/*-unsigned.zip
+            release-artifacts/*-unsigned.exe
+            release-artifacts/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

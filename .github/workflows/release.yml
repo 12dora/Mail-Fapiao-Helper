@@ -8,14 +8,15 @@ name: Release
 # timestamp. If the signing secrets are not configured the run fails in the
 # cheap `resolve` job, before anything is built.
 #
-# Unsigned builds are produced by .github/workflows/dev-build.yml, which has no
-# `contents: write` permission and can only emit workflow artifacts. There is no
-# code path in this repository that turns an unsigned binary into a Release.
+# Unsigned builds cannot enter this stable channel. The separate
+# unsigned-prerelease workflow may publish only an explicitly labelled GitHub
+# prerelease with `-unsigned` filenames and user-facing trust warnings.
 
 on:
   push:
     tags:
       - 'v*'
+      - '!v*-unsigned*'
   workflow_dispatch:
     inputs:
       tag:
@@ -82,9 +83,9 @@ jobs:
             echo "::error::Cannot cut an official release: the signing trust chain is incomplete."
             printf 'Missing repository secrets:%b\n\n' "${MISSING}"
             echo "An official Release must be signed, notarized (macOS) and timestamped (Windows)."
-            echo "Unsigned binaries are never published as a Release."
-            echo "To produce an unsigned build for testing, run the \"Development build (unsigned)\" workflow;"
-            echo "it uploads workflow artifacts only."
+            echo "Unsigned binaries are never published through this stable Release workflow."
+            echo "Use the isolated \"Unsigned prerelease\" workflow for a clearly labelled prerelease,"
+            echo "or \"Development build (unsigned)\" for short-lived workflow artifacts."
             exit 1
           fi
           echo "Signing trust chain is fully configured."

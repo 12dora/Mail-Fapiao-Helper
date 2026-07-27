@@ -1,8 +1,8 @@
 name: Development build (unsigned)
 
-# CODE-05A: the *only* sanctioned way to produce an unsigned build.
+# CODE-05A: produces short-lived unsigned workflow artifacts.
 #
-# Everything here is deliberately incapable of creating a GitHub Release:
+# This workflow is deliberately incapable of creating a GitHub Release:
 #   * `permissions: contents: read` — the job has no write scope at all;
 #   * artifacts are uploaded as workflow artifacts with a short retention;
 #   * every filename carries an `-unsigned` suffix, enforced by
@@ -125,7 +125,7 @@ jobs:
             echo "这些产物**没有代码签名**，macOS Gatekeeper / Windows SmartScreen 无法验证其来源与完整性。"
             echo
             echo "- 仅作开发与测试用途，**不要**分发给最终用户。"
-            echo "- 它们只以 workflow artifact 形式存在（保留 14 天），**不会**出现在 Releases 页面。"
+            echo "- 本 workflow 的产物只以 workflow artifact 形式存在（保留 14 天）；公开的未签名版本由独立的 Unsigned prerelease workflow 构建并醒目标注风险。"
             echo "- 正式安装包请从 [Releases](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases) 下载，"
             echo "  那里的产物一律经过签名、公证与严格校验。"
           } >> "$GITHUB_STEP_SUMMARY"

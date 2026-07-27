@@ -12,10 +12,10 @@
 //
 //   --channel development  (.github/workflows/dev-build.yml, local `npm run dist:*`)
 //     Unsigned. macOS gets an ad-hoc signature only so the arm64 app can launch
-//     at all. Every artifact filename carries an `-unsigned` suffix. These
-//     artifacts are only ever published as workflow artifacts; the development
-//     workflow has no `contents: write` permission and cannot create a GitHub
-//     Release.
+//     at all. Every artifact filename carries an `-unsigned` suffix. These may
+//     be uploaded as short-lived workflow artifacts or through the isolated
+//     unsigned-prerelease workflow, which must mark the GitHub Release as a
+//     prerelease and display explicit trust warnings.
 //
 // The channel is recorded in release/build-info-<platform>-<arch>.json and is
 // re-checked by scripts/verify-release-artifacts.mjs, so an unsigned binary can
@@ -108,7 +108,7 @@ if (channel === 'stable') {
         'testing, use the development channel instead:\n' +
         '\n' +
         '  node scripts/build-release.mjs --channel development ...\n' +
-        '  or run the "Development build (unsigned)" workflow, which publishes workflow artifacts only.\n',
+        '  or run an explicitly unsigned development/prerelease workflow.\n',
     );
     process.exit(1);
   }
@@ -139,7 +139,7 @@ if (signed) {
     `[build-release] no ${platform === 'mac' ? 'macOS' : 'Windows'} code-signing certificate in the environment ` +
       `(${platform === 'mac' ? 'CSC_LINK' : 'WIN_CSC_LINK/CSC_LINK'}); ` +
       'producing an UNSIGNED development build. Artifacts are suffixed with "-unsigned" and ' +
-      'must never be published as a GitHub Release.',
+      'must never be published as a stable GitHub Release.',
   );
   // Documented switch that stops electron-builder from picking up whatever
   // identity happens to sit in the local keychain.
