@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { Config } from '../config.js';
 import { readCsvRows } from '../util/csv.js';
+import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
 export interface OcrSummaryExample {
   hash: string;
@@ -69,33 +70,34 @@ function compactReason(reason: string): string {
   return reason;
 }
 
-function resultKey(row: Record<string, string>): string {
-  const hash = row.hash ?? '';
-  const source = row.source ?? row.filename ?? '';
-  if (!hash) return `filename\0${row.filename ?? source}`;
-  return `${hash}\0${source}`;
+/** 统一的票据身份（APP-06A）：hash + filename + contentHash，source 仅作回退。 */
+function rowIdentity(row: Record<string, string>): ArtifactIdentity {
+  return {
+    hash: row.hash ?? '',
+    filename: row.filename ?? '',
+    source: row.source ?? '',
+    contentHash: row.contentHash ?? '',
+  };
 }
 
-function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
-  const index = new Map<string, Record<string, string>>();
+function indexResultRows(rows: Record<string, string>[]): ArtifactIndex<Record<string, string>> {
+  const index = new ArtifactIndex<Record<string, string>>();
   for (const row of rows) {
-    const key = resultKey(row);
-    const existing = index.get(key);
-    const status = (row.status ?? '').toLowerCase();
-    const existingStatus = (existing?.status ?? '').toLowerCase();
-    if (existing && existingStatus === 'success' && status !== 'success') continue;
-    index.set(key, row);
+    index.set(rowIdentity(row), row, (existing, next) => {
+      const existingStatus = (existing.status ?? '').toLowerCase();
+      const nextStatus = (next.status ?? '').toLowerCase();
+      return !(existingStatus === 'success' && nextStatus !== 'success');
+    });
   }
-  return Array.from(index.values());
+  return index;
 }
 
 export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
   const pendingCsv = path.join(path.resolve(cwd, cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
   const resultsCsv = path.resolve(cwd, cfg.ocr.resultsCsv);
   const pendingRows = readCsvRows(pendingCsv);
-  const resultRows = currentResultRows(readCsvRows(resultsCsv));
-  const currentResults = new Map(resultRows.map((row) => [resultKey(row), row]));
-  const currentResultsByFilename = new Map(resultRows.map((row) => [row.filename ?? '', row]));
+  const currentResults = indexResultRows(readCsvRows(resultsCsv));
+  const resultRows = currentResults.values();
   const byDocumentType = new Map<string, OcrSummaryGroup>();
   const bySupportingReason = new Map<string, OcrSummaryGroup>();
   const byFailureReason = new Map<string, OcrSummaryGroup>();
@@ -106,17 +108,31 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
   let pending = 0;
 
   for (const row of pendingRows) {
-    const result = currentResults.get(resultKey(row)) || currentResultsByFilename.get(row.filename ?? '');
+    const result = currentResults.get(rowIdentity(row));
     const resultStatus = (result?.status ?? '').toLowerCase();
-    const status = resultStatus === 'success' ? 'recognized' : (row.status ?? '').toLowerCase();
+    // APP-14C：结果 CSV 是权威来源。success/error 分别映射为 recognized/failed，
+    // 否则中断后已落盘的 error 会被 pending 行的旧状态盖成「待处理」。
+    let status = (row.status ?? '').toLowerCase();
+    let reason = row.reason ?? '';
+    // 主动忽略的支撑材料保持 ignored，不被历史结果行改写。
+    if (status !== 'ignored') {
+      if (resultStatus === 'success') {
+        status = 'recognized';
+        reason = '';
+      } else if (resultStatus === 'error' || resultStatus === 'partial') {
+        // partial：服务声称成功但字段不全，同样属于「未识别成功」，
+        // 必须留在失败/待复核工作量里（APP-14B）。
+        status = 'failed';
+        reason = result?.error || reason || resultStatus;
+      }
+    }
     const documentType = result?.documentType || row.documentType || '';
-    const reason = resultStatus === 'success' ? '' : (row.reason ?? '');
     const example = exampleFromRow({ ...row, documentType, status }, reason);
     bump(byDocumentType, documentType || 'unknown', example);
 
     if (status === 'recognized') {
       recognized++;
-    } else if (status === 'failed') {
+    } else if (status === 'failed' || status === 'partial') {
       failed++;
       bump(byFailureReason, compactReason(reason) || 'failed', example);
     } else if (status === 'ignored') {
@@ -129,7 +145,8 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
 
   if (failed === 0 && resultRows.length > 0) {
     for (const row of resultRows) {
-      if ((row.status ?? '').toLowerCase() !== 'error') continue;
+      const rowStatus = (row.status ?? '').toLowerCase();
+      if (rowStatus !== 'error' && rowStatus !== 'partial') continue;
       bump(byFailureReason, compactReason(row.error ?? '') || 'error', exampleFromRow(row, row.error ?? ''));
     }
   }
@@ -140,7 +157,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
       const documentType = row.documentType || 'invoice';
       const example = exampleFromRow(row, row.error ?? '');
       bump(byDocumentType, documentType, example);
-      if (status === 'error') {
+      if (status === 'error' || status === 'partial') {
         failed++;
         bump(byFailureReason, compactReason(row.error ?? '') || 'error', example);
       } else {

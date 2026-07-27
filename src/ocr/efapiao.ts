@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
-import type { OcrProvider, OcrResult } from './types.js';
+import type { InvoiceFields, OcrProvider, OcrResult } from './types.js';
 
 interface EfapiaoPayload {
   index?: number;
@@ -35,7 +35,16 @@ interface ServiceState {
   child?: ChildProcess;
   failureReason?: string;
   startup?: Promise<void>;
+  /** 子进程是否已经退出（持久 exit/close listener 置位）。 */
+  exited?: boolean;
+  /** 是否曾经健康过；只有崩溃（而非启动失败）才允许下次请求重启。 */
+  everReady?: boolean;
+  /** 最近一段 stderr，用于组装退出原因。 */
+  stderrTail?: () => string;
 }
+
+/** 保留的 stderr 尾部字节数，避免长时间运行的服务把日志堆在内存里。 */
+const STDERR_TAIL_BYTES = 8192;
 
 const EFAPIAO_VERSION = '0.1.3';
 const serviceStates = new Map<string, ServiceState>();
@@ -220,35 +229,70 @@ function serviceHeaders(cfg: Config): Record<string, string> | undefined {
   return apiKey ? { 'X-API-Key': apiKey } : undefined;
 }
 
-async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceState): Promise<void> {
-  const deadline = Date.now() + cfg.ocr.serviceStartupMs;
-  const stderr: Buffer[] = [];
-  const onStderr = (chunk: Buffer) => stderr.push(chunk);
-  // Drain stdout too: if efapiao serve is chatty on stdout during startup and we
-  // never read it, the OS pipe buffer fills, the child blocks on write, and it
-  // never becomes healthy — a deadlock that only breaks at the startup timeout.
-  const onStdout = () => {};
-  const onExit = (code: number | null) => {
-    if (!state.ready) {
-      state.failed = true;
-      state.failureReason = `efapiao_serve_exit_${code}:${compactError(Buffer.concat(stderr).toString('utf8'))}`;
+function unrefStream(stream: unknown): void {
+  (stream as { unref?: () => void } | null | undefined)?.unref?.();
+}
+
+/**
+ * 挂上**持久**的 exit/close listener 并持续 drain stdout/stderr（APP-14A）。
+ * - 持续 drain：不读就会把 OS 管道写满，子进程阻塞在 write 上，服务再也不会健康。
+ * - 退出时原子地把 state 标为 not-ready；如果它曾经健康过（属于崩溃/被杀），
+ *   还要把它移出 registry，下一次请求就会同步重启，而不是继续连一个死进程。
+ */
+function attachServiceChild(key: string, child: ChildProcess, state: ServiceState): void {
+  const tail: Buffer[] = [];
+  let tailBytes = 0;
+  const keepTail = (chunk: Buffer): void => {
+    tail.push(chunk);
+    tailBytes += chunk.length;
+    while (tailBytes > STDERR_TAIL_BYTES && tail.length > 1) {
+      tailBytes -= tail.shift()?.length ?? 0;
     }
   };
-  child.stderr?.on('data', onStderr);
-  child.stdout?.on('data', onStdout);
-  child.on('exit', onExit);
+  state.stderrTail = () => Buffer.concat(tail).toString('utf8');
+
+  child.stdout?.on('data', () => { /* drain */ });
+  child.stderr?.on('data', keepTail);
+  child.stdout?.on('error', () => { /* 管道随子进程一起消失，忽略 */ });
+  child.stderr?.on('error', () => { /* 同上 */ });
+  // 只 drain 不持有事件循环：CLI 退出时不应被这两个管道拖住。
+  unrefStream(child.stdout);
+  unrefStream(child.stderr);
+
+  const onGone = (code: number | null, signal: NodeJS.Signals | null): void => {
+    if (state.exited) return;
+    state.exited = true;
+    const wasReady = state.everReady === true;
+    state.ready = false;
+    state.failed = true;
+    state.failureReason = state.failureReason
+      || `efapiao_serve_exit_${code ?? signal ?? 'unknown'}:${compactError(state.stderrTail?.() ?? '')}`;
+    // 曾经就绪过的服务崩溃后必须让位给一次重启；从未就绪的启动失败保留在
+    // registry 里快速失败，避免每份文档都去重复一次注定失败的启动。
+    if (wasReady && serviceStates.get(key) === state) serviceStates.delete(key);
+  };
+  child.on('exit', onGone);
+  child.on('close', onGone);
+  child.on('error', (err) => {
+    state.failureReason = state.failureReason || `efapiao_serve_spawn_error:${compactError(err.message)}`;
+    onGone(null, null);
+  });
+}
+
+async function waitForHealth(cfg: Config, child: ChildProcess, state: ServiceState): Promise<void> {
+  const deadline = Date.now() + cfg.ocr.serviceStartupMs;
 
   while (Date.now() < deadline) {
     if (await healthOk(cfg)) {
+      // 子进程已经退出时不能标 ready：健康的可能是别的服务或端口残留。
+      if (state.exited) break;
+      // 不再摘掉 exit listener、也不 destroy 管道：服务就绪之后依然要持续
+      // 监听退出并 drain 输出（APP-14A）。
       state.ready = true;
-      child.stderr?.off('data', onStderr);
-      child.stdout?.off('data', onStdout);
-      child.off('exit', onExit);
-      child.stdout?.destroy();
-      child.stderr?.destroy();
+      state.everReady = true;
       return;
     }
-    if (state.failed) break;
+    if (state.failed || state.exited) break;
     await sleep(300);
   }
 
@@ -263,11 +307,19 @@ async function ensureService(cfg: Config): Promise<void> {
   const key = serviceKey(cfg);
   const existing = serviceStates.get(key);
   if (existing) {
-    if (existing.ready) return;
-    if (existing.failed) throw new Error(existing.failureReason || 'efapiao_serve_failed');
-    // A startup is already in flight for this key; await the SAME promise so we
-    // never spawn a second `efapiao serve` under concurrency.
-    if (existing.startup) return existing.startup;
+    if (existing.exited && existing.everReady) {
+      // 曾经健康的服务崩溃或被杀：移出 registry，下面同步重启（APP-14A）。
+      serviceStates.delete(key);
+    } else {
+      // ready 之外还要确认子进程没退出：退出后 state 已被置为 not-ready。
+      if (existing.ready && !existing.exited) return;
+      if (existing.failed || existing.exited) {
+        throw new Error(existing.failureReason || 'efapiao_serve_failed');
+      }
+      // A startup is already in flight for this key; await the SAME promise so we
+      // never spawn a second `efapiao serve` under concurrency.
+      if (existing.startup) return existing.startup;
+    }
   }
 
   const state: ServiceState = { ready: false, failed: false };
@@ -276,7 +328,9 @@ async function ensureService(cfg: Config): Promise<void> {
   serviceStates.set(key, state);
   state.startup = (async () => {
     if (await healthOk(cfg)) {
+      // 外部（非本进程托管）已经在跑的服务：没有子进程可监听，只能按需健康检查。
       state.ready = true;
+      state.everReady = true;
       return;
     }
     const child = spawn(binaryPath(cfg), [
@@ -293,6 +347,7 @@ async function ensureService(cfg: Config): Promise<void> {
     });
     state.child = child;
     child.unref();
+    attachServiceChild(key, child, state);
     await waitForHealth(cfg, child, state);
   })();
   return state.startup;
@@ -443,23 +498,57 @@ function runBinary(
   });
 }
 
+function filled(value: string | undefined): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * 按 document type 定义最小有效字段集（APP-14B）。
+ * 顶层 `status:"ok"` 但结构为空/关键字段缺失时不能算识别成功，否则这份文档会从
+ * 待处理和失败工作量里同时消失，重跑还会被当作已完成而跳过。
+ * 返回空字符串表示通过，否则返回可读的缺失说明。
+ */
+function missingCoreFields(documentType: DocumentType, fields: Partial<InvoiceFields>): string {
+  const present = [
+    filled(fields.invoiceNo) ? 'invoiceNo' : '',
+    filled(fields.seller) ? 'seller' : '',
+    filled(fields.amount) ? 'amount' : '',
+    filled(fields.date) ? 'date' : '',
+  ].filter(Boolean);
+  if (present.length === 0) return 'no_fields';
+  if (documentType === 'invoice') {
+    // 发票至少要有票号，或者「销售方 + 金额」这一组可对账的字段。
+    if (filled(fields.invoiceNo)) return '';
+    if (filled(fields.seller) && filled(fields.amount)) return '';
+    return 'need_invoiceNo_or_seller_and_amount';
+  }
+  if (documentType === 'itinerary') {
+    // 行程单不一定有票号，但至少要有两项可用字段才有归档价值。
+    return present.length >= 2 ? '' : 'need_two_of_invoiceNo_seller_amount_date';
+  }
+  return '';
+}
+
 function okResult(payload: EfapiaoPayload, fallbackDocumentType: DocumentType, transport: 'cli' | 'http'): OcrResult {
   const data = payload.data ?? {};
   const source = nestedRecord(data, 'source');
   const documentTypeRaw = stringValue(data.document_type) || stringValue(payload.document_type);
   const invoiceType = stringValue(data.invoice_type) || stringValue(payload.invoice_type);
   const sourceFormat = stringValue(source.format) || stringValue(payload.format);
+  const fields: Partial<InvoiceFields> = {
+    seller: nestedName(data.seller),
+    amount: stringValue(data.amount_with_tax) || stringValue(data.amount_without_tax),
+    date: stringValue(data.issue_date),
+    invoiceNo: stringValue(data.invoice_number) || stringValue(data.invoice_code),
+    documentType: documentTypeFromEfapiao(documentTypeRaw, fallbackDocumentType),
+    invoiceType,
+  };
+  const missing = missingCoreFields(fields.documentType ?? fallbackDocumentType, fields);
   return {
-    status: 'success',
-    fields: {
-      seller: nestedName(data.seller),
-      amount: stringValue(data.amount_with_tax) || stringValue(data.amount_without_tax),
-      date: stringValue(data.issue_date),
-      invoiceNo: stringValue(data.invoice_number) || stringValue(data.invoice_code),
-      documentType: documentTypeFromEfapiao(documentTypeRaw, fallbackDocumentType),
-      invoiceType,
-    },
-    error: '',
+    // 字段不完整时给出明确的 partial 状态，保留已解析字段供人工复核。
+    status: missing ? 'partial' : 'success',
+    fields,
+    error: missing ? `efapiao_incomplete_result:${missing}` : '',
     source: {
       format: sourceFormat === 'ofd' || sourceFormat === 'image' ? sourceFormat : 'pdf',
       parserVersion: stringValue(source.parser_version),

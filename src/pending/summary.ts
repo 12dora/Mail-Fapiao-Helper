@@ -12,7 +12,23 @@ export interface PendingRow {
   date: string;
   from: string;
   subject: string;
+  /** 兼容字段：与 machineReason 相同，已做脱敏，不适合直接展示给用户。 */
   reason: string;
+  /** 诊断用的机器原因；URL 已去掉 query/fragment。 */
+  machineReason: string;
+  /** 面向用户的原因分类。 */
+  category: string;
+  /** 面向用户的说明。 */
+  userMessage: string;
+  /** 面向用户的下一步操作。 */
+  nextStep: string;
+}
+
+/** 面向用户的文案，与机器 reason 分离（COPY-05）。 */
+export interface PendingCopy {
+  category: string;
+  userMessage: string;
+  nextStep: string;
 }
 
 export interface PendingGroup {
@@ -20,7 +36,13 @@ export interface PendingGroup {
   title: string;
   count: number;
   action: PendingAction;
+  /** 兼容字段：等于 userMessage，只放用户能看懂的说明。 */
   description: string;
+  category: string;
+  userMessage: string;
+  nextStep: string;
+  /** 组内真实行数（rows 不做任何截断，因此与 count 一致）。 */
+  total: number;
   rows: PendingRow[];
 }
 
@@ -30,100 +52,137 @@ export interface PendingSummary {
   groups: PendingGroup[];
 }
 
+/**
+ * 机器 reason 脱敏（COPY-05）：签名 URL 的 query/fragment 常带 token，
+ * 复制或分享待确认信息时不应把它带出去。
+ */
+function sanitizeMachineReason(reason: string): string {
+  const redacted = reason.replace(/https?:\/\/[^\s,;"'）)]+/gi, (url) => {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    } catch {
+      return url.split('#')[0]?.split('?')[0] ?? url;
+    }
+  });
+  return redacted.length > 300 ? `${redacted.slice(0, 300)}…` : redacted;
+}
+
 function rowFromRaw(raw: Record<string, string>): PendingRow {
   const messageId = raw.messageId ?? '';
   const date = raw.date ?? '';
   const from = raw.from ?? '';
   const subject = raw.subject ?? '';
+  const machineReason = sanitizeMachineReason(raw.reason ?? '');
   return {
     hash: msgIdHash(messageId || undefined, from, date, subject),
     messageId,
     date,
     from,
     subject,
-    reason: raw.reason ?? '',
+    reason: machineReason,
+    machineReason,
+    category: '',
+    userMessage: '',
+    nextStep: '',
   };
 }
 
-function classifyPending(row: PendingRow): Omit<PendingGroup, 'count' | 'rows'> {
-  const reason = row.reason.toLowerCase();
+type PendingGroupInfo = Omit<PendingGroup, 'count' | 'total' | 'rows'>;
+
+/** 用面向用户的三段文案组装分组信息；description 保留为兼容字段。 */
+function group(
+  key: string,
+  title: string,
+  action: PendingAction,
+  copy: PendingCopy,
+): PendingGroupInfo {
+  return { key, title, action, description: copy.userMessage, ...copy };
+}
+
+/**
+ * 分类只看原始 reason（未脱敏），避免去掉 URL query 后丢失判定关键字；
+ * 对外暴露的仍然是脱敏后的 machineReason 和用户文案。
+ */
+function classifyPending(row: PendingRow, rawReason: string): PendingGroupInfo {
+  const reason = rawReason.toLowerCase();
   const from = row.from.toLowerCase();
   const subject = row.subject.toLowerCase();
 
   if (reason.includes('download_failed') || reason.includes('http_403') || reason.includes('403')) {
     if (from.includes('alitrip') || subject.includes('飞猪')) {
-      return {
-        key: 'expired_fliggy_link',
-        title: '飞猪/接送机历史链接过期',
-        action: 'refresh_link',
-        description: '历史 PDF 链接多为签名 URL，403 后自动重试价值低；GUI 应提供重新授权、刷新链接或手动归档入口。',
-      };
+      return group('expired_fliggy_link', '飞猪/接送机历史链接过期', 'refresh_link', {
+        category: '链接已过期',
+        userMessage: '邮件里的发票下载链接已失效，无法自动获取发票。',
+        nextStep: '请到飞猪或对应出行平台重新下载发票，再用「选择文件归档」上传。',
+      });
     }
-    return {
-      key: 'expired_or_failed_download',
-      title: '下载失败或链接过期',
-      action: 'refresh_link',
-      description: '下载入口存在但当前不可取，优先让用户刷新授权或手动上传已下载文件。',
-    };
+    return group('expired_or_failed_download', '下载失败或链接过期', 'refresh_link', {
+      category: '下载失败',
+      userMessage: '发票下载入口还在，但这次没能取回文件。',
+      nextStep: '可以稍后重试；如果仍然失败，请到开票平台下载后手动上传。',
+    });
   }
 
   if (reason.includes('huawei_travel_query_failed:130071003')) {
-    return {
-      key: 'expired_huawei_travel',
-      title: '慧通差旅链接过期',
-      action: 'refresh_link',
-      description: '平台返回链接超过有效期，需要用户重新授权、重新打开平台，或手动上传发票。',
-    };
+    return group('expired_huawei_travel', '慧通差旅链接过期', 'refresh_link', {
+      category: '链接已过期',
+      userMessage: '慧通差旅的发票链接已超过有效期。',
+      nextStep: '请重新登录慧通差旅获取发票，再用「选择文件归档」上传。',
+    });
   }
 
   if (reason.includes('no_pdf_links')) {
-    return {
-      key: 'no_pdf_links',
-      title: '邮件无直接 PDF 链接',
-      action: 'manual_archive',
-      description: '邮件只包含授权入口、二维码或非 PDF 资源；GUI 应保留打开邮件、复制链接、手动归档入口。',
-    };
+    return group('no_pdf_links', '邮件里没有可直接下载的发票', 'manual_archive', {
+      category: '邮件内无发票文件',
+      userMessage: '这封邮件只有开票入口、二维码或网页链接，没有可以直接下载的发票文件。',
+      nextStep: '请打开邮件按提示自行开票或下载，再用「选择文件归档」上传。',
+    });
   }
 
   if (reason.includes('no_supported_documents_in_attachments')) {
-    return {
-      key: 'no_supported_documents',
-      title: '附件里没有支持文档',
-      action: 'ignore',
-      description: '附件不是 PDF/OFD/ZIP 中的支持文档，默认保持 manual，可由用户确认忽略。',
-    };
+    return group('no_supported_documents', '附件不是发票文件', 'ignore', {
+      category: '附件不是发票文件',
+      userMessage: '附件不是可识别的发票格式（PDF、OFD，或包含它们的压缩包）。',
+      nextStep: '确认这封邮件不含发票后可以忽略；如果确实有发票，请手动上传。',
+    });
   }
 
   if (reason.includes('network_retry_failed')) {
-    return {
-      key: 'network_retry_failed',
-      title: '网络重试耗尽',
-      action: 'retry',
-      description: '更像临时网络或服务端失败，GUI 应提供重新处理当前邮件。',
-    };
+    return group('network_retry_failed', '网络连接失败', 'retry', {
+      category: '网络问题',
+      userMessage: '多次尝试后仍然连不上开票网站。',
+      nextStep: '请检查网络或稍后重新处理这封邮件。',
+    });
   }
 
-  return {
-    key: 'manual',
-    title: '其他待人工处理',
-    action: 'manual_archive',
-    description: '尚无明确自动化策略，保留原始邮件与 reason 供人工判断。',
-  };
+  return group('manual', '需要人工确认', 'manual_archive', {
+    category: '需要人工确认',
+    userMessage: '这封邮件暂时无法自动处理。',
+    nextStep: '请打开原始邮件确认发票获取方式，必要时手动上传发票文件。',
+  });
 }
 
 export function summarizePending(cfg: Config, cwd: string = process.cwd()): PendingSummary {
   const csvPath = path.join(path.resolve(cwd, cfg.paths.pending), 'pending.csv');
-  const rows = readCsvRows(csvPath).map(rowFromRaw);
+  const rows: PendingRow[] = [];
   const byKey = new Map<string, PendingGroup>();
 
-  for (const row of rows) {
-    const groupInfo = classifyPending(row);
+  for (const raw of readCsvRows(csvPath)) {
+    const row = rowFromRaw(raw);
+    const groupInfo = classifyPending(row, raw.reason ?? '');
+    row.category = groupInfo.category;
+    row.userMessage = groupInfo.userMessage;
+    row.nextStep = groupInfo.nextStep;
+    rows.push(row);
     const existing = byKey.get(groupInfo.key);
     if (existing) {
+      // 组内不做任何截断：第 7 条及以后的待确认项同样必须可达（UI-01）。
       existing.rows.push(row);
       existing.count++;
+      existing.total++;
     } else {
-      byKey.set(groupInfo.key, { ...groupInfo, count: 1, rows: [row] });
+      byKey.set(groupInfo.key, { ...groupInfo, count: 1, total: 1, rows: [row] });
     }
   }
 
