@@ -4,6 +4,50 @@ import { loadConfig, type Config } from '../config.js';
 import { summarizeOcr, type OcrSummary } from '../ocr/summary.js';
 import { summarizePending, type PendingSummary } from '../pending/summary.js';
 import { readCsvRows } from '../util/csv.js';
+import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
+
+/**
+ * 票据库行状态的后端枚举（APP-20）。renderer 必须复用这些常量，
+ * 不要再用「排除识别失败」这类反向判断，那会把待补充/已归档也算成已识别。
+ */
+export const LIBRARY_STATUS = {
+  COMPLETE: '完整',
+  PENDING: '待补充',
+  ARCHIVED: '已归档',
+  FAILED: '识别失败',
+} as const;
+
+export type LibraryStatus = typeof LIBRARY_STATUS[keyof typeof LIBRARY_STATUS];
+
+/** 全部合法状态，供 renderer 生成筛选项。 */
+export const LIBRARY_STATUS_VALUES: readonly LibraryStatus[] = [
+  LIBRARY_STATUS.COMPLETE,
+  LIBRARY_STATUS.PENDING,
+  LIBRARY_STATUS.ARCHIVED,
+  LIBRARY_STATUS.FAILED,
+];
+
+/** 「已识别」= 已经拿到可用发票字段，不含待补充/已归档/识别失败。 */
+export const RECOGNIZED_STATUSES: readonly LibraryStatus[] = [LIBRARY_STATUS.COMPLETE];
+
+/** 「识别失败」筛选集合。 */
+export const FAILED_STATUSES: readonly LibraryStatus[] = [LIBRARY_STATUS.FAILED];
+
+/** 分页参数：默认 limit=500、offset=0；total 始终是切片前的真实总数。 */
+export interface SummaryPageOptions {
+  limit?: number;
+  offset?: number;
+}
+
+const DEFAULT_PAGE_LIMIT = 500;
+
+function pageOf<T>(rows: T[], opts: SummaryPageOptions | undefined): { rows: T[]; offset: number; limit: number } {
+  const rawLimit = Number(opts?.limit);
+  const rawOffset = Number(opts?.offset);
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 0 ? Math.floor(rawLimit) : DEFAULT_PAGE_LIMIT;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.min(Math.floor(rawOffset), rows.length) : 0;
+  return { rows: rows.slice(offset, offset + limit), offset, limit };
+}
 
 export interface InboxRow {
   messageId: string;
@@ -17,12 +61,15 @@ export interface InboxRow {
 
 export interface InboxSummary {
   indexCsv: string;
+  /** 切片前的真实总数。 */
   total: number;
   withAttachment: number;
   withLinks: number;
   earliestMonth: string;
   latestMonth: string;
   rows: InboxRow[];
+  offset: number;
+  limit: number;
 }
 
 export interface InvoiceRow {
@@ -33,7 +80,7 @@ export interface InvoiceRow {
   source: string;
   filename: string;
   filePath: string;
-  status: string;
+  status: LibraryStatus;
   documentType: string;
   invoiceType: string;
   error: string;
@@ -46,6 +93,7 @@ function isArchivedDocument(name: string): boolean {
 export interface LibrarySummary {
   pendingCsv: string;
   resultsCsv: string;
+  /** 切片前的真实总数。 */
   total: number;
   recognized: number;
   failed: number;
@@ -55,6 +103,10 @@ export interface LibrarySummary {
   itinerary: number;
   supporting: number;
   rows: InvoiceRow[];
+  offset: number;
+  limit: number;
+  /** 按后端枚举统计的各状态行数（切片前）。 */
+  statusCounts: Record<LibraryStatus, number>;
   ocr: OcrSummary;
 }
 
@@ -118,7 +170,7 @@ function resolveIn(cwd: string, value: string): string {
   return path.resolve(cwd, value);
 }
 
-export function summarizeInbox(cfg: Config, cwd = process.cwd()): InboxSummary {
+export function summarizeInbox(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): InboxSummary {
   const indexCsv = resolveIn(cwd, path.join(cfg.paths.samples, 'INDEX.csv'));
   const rawRows = readCsvRows(indexCsv);
   const rows = rawRows.map((row): InboxRow => ({
@@ -132,6 +184,7 @@ export function summarizeInbox(cfg: Config, cwd = process.cwd()): InboxSummary {
   })).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
   const months = rows.map((row) => monthFromIso(row.date)).filter(Boolean).sort();
+  const page = pageOf(rows, opts);
   return {
     indexCsv,
     total: rows.length,
@@ -139,7 +192,9 @@ export function summarizeInbox(cfg: Config, cwd = process.cwd()): InboxSummary {
     withLinks: rows.filter((row) => row.bodyLinkCount > 0).length,
     earliestMonth: monthLabel(months[0] ?? ''),
     latestMonth: monthLabel(months[months.length - 1] ?? ''),
-    rows: rows.slice(0, 80),
+    rows: page.rows,
+    offset: page.offset,
+    limit: page.limit,
   };
 }
 
@@ -150,27 +205,37 @@ function money(value: string): string {
   return `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function resultKey(row: Record<string, string>): string {
-  const hash = row.hash ?? '';
-  const source = row.source ?? row.filename ?? '';
-  if (!hash) return `filename\0${row.filename ?? source}`;
-  return `${hash}\0${source}`;
+/** 统一的票据身份（APP-06A）：hash + filename + contentHash，source 仅作回退。 */
+function rowIdentity(row: Record<string, string>): ArtifactIdentity {
+  return {
+    hash: row.hash ?? '',
+    filename: row.filename ?? '',
+    source: row.source ?? '',
+    contentHash: row.contentHash ?? '',
+  };
 }
 
 function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
-  const index = new Map<string, Record<string, string>>();
+  const index = new ArtifactIndex<Record<string, string>>();
   for (const row of rows) {
-    const key = resultKey(row);
-    const existing = index.get(key);
-    const status = (row.status ?? '').toLowerCase();
-    const existingStatus = (existing?.status ?? '').toLowerCase();
-    if (existing && existingStatus === 'success' && status !== 'success') continue;
-    index.set(key, row);
+    index.set(rowIdentity(row), row, (existing, next) => {
+      const existingStatus = (existing.status ?? '').toLowerCase();
+      const nextStatus = (next.status ?? '').toLowerCase();
+      return !(existingStatus === 'success' && nextStatus !== 'success');
+    });
   }
-  return Array.from(index.values());
+  return index.values();
 }
 
-export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySummary {
+/** 结果行 → 后端状态枚举（APP-20）。 */
+function libraryStatusOf(row: Record<string, string>): LibraryStatus {
+  const status = (row.status ?? '').toLowerCase();
+  if (status === 'error') return LIBRARY_STATUS.FAILED;
+  if (status === 'partial') return LIBRARY_STATUS.PENDING;
+  return (row.invoiceNo || row.seller || row.amount) ? LIBRARY_STATUS.COMPLETE : LIBRARY_STATUS.PENDING;
+}
+
+export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): LibrarySummary {
   const ocr = summarizeOcr(cfg, cwd);
   const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
   const rows = resultRows
@@ -182,9 +247,8 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySumma
       source: row.transport === 'http' ? '本机识别' : row.transport || '归档文件',
       filename: row.filename || '',
       filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
-      status: (row.status ?? '').toLowerCase() === 'error'
-        ? '识别失败'
-        : (row.invoiceNo || row.seller || row.amount) ? '完整' : '待补充',
+      // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
+      status: libraryStatusOf(row),
       documentType: row.documentType || '',
       invoiceType: row.invoiceType || '',
       error: row.error || '',
@@ -203,7 +267,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySumma
       source: '归档文件',
       filename,
       filePath: resolveIn(cwd, path.join(cfg.paths.invoices, filename)),
-      status: row.status === 'ignored' ? '已归档' : '待补充',
+      status: row.status === 'ignored' ? LIBRARY_STATUS.ARCHIVED : LIBRARY_STATUS.PENDING,
       documentType: row.documentType || '',
       invoiceType: '',
       error: row.reason || '',
@@ -220,7 +284,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySumma
         source: '归档文件',
         filename: entry.name,
         filePath: resolveIn(cwd, path.join(cfg.paths.invoices, entry.name)),
-        status: '待补充',
+        status: LIBRARY_STATUS.PENDING,
         documentType: '',
         invoiceType: '',
         error: '',
@@ -235,11 +299,20 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySumma
   const supporting = ocr.ignored;
   const invoiceLike = Math.max(0, ocr.recognized - itinerary);
   const archivedTotal = rows.filter((row) => isArchivedDocument(row.filename)).length;
-  const pendingRows = rows.filter((row) => row.status === '待补充').length;
+  const statusCounts = {
+    [LIBRARY_STATUS.COMPLETE]: 0,
+    [LIBRARY_STATUS.PENDING]: 0,
+    [LIBRARY_STATUS.ARCHIVED]: 0,
+    [LIBRARY_STATUS.FAILED]: 0,
+  } as Record<LibraryStatus, number>;
+  for (const row of rows) statusCounts[row.status]++;
+  const pendingRows = statusCounts[LIBRARY_STATUS.PENDING];
+  const page = pageOf(rows, opts);
   return {
     pendingCsv: ocr.pendingCsv,
     resultsCsv: ocr.resultsCsv,
-    total: Math.max(ocr.total, archivedTotal),
+    // total 是切片前的真实总数，renderer 据此判断是否还有下一页。
+    total: Math.max(ocr.total, archivedTotal, rows.length),
     recognized: ocr.recognized,
     failed: ocr.failed,
     ignored: ocr.ignored,
@@ -247,7 +320,10 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd()): LibrarySumma
     invoiceLike,
     itinerary,
     supporting,
-    rows: rows.slice(0, 200),
+    rows: page.rows,
+    offset: page.offset,
+    limit: page.limit,
+    statusCounts,
     ocr,
   };
 }

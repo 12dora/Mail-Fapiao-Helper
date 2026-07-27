@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Config } from '../config.js';
 import type { Logger } from '../log.js';
 import { csvCell, readCsvRows } from '../util/csv.js';
+import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
 export interface OcrResultRow {
   hash: string;
@@ -20,6 +21,7 @@ export interface OcrResultRow {
   invoiceNo: string;
   status: string;
   error: string;
+  contentHash: string;
 }
 
 export interface OrganizeSummary {
@@ -46,6 +48,17 @@ function resultRow(raw: Record<string, string>): OcrResultRow {
     invoiceNo: raw.invoiceNo ?? '',
     status: raw.status ?? '',
     error: raw.error ?? '',
+    contentHash: raw.contentHash ?? '',
+  };
+}
+
+/** 统一的票据身份（APP-06A）：hash + filename + contentHash，source 仅作回退。 */
+function rowIdentity(row: OcrResultRow): ArtifactIdentity {
+  return {
+    hash: row.hash,
+    filename: row.filename,
+    source: row.source,
+    contentHash: row.contentHash,
   };
 }
 
@@ -158,16 +171,15 @@ function resultIsUsable(row: OcrResultRow): boolean {
 }
 
 export function readOcrResults(csvPath: string): OcrResultRow[] {
-  const index = new Map<string, OcrResultRow>();
+  const index = new ArtifactIndex<OcrResultRow>();
   for (const row of readCsvRows(csvPath).map(resultRow)) {
-    const key = `${row.hash}\0${row.source || row.filename}`;
-    const existing = index.get(key);
-    const status = row.status.toLowerCase();
-    const existingStatus = existing?.status.toLowerCase() ?? '';
-    if (existing && existingStatus === 'success' && status !== 'success') continue;
-    index.set(key, row);
+    // 以 filename 为主的统一身份键：同一封邮件里两份同名（source 相同）
+    // 的不同文档不再互相折叠，某张票也不会从整理输出里消失（APP-06A）。
+    index.set(rowIdentity(row), row, (existing, next) => (
+      !(existing.status.toLowerCase() === 'success' && next.status.toLowerCase() !== 'success')
+    ));
   }
-  return Array.from(index.values());
+  return index.values();
 }
 
 export function writeOrganizeAudit(csvPath: string, row: OcrResultRow, outputPath: string, status: string, reason: string): void {

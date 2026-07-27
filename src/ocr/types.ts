@@ -1,6 +1,11 @@
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
 
-export type OcrStatus = 'success' | 'error';
+/**
+ * OCR 结果状态。`partial` 表示服务返回了成功，但按 document type 的最小字段集
+ * 判断结构为空或关键字段缺失（APP-14B）：既不能算识别成功，也不是纯粹的失败，
+ * 需要保留人工复核入口。
+ */
+export type OcrStatus = 'success' | 'partial' | 'error';
 
 export interface InvoiceFields {
   seller: string;

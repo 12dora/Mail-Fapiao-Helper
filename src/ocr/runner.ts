@@ -6,6 +6,8 @@ import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
 import type { OcrResult } from './types.js';
 import { csvCell, parseCsv, readCsvRows } from '../util/csv.js';
+import { contentHash as hashBytes } from '../util/hash.js';
+import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
 interface PendingRow {
   hash: string;
@@ -24,7 +26,6 @@ interface PendingRow {
 
 interface ParseJob {
   row: PendingRow;
-  key: string;
   data: Buffer;
 }
 
@@ -72,19 +73,35 @@ interface ResultStatus {
   error: string;
 }
 
-function readResultIndex(csvPath: string): Map<string, ResultStatus> {
-  const index = new Map<string, ResultStatus>();
+/** 待处理行的统一身份（APP-06A）：hash + filename + contentHash。 */
+function rowIdentity(row: PendingRow): ArtifactIdentity {
+  return {
+    hash: row.hash,
+    filename: row.filename,
+    source: row.source,
+    contentHash: row.contentHash,
+  };
+}
+
+/** 已有 success 结果不被后续 error 覆盖。 */
+function keepSuccess(existing: ResultStatus, next: ResultStatus): boolean {
+  return !(existing.status === 'success' && next.status !== 'success');
+}
+
+function readResultIndex(csvPath: string): ArtifactIndex<ResultStatus> {
+  const index = new ArtifactIndex<ResultStatus>();
   for (const row of readCsvRows(csvPath)) {
-    // Key on the unique numbered filename, not the (possibly non-unique) source,
-    // so two same-named documents from one email are tracked separately.
-    const key = `${row.hash ?? ''}\0${row.filename ?? row.source ?? ''}`;
-    const existing = index.get(key);
-    const status = row.status ?? '';
-    if (existing?.status === 'success' && status !== 'success') continue;
-    index.set(key, {
+    // 用统一身份键索引：同一封邮件里两个同名文档不会互相折叠，
+    // 没有 contentHash 的历史结果行也仍然能被匹配上。
+    index.set({
+      hash: row.hash ?? '',
+      filename: row.filename ?? '',
+      source: row.source ?? '',
+      contentHash: row.contentHash ?? '',
+    }, {
       status: row.status ?? '',
       error: row.error ?? '',
-    });
+    }, keepSuccess);
   }
   return index;
 }
@@ -137,6 +154,8 @@ function resultLine(row: PendingRow, result: OcrResult): string {
     result.source?.ocrVendor ?? '',
     result.status,
     result.error,
+    // 结果行继续携带 contentHash，供摘要/整理做身份校验（APP-06B）。
+    row.contentHash,
   ].map(csvCell).join(',') + '\n';
 }
 
@@ -161,6 +180,7 @@ const RESULT_HEADER = [
   'ocrVendor',
   'status',
   'error',
+  'contentHash',
 ];
 
 function migrateResultCsvIfNeeded(csvPath: string): void {
@@ -202,23 +222,45 @@ function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void
   }
 }
 
+/**
+ * 校验归档字节是否仍与 pending 行记录的 contentHash 一致（APP-06B）。
+ * 通过返回空字符串，否则返回 `content_hash_mismatch:...` 原因。
+ * 历史行没有 contentHash 时无从比对，只能放行（仍会校验读取期间大小未变）。
+ */
+function verifyArchivedBytes(row: PendingRow, filePath: string, data: Buffer): string {
+  const size = fs.statSync(filePath).size;
+  if (size !== data.length) {
+    return `content_hash_mismatch:size_changed:${row.filename}:stat=${size}:read=${data.length}`;
+  }
+  if (!row.contentHash) return '';
+  const actual = hashBytes(data);
+  if (actual === row.contentHash) return '';
+  return `content_hash_mismatch:${row.filename}:expected=${row.contentHash}:actual=${actual}:bytes=${size}`;
+}
+
 function applyOcrResult(
   resultCsv: string,
   row: PendingRow,
-  key: string,
   result: OcrResult,
-  seenResults: Map<string, ResultStatus>,
+  seenResults: ArtifactIndex<ResultStatus>,
   summary: OcrRunSummary,
   log: Logger,
 ): void {
   appendResult(resultCsv, row, result);
-  seenResults.set(key, { status: result.status, error: result.error });
+  seenResults.set(rowIdentity(row), { status: result.status, error: result.error }, keepSuccess);
   if (result.status === 'success') {
     row.status = 'recognized';
     row.reason = '';
     summary.parsed++;
     summary.updated++;
     log.info(`OCR parsed ${row.filename}`);
+  } else if (result.status === 'partial') {
+    // 结构为空/字段不全：保留为待补充，等待人工复核，不计入已识别（APP-14B）。
+    row.status = 'partial';
+    row.reason = result.error;
+    summary.failed++;
+    summary.updated++;
+    log.warn(`OCR partial ${row.filename}: ${result.error}`);
   } else {
     row.status = 'failed';
     row.reason = result.error;
@@ -241,14 +283,36 @@ export async function runOcrPending(
   const resultCsv = cfg.ocr.resultsCsv;
   const rows = readCsvRows(pendingCsv).map(pendingRow);
   const nextRows = rows.map((row) => ({ ...row }));
-  const seenResults = opts.force ? new Map<string, ResultStatus>() : readResultIndex(resultCsv);
+  const seenResults = opts.force ? new ArtifactIndex<ResultStatus>() : readResultIndex(resultCsv);
   const provider = getOcrProvider(cfg);
   const summary: OcrRunSummary = { scanned: rows.length, parsed: 0, skipped: 0, failed: 0, updated: 0 };
   const batch: ParseJob[] = [];
   const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
+  // 行状态一旦变化就标脏，checkpoint() 随即把 pending CSV 落盘：
+  // 结果已 append、pending 却还写着 pending 的中断窗口被压缩到一批之内（APP-14C）。
+  let pendingDirty = false;
 
   function checkpoint(): void {
-    if ((opts.singleItem || concurrency > 1) && nextRows.length > 0) writePendingCsv(pendingCsv, nextRows);
+    if (!pendingDirty || nextRows.length === 0) return;
+    writePendingCsv(pendingCsv, nextRows);
+    pendingDirty = false;
+  }
+
+  /** 只有真的改了状态/原因才标脏，避免对没有变化的行反复重写 CSV。 */
+  function markRow(row: PendingRow, status: string, reason: string): void {
+    if (row.status === status && row.reason === reason) return;
+    row.status = status;
+    row.reason = reason;
+    pendingDirty = true;
+  }
+
+  function record(row: PendingRow, result: OcrResult): void {
+    applyOcrResult(resultCsv, row, result, seenResults, summary, log);
+    pendingDirty = true;
+  }
+
+  function recordFailure(row: PendingRow, error: string): void {
+    record(row, { status: 'error', fields: {}, error, raw: null });
   }
 
   async function flushBatch(): Promise<void> {
@@ -274,30 +338,16 @@ export async function runOcrPending(
         const result = results[i];
         if (!job) continue;
         if (!result) {
-          const error = `ocr_missing_batch_result:${job.row.filename}`;
-          appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
-          seenResults.set(job.key, { status: 'error', error });
-          job.row.status = 'failed';
-          job.row.reason = error;
-          summary.failed++;
-          summary.updated++;
-          log.warn(`OCR failed ${job.row.filename}: ${error}`);
+          recordFailure(job.row, `ocr_missing_batch_result:${job.row.filename}`);
           continue;
         }
-        applyOcrResult(resultCsv, job.row, job.key, result, seenResults, summary, log);
+        record(job.row, result);
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      for (const job of jobs) {
-        appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
-        seenResults.set(job.key, { status: 'error', error });
-        job.row.status = 'failed';
-        job.row.reason = error;
-        summary.failed++;
-        summary.updated++;
-        log.warn(`OCR failed ${job.row.filename}: ${error}`);
-      }
+      for (const job of jobs) recordFailure(job.row, error);
     }
+    checkpoint();
   }
 
   async function processJob(job: ParseJob): Promise<void> {
@@ -307,16 +357,9 @@ export async function runOcrPending(
         documentType: job.row.documentType,
         filename: job.row.filename,
       });
-      applyOcrResult(resultCsv, job.row, job.key, result, seenResults, summary, log);
+      record(job.row, result);
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
-      seenResults.set(job.key, { status: 'error', error });
-      job.row.status = 'failed';
-      job.row.reason = error;
-      summary.failed++;
-      summary.updated++;
-      log.warn(`OCR failed ${job.row.filename}: ${error}`);
+      recordFailure(job.row, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -327,37 +370,30 @@ export async function runOcrPending(
       const item = settled[i];
       const job = jobs[i];
       if (!job || item?.status !== 'rejected') continue;
-      const error = item.reason instanceof Error ? item.reason.message : String(item.reason);
-      appendResult(resultCsv, job.row, { status: 'error', fields: {}, error, raw: null });
-      seenResults.set(job.key, { status: 'error', error });
-      job.row.status = 'failed';
-      job.row.reason = error;
-      summary.failed++;
-      summary.updated++;
-      log.warn(`OCR failed ${job.row.filename}: ${error}`);
+      recordFailure(job.row, item.reason instanceof Error ? item.reason.message : String(item.reason));
     }
+    checkpoint();
   }
 
   for (let i = 0; i < nextRows.length; i++) {
     const row = nextRows[i];
     if (!row) continue;
     if (row.status === 'ignored' || row.documentType === 'supporting') {
-      row.status = 'ignored';
-      row.reason ||= 'supporting_document';
+      markRow(row, 'ignored', row.reason || 'supporting_document');
       summary.skipped++;
       checkpoint();
       continue;
     }
-    const key = `${row.hash}\0${row.filename}`;
-    if (seenResults.has(key)) {
+    const identity = rowIdentity(row);
+    if (seenResults.has(identity)) {
       await flushBatch();
-      const existing = seenResults.get(key);
+      const existing = seenResults.get(identity);
       if (existing?.status === 'success') {
-        row.status = 'recognized';
-        row.reason = 'already_in_results';
+        markRow(row, 'recognized', 'already_in_results');
+      } else if (existing?.status === 'partial') {
+        markRow(row, 'partial', existing.error || 'already_partial_in_results');
       } else if (existing?.status === 'error') {
-        row.status = 'failed';
-        row.reason = existing.error || 'already_failed_in_results';
+        markRow(row, 'failed', existing.error || 'already_failed_in_results');
       }
       summary.skipped++;
       checkpoint();
@@ -367,38 +403,32 @@ export async function runOcrPending(
     const filePath = path.join(cfg.paths.invoices, row.filename);
     if (!fs.existsSync(filePath)) {
       await flushBatch();
-      const error = `missing_file:${filePath}`;
-      appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
-      row.status = 'failed';
-      row.reason = error;
-      seenResults.set(key, { status: 'error', error });
-      summary.failed++;
-      summary.updated++;
+      recordFailure(row, `missing_file:${filePath}`);
       checkpoint();
       continue;
     }
 
     try {
       const data = fs.readFileSync(filePath);
-      batch.push({ row, key, data });
+      // APP-06B：识别前用与归档相同的算法重算内容指纹与大小。文件被替换、
+      // 编号复用或 pending 指向了别的文件时，继续识别会把票 B 的字段写在票 A 的身份下。
+      const mismatch = verifyArchivedBytes(row, filePath, data);
+      if (mismatch) {
+        await flushBatch();
+        recordFailure(row, mismatch);
+        checkpoint();
+        continue;
+      }
+      batch.push({ row, data });
       if (concurrency > 1 && batch.length >= concurrency) {
         const jobs = batch.splice(0, batch.length);
         await flushConcurrent(jobs);
-        checkpoint();
       } else if (batch.length >= (opts.singleItem ? 1 : cfg.ocr.batchSize)) {
         await flushBatch();
-        checkpoint();
       }
     } catch (err) {
       await flushBatch();
-      const error = err instanceof Error ? err.message : String(err);
-      appendResult(resultCsv, row, { status: 'error', fields: {}, error, raw: null });
-      seenResults.set(key, { status: 'error', error });
-      row.status = 'failed';
-      row.reason = error;
-      summary.failed++;
-      summary.updated++;
-      log.warn(`OCR failed ${row.filename}: ${error}`);
+      recordFailure(row, err instanceof Error ? err.message : String(err));
       checkpoint();
     }
   }
