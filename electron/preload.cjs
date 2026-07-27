@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   developerReset: () => ipcRenderer.invoke('mfh:developer-reset'),
   // 当前是否有互斥操作在运行：{ running: null | { kind, jobId, startedAt } }
   getOpState: () => ipcRenderer.invoke('mfh:get-op-state'),
+  // About 页的真实版本与发布通道：{ version, channel, packaged, platform, arch, electron }
+  getAppInfo: () => ipcRenderer.invoke('mfh:get-app-info'),
   onFetchProgress: (callback) => {
     if (typeof callback !== 'function') return;
     ipcRenderer.removeAllListeners('mfh:fetch-progress');

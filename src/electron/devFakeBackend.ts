@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type * as ElectronAPI from 'electron';
 import { csvCell } from '../util/csv.js';
+import { msgIdHash } from '../util/hash.js';
 
 /**
  * 仅供本地开发与 e2e fixture 使用的假后端（CODE-04）。
@@ -59,15 +60,53 @@ function csvText(rows: string[][]): string {
   return `${rows.map((row) => row.map(csvCell).join(',')).join('\n')}\n`;
 }
 
+/**
+ * 固定的两封样例邮件。真实 CLI 的逐封日志用 `msgIdHash`，这里必须用同一个算法，
+ * 否则 fixture 走不到 main 侧的批次还原逻辑（APP-20）。
+ */
+const FAKE_MAILS = [
+  {
+    messageId: '<mfh-e2e-invoice@example.com>',
+    date: '2026-05-21T09:30:00.000Z',
+    from: '国家电网 <noreply@example.com>',
+    subject: '国家电网电子发票通知',
+    mailbox: 'INBOX',
+    hasAttachment: '1',
+    bodyLinkCount: '2',
+  },
+  {
+    messageId: '<mfh-e2e-link@example.com>',
+    date: '2026-05-20T12:00:00.000Z',
+    from: '服务商 <vendor@example.com>',
+    subject: '发票下载链接已过期',
+    mailbox: 'INBOX',
+    hasAttachment: '0',
+    bodyLinkCount: '1',
+  },
+] as const;
+
+function fakeMailHash(mail: (typeof FAKE_MAILS)[number]): string {
+  return msgIdHash(mail.messageId, mail.from, mail.date, mail.subject);
+}
+
 function fakeFetch(ctx: FakeBackendContext): FakeCliResult {
   const paths = fakeConfigPaths(ctx);
   writeFile(path.join(paths.samples, 'INDEX.csv'), csvText([
     ['messageId', 'date', 'from', 'subject', 'mailbox', 'hasAttachment', 'bodyLinkCount'],
-    ['<mfh-e2e-invoice@example.com>', '2026-05-21T09:30:00.000Z', '国家电网 <noreply@example.com>', '国家电网电子发票通知', 'INBOX', '1', '2'],
-    ['<mfh-e2e-link@example.com>', '2026-05-20T12:00:00.000Z', '服务商 <vendor@example.com>', '发票下载链接已过期', 'INBOX', '0', '1'],
+    ...FAKE_MAILS.map((mail) => [
+      mail.messageId, mail.date, mail.from, mail.subject, mail.mailbox, mail.hasAttachment, mail.bodyLinkCount,
+    ]),
   ]));
-  writeFile(path.join(paths.samples, '2026-05', 'mfh-e2e-invoice.eml'), 'Subject: 国家电网电子发票通知\n\nfake invoice mail\n');
-  return { code: 0, stdout: 'saved mfh-e2e-invoice.eml\ndone: seen=2 saved=2 skippedKnown=0\n', stderr: '' };
+  writeFile(path.join(paths.samples, '2026-05', `${fakeMailHash(FAKE_MAILS[0])}.eml`), 'Subject: 国家电网电子发票通知\n\nfake invoice mail\n');
+  return {
+    code: 0,
+    stdout: [
+      ...FAKE_MAILS.map((mail) => `saved ${fakeMailHash(mail)} subject="${mail.subject}"`),
+      `done: seen=${FAKE_MAILS.length} saved=${FAKE_MAILS.length} repaired=0 skippedKnown=0 dryRun=false`,
+      '',
+    ].join('\n'),
+    stderr: '',
+  };
 }
 
 function fakePipeline(ctx: FakeBackendContext): FakeCliResult {
@@ -83,9 +122,9 @@ function fakePipeline(ctx: FakeBackendContext): FakeCliResult {
   return {
     code: 0,
     stdout: [
-      'Processed mfh-e2e-invoice: 2 documents',
-      'Processed mfh-e2e-link: 1 documents',
-      'Run complete: processed=2, skipped=0, failed=0',
+      `Processed ${fakeMailHash(FAKE_MAILS[0])}: 2 documents`,
+      `Processed ${fakeMailHash(FAKE_MAILS[1])}: 1 documents`,
+      'Run complete: processed=2, partial=0, skipped=0, failed=0',
       '',
     ].join('\n'),
     stderr: '',
