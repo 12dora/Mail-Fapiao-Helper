@@ -1,19 +1,10 @@
 import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
-import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { handlers } from '../sites/registry.js';
-import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
+import { preferPdfOverDuplicateOfd } from './documentIdentity.js';
 import { assertPublicUrl, assertPublicResponse, readCappedBuffer } from '../util/net.js';
-
-function cleanLink(url: string): string {
-  let cleaned = url
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, '')
-    .trim();
-  const cut = cleaned.search(/[，。；、）】》\u3000]/);
-  if (cut >= 0) cleaned = cleaned.slice(0, cut);
-  return cleaned.replace(/[),.;]+$/g, '');
-}
+import { normalizeExtractedUrls } from '../util/url.js';
 
 function extractLinksFromHtml(html: string): string[] {
   const links: string[] = [];
@@ -175,27 +166,6 @@ function documentFormat(data: Buffer, source: string): 'pdf' | 'ofd' {
   return source.toLowerCase().includes('/ofd/') || source.toLowerCase().endsWith('.ofd') ? 'ofd' : 'pdf';
 }
 
-function looksLikeItinerary(value: string | undefined): boolean {
-  return looksLikeItineraryText(value);
-}
-
-function looksLikeOfdItinerary(value: string | undefined): boolean {
-  return looksLikeOfdItineraryText(value);
-}
-
-function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], subject: string | undefined, log: Ctx['log']): PdfArtifact[] {
-  const hasPdf = artifacts.some((item) => (item.format ?? 'pdf') === 'pdf');
-  if (!hasPdf) return artifacts;
-
-  return artifacts.filter((item) => {
-    if (item.format !== 'ofd') return true;
-    const text = `${item.suggestedName || ''} ${item.source}`;
-    if (looksLikeOfdItinerary(text) || looksLikeOfdItinerary(subject)) return true;
-    log.debug(`Filtered likely duplicate OFD invoice ${item.source}; keeping PDF from same mail`);
-    return false;
-  });
-}
-
 function extractLinks(mail: ParsedMail): string[] {
   const links: string[] = [];
   if (typeof mail.html === 'string') {
@@ -203,20 +173,31 @@ function extractLinks(mail: ParsedMail): string[] {
     links.push(...extractLinksFromText(mail.html));
   }
   if (typeof mail.text === 'string') links.push(...extractLinksFromText(mail.text));
-  return Array.from(new Set(links.map(cleanLink)));
+  // 与 thirdParty 共用 URL normalizer：中文句末标点会被剥离，`new URL()` 校验
+  // 不通过的 token 直接丢弃（APP-10A）。
+  return normalizeExtractedUrls(links);
+}
+
+/** 已被站点处理器认领的链接由 thirdParty 负责，直链流程只处理其余链接。 */
+function isSiteHandlerLink(link: string): boolean {
+  return handlers.some((handler) => handler.match(link));
+}
+
+function plainLinks(mail: ParsedMail): string[] {
+  return extractLinks(mail).filter((link) => !isSiteHandlerLink(link));
 }
 
 const directLinkExtractor: Extractor = {
   name: 'directLink',
 
+  // 只要邮件里存在“没有被站点处理器认领”的链接就参与提取。此前只要出现任意一个
+  // 站点链接就整封放弃，导致“站点链接 + 普通直链”的邮件漏掉直链那张票（APP-01）。
   canHandle(mail: ParsedMail): boolean {
-    const links = extractLinks(mail);
-    if (links.length === 0) return false;
-    return links.every((link) => !handlers.some((handler) => handler.match(link)));
+    return plainLinks(mail).length > 0;
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
-    const links = extractLinks(mail);
+    const links = plainLinks(mail);
 
     if (links.length === 0) {
       return { kind: 'manual', reason: 'directLink:no_links' };
@@ -224,12 +205,9 @@ const directLinkExtractor: Extractor = {
 
     const pdfCandidates: string[] = [];
     const networkFailures: string[] = [];
+    const issues: ExtractIssue[] = [];
 
     for (const link of links) {
-      if (!link.startsWith('http://') && !link.startsWith('https://')) {
-        continue;
-      }
-
       if (isPdfUrl(link)) {
         pdfCandidates.push(link);
         continue;
@@ -255,6 +233,8 @@ const directLinkExtractor: Extractor = {
           pdfCandidates.push(link);
         }
       } catch (err) {
+        // HEAD 探测失败只说明“无法确认这是 PDF”，与正文里的营销链接无异，不作为
+        // 部分失败上报；只有当整封邮件一个候选都没有时才由下面的分支抛出。
         const msg = err instanceof Error ? err.message : String(err);
         networkFailures.push(msg);
         ctx.log.warn(`PDF probe failed after retries for ${link}: ${msg}`);
@@ -281,10 +261,12 @@ const directLinkExtractor: Extractor = {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         networkFailures.push(msg);
+        issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true });
         ctx.log.warn(`PDF download failed after retries for ${url}: ${msg}`);
         continue;
       }
       if (!data) {
+        issues.push({ reason: `directLink:download_rejected:${url}` });
         ctx.log.warn(`Failed to download ${url}`);
         continue;
       }
@@ -308,7 +290,13 @@ const directLinkExtractor: Extractor = {
       return { kind: 'manual', reason: 'directLink:download_failed' };
     }
 
-    return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, mail.subject, ctx.log) };
+    // 去重只丢弃“可靠匹配到同一张票的 PDF”的那份 OFD，与附件流程共用同一算法：
+    // 不再因为邮件里存在任意 PDF 就删掉不相关的 OFD（APP-02）。
+    return {
+      kind: 'pdf',
+      pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log, mail.subject ?? undefined),
+      issues,
+    };
   },
 };
 

@@ -1,16 +1,10 @@
 import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright';
-import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { handlers } from '../sites/registry.js';
 import type { SiteHandler } from '../sites/types.js';
-
-function cleanLink(url: string): string {
-  return url
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, '')
-    .trim();
-}
+import { normalizeExtractedUrls } from '../util/url.js';
 
 function extractLinksFromHtml(html: string): string[] {
   const links: string[] = [];
@@ -39,7 +33,9 @@ function extractLinks(mail: ParsedMail): string[] {
     links.push(...extractLinksFromText(mail.html));
   }
   if (typeof mail.text === 'string') links.push(...extractLinksFromText(mail.text));
-  return Array.from(new Set(links.map(cleanLink)));
+  // 与 directLink 共用 URL normalizer：此前只解码两个 HTML entity 并 trim，正文里
+  // `...token=abc。` 这类链接会带着句末标点被请求并失败（APP-10A）。
+  return normalizeExtractedUrls(links);
 }
 
 function pdfContentKey(pdf: PdfArtifact): string {
@@ -59,6 +55,8 @@ function isRetryableSiteError(err: unknown): boolean {
   if (msg.startsWith('network_retry_failed:')) return false;
   const lower = msg.toLowerCase();
   return lower.includes('timeout')
+    // per-attempt deadline 在 body 阶段到期时由 readCappedBuffer 抛出（APP-13）。
+    || lower.startsWith('response_timeout')
     || lower.includes('net::err')
     || lower.includes('econnreset')
     || lower.includes('econnrefused')
@@ -101,10 +99,23 @@ const thirdPartyExtractor: Extractor = {
     try {
       const pdfs: PdfArtifact[] = [];
       const seenPdfs = new Set<string>();
+      const issues: ExtractIssue[] = [];
       for (const link of extractLinks(mail)) {
         const handler = handlers.find((h) => h.match(link));
         if (!handler) continue;
-        const handled = await handleWithRetry(handler, page, link, ctx);
+        // 逐链接隔离：一个过期/损坏的站点链接不再丢掉已取得和后续的好链接（APP-01）。
+        let handled: PdfArtifact[];
+        try {
+          handled = await handleWithRetry(handler, page, link, ctx);
+        } catch (err) {
+          const msg = errorMessage(err);
+          issues.push({
+            reason: `thirdParty:${handler.name}:${msg}`,
+            retryable: msg.startsWith('network_retry_failed:'),
+          });
+          ctx.log.warn(`Site handler ${handler.name} failed for ${link}: ${msg}`);
+          continue;
+        }
         for (const pdf of handled) {
           const key = pdfContentKey(pdf);
           if (seenPdfs.has(key)) continue;
@@ -114,10 +125,13 @@ const thirdPartyExtractor: Extractor = {
       }
 
       if (pdfs.length === 0) {
-        return { kind: 'manual', reason: 'thirdParty:no_pdfs' };
+        // 全部链接都失败时，把第一条失败原因原样上报，保留
+        // `network_retry_failed:` 前缀供上层做网络失败统计。
+        const first = issues[0];
+        return { kind: 'manual', reason: first ? first.reason : 'thirdParty:no_pdfs' };
       }
 
-      return { kind: 'pdf', pdfs };
+      return { kind: 'pdf', pdfs, issues };
     } finally {
       await page.close();
     }

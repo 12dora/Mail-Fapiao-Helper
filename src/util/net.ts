@@ -4,6 +4,38 @@ import { lookup } from 'node:dns/promises';
 /** Per-document / per-response memory cap. Mirrors the 50MB invariant in ARCHITECTURE.md (R4). */
 export const MAX_DOC_BYTES = 50 * 1024 * 1024;
 
+/** `network.timeoutMs` 缺失或非法时的兜底 per-attempt deadline。 */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * 为单次 HTTP 尝试构造 deadline signal（APP-13）。
+ *
+ * 该 signal 会同时挂在 request 与 `Response.body` 上，所以 header 阶段“接受连接
+ * 但不发完响应头”和 body 阶段“持续滴流”都会在 `timeoutMs` 后被中止并释放 socket；
+ * 调用方自带的 signal（若有）会与 deadline 合并。
+ */
+export function attemptDeadlineSignal(
+  existing: AbortSignal | null | undefined,
+  timeoutMs: number,
+): AbortSignal | undefined {
+  const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
+  const deadline = AbortSignal.timeout(ms);
+  if (!existing) return deadline;
+  return AbortSignal.any([existing, deadline]);
+}
+
+/** 判断一个错误是否来自 per-attempt deadline / abort，用于决定是否重试。 */
+export function isTimeoutError(err: unknown): boolean {
+  if (!err) return false;
+  const name = (err as { name?: string }).name;
+  if (name === 'TimeoutError' || name === 'AbortError') return true;
+  const cause = (err as { cause?: unknown }).cause;
+  const causeName = cause ? (cause as { name?: string }).name : undefined;
+  if (causeName === 'TimeoutError' || causeName === 'AbortError') return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timed out|timeout|operation was aborted|the operation was aborted/i.test(msg);
+}
+
 function ipv4Blocked(ip: string): boolean {
   const parts = ip.split('.').map(Number);
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
@@ -157,17 +189,24 @@ export async function readCappedBuffer(response: Response, cap = MAX_DOC_BYTES):
   const reader = body.getReader();
   const chunks: Buffer[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      total += value.byteLength;
-      if (total > cap) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`response_too_large:${total}`);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > cap) {
+          throw new Error(`response_too_large:${total}`);
+        }
+        chunks.push(Buffer.from(value));
       }
-      chunks.push(Buffer.from(value));
     }
+  } catch (err) {
+    // per-attempt deadline 到期会在 body 读取中途 abort：主动取消 reader 释放
+    // socket，并转成明确的超时错误，便于上层形成可读的 pending reason（APP-13）。
+    await reader.cancel().catch(() => {});
+    if (isTimeoutError(err)) throw new Error(`response_timeout:${total}`);
+    throw err;
   }
   return Buffer.concat(chunks);
 }
