@@ -1,13 +1,21 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { simpleParser } from 'mailparser';
+import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { chromium, type Browser } from 'playwright';
 import { loadConfig, type Config } from './config.js';
-import { fetchMails, type RawMail } from './mail/fetcher.js';
+import { fetchMails, missingImapCredentials, parseMailWithGuards, type RawMail } from './mail/fetcher.js';
 import { nonInvoiceReason } from './mail/exclude.js';
 import { log } from './log.js';
-import { loadState, saveState, StateWriteError, type State } from './state.js';
+import {
+  ensureSecureDir,
+  fileExistsNonEmpty,
+  secureFileMode,
+  StateStore,
+  StateWriteError,
+  uniqueTempPath,
+  type State,
+} from './state.js';
+import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
 import { msgIdHash } from './util/hash.js';
 import { processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
@@ -24,11 +32,12 @@ Usage:
   mfh <command> [options]
 
 Commands:
-  fetch    Fetch matching mails as .eml into samples/raw/
-  run      Process emails and extract invoices
-  ocr      Run OCR for archived documents
-  pending  Inspect manual processing queue
-  organize Copy archived invoices into optional OCR-based names/folders
+  fetch          Fetch matching mails as .eml into samples/raw/
+  run            Process emails and extract invoices
+  ocr            Run OCR for archived documents
+  pending        Inspect manual processing queue
+  organize       Copy archived invoices into optional OCR-based names/folders
+  rebuild-state  Rebuild state.json from INDEX/cache/invoices.csv (no data deleted)
 
 Options:
   -h, --help    Show this help
@@ -36,22 +45,43 @@ Options:
 Run 'mfh <command> --help' for command-specific options.
 `;
 
+/**
+ * 网页自动下载所用的浏览器（APP-19）。
+ *
+ * 应用**不会**自动准备或下载浏览器：桌面版优先使用系统已安装的 Chrome / Edge，
+ * 开发环境才可能命中 Playwright 自带的 Chromium。`playwright.browserManagement`
+ * 仅作兼容读取，不参与这里的决策，也不代表任何「由应用准备」的承诺。
+ */
 async function launchBrowser(cfg: Config): Promise<Browser> {
   const launchOptions = {
     headless: cfg.playwright.headless,
     timeout: cfg.playwright.timeoutMs,
   };
   const desktopApp = process.env.MFH_APP_ROOT || process.env.MFH_RESOURCE_ROOT;
-  if (desktopApp) {
-    for (const channel of ['chrome', 'msedge'] as const) {
-      try {
-        return await chromium.launch({ ...launchOptions, channel });
-      } catch {
-        // Try the next installed system browser before falling back.
-      }
+  const failures: string[] = [];
+  const attempts: Array<() => Promise<Browser>> = desktopApp
+    ? [
+      () => chromium.launch({ ...launchOptions, channel: 'chrome' }),
+      () => chromium.launch({ ...launchOptions, channel: 'msedge' }),
+      () => chromium.launch(launchOptions),
+    ]
+    : [
+      () => chromium.launch(launchOptions),
+      () => chromium.launch({ ...launchOptions, channel: 'chrome' }),
+      () => chromium.launch({ ...launchOptions, channel: 'msedge' }),
+    ];
+  for (const attempt of attempts) {
+    try {
+      return await attempt();
+    } catch (err) {
+      failures.push(err instanceof Error ? err.message : String(err));
     }
   }
-  return chromium.launch(launchOptions);
+  throw new Error(
+    '网页自动下载需要浏览器，但本机没有找到可用的 Chrome 或 Microsoft Edge。'
+    + '本应用不会自动下载浏览器，请先安装最新版 Chrome 或 Microsoft Edge 后重试。'
+    + `原始错误：${failures[failures.length - 1] ?? 'unknown'}`,
+  );
 }
 
 const PENDING_USAGE = `mfh pending — inspect manual processing queue
@@ -125,6 +155,27 @@ Notes:
   * --since / --until take precedence over --since-days (and the corresponding
     config fields). You can use either bound alone.
   * Both bounds accept whole-day dates (YYYY-MM-DD) or full ISO timestamps.
+  * YYYY-MM-DD is interpreted in the LOCAL calendar: --until 2026-07-27 includes
+    the whole local day. A full ISO timestamp keeps its exact instant and is
+    never widened by 24 hours.
+`;
+
+const REBUILD_STATE_USAGE = `mfh rebuild-state — rebuild state.json from on-disk evidence
+
+Usage:
+  mfh rebuild-state [options]
+
+Options:
+  --config <path>      Path to config.json        (default: ./config.json)
+  --state <path>       Path to state.json         (default: ./state.json)
+  --out <dir>          Cached mail dir to scan    (default: config.paths.samples)
+  --dry-run            Only report what would be rebuilt
+  -h, --help           Show this help
+
+Notes:
+  * Only state.json is rewritten. Cached .eml files, INDEX.csv, invoices.csv,
+    archived documents and the pending queue are never deleted or modified.
+  * A corrupt state.json is moved aside to a timestamped .bak first.
 `;
 
 interface FetchOpts {
@@ -179,20 +230,21 @@ function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
     }
     if (a === '--since') {
       const v = requireValue(argv, ++i, a);
-      if (!Number.isFinite(Date.parse(v))) throw new Error(`--since="${v}" is not a parseable date`);
+      if (!isValidDateBound(v)) throw new Error(`--since="${v}" is not a parseable date`);
       opts.sinceOverride = v;
       continue;
     }
     if (a === '--until') {
       const v = requireValue(argv, ++i, a);
-      if (!Number.isFinite(Date.parse(v))) throw new Error(`--until="${v}" is not a parseable date`);
+      if (!isValidDateBound(v)) throw new Error(`--until="${v}" is not a parseable date`);
       opts.untilOverride = v;
       continue;
     }
     throw new Error(`unknown option: ${a}`);
   }
+  // 用与抓取窗口一致的边界解释来比较，避免 date-only 与完整 timestamp 混用时误判。
   if (opts.sinceOverride && opts.untilOverride
-      && Date.parse(opts.sinceOverride) > Date.parse(opts.untilOverride)) {
+      && !boundsAreOrdered(opts.sinceOverride, opts.untilOverride)) {
     throw new Error(`--since must be <= --until`);
   }
   return opts;
@@ -265,22 +317,28 @@ const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLink
 
 function ensureIndexCsv(path: string): void {
   if (existsSync(path)) return;
-  mkdirSync(dirname(path), { recursive: true });
+  ensureSecureDir(dirname(path));
   // UTF-8 BOM so Excel renders CJK correctly.
-  writeFileSync(path, `﻿${INDEX_HEADER}\n`, 'utf8');
+  writeFileSync(path, `﻿${INDEX_HEADER}\n`, { encoding: 'utf8', mode: 0o600 });
+  secureFileMode(path);
 }
 
-function indexContainsMessageId(path: string, messageId: string): boolean {
-  if (!existsSync(path) || messageId.length === 0) return false;
+/**
+ * 一次性读出 INDEX.csv 已有的 messageId 集合。旧实现对每封邮件都重读整表，
+ * 邮件量增大后同样呈二次成本（CODE-07）。
+ */
+function readIndexMessageIds(path: string): Set<string> {
+  const out = new Set<string>();
+  if (!existsSync(path)) return out;
   const text = readFileSync(path, 'utf8').replace(/^﻿/, '');
   const lines = text.split(/\r?\n/);
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line) continue;
     const first = parseCsvLine(line)[0] ?? '';
-    if (first === messageId) return true;
+    if (first.length > 0) out.add(first);
   }
-  return false;
+  return out;
 }
 
 function appendIndexRow(path: string, m: RawMail): void {
@@ -297,10 +355,13 @@ function appendIndexRow(path: string, m: RawMail): void {
 }
 
 function writeEmlAtomic(path: string, data: Buffer): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, data);
+  // 唯一临时名 + POSIX 0700/0600（APP-22）：固定的 `<path>.tmp` 会在多实例并发
+  // 抓取时互相覆盖，默认 umask 又会让邮件原件对同机其他账号可读。
+  ensureSecureDir(dirname(path));
+  const tmp = uniqueTempPath(path);
+  writeFileSync(tmp, data, { mode: 0o600 });
   renameSync(tmp, path);
+  secureFileMode(path);
 }
 
 function monthDir(d: Date): string {
@@ -337,22 +398,34 @@ async function cmdFetch(argv: string[]): Promise<number> {
   if (opts.untilOverride !== undefined) {
     cfg = { ...cfg, filter: { ...cfg.filter, until: opts.untilOverride } };
   }
-  if (cfg.filter.since && cfg.filter.until
-      && Date.parse(cfg.filter.since) > Date.parse(cfg.filter.until)) {
+  if (cfg.filter.since && cfg.filter.until && !boundsAreOrdered(cfg.filter.since, cfg.filter.until)) {
     log.error(`filter.since (${cfg.filter.since}) must be <= filter.until (${cfg.filter.until})`);
     return 2;
   }
-
-  const statePath = resolve(opts.statePath);
-  const state: State = loadState(statePath);
-  const fetched = new Set(state.fetchedHashes);
+  const missingCredentials = missingImapCredentials(cfg);
+  if (missingCredentials.length > 0) {
+    log.error(`尚未配置邮箱：请先在设置中填写 ${missingCredentials.join('、')} 后再抓取邮件。`);
+    return 2;
+  }
 
   const outDir = resolve(opts.outDir ?? cfg.paths.samples);
   const indexCsv = join(outDir, 'INDEX.csv');
   if (!opts.dryRun) ensureIndexCsv(indexCsv);
+  const indexedMessageIds = readIndexMessageIds(indexCsv);
+
+  const statePath = resolve(opts.statePath);
+  let store: StateStore;
+  try {
+    store = StateStore.open(statePath);
+    await recoverQuarantinedState(store, cfg, outDir);
+  } catch (e) {
+    log.error((e as Error).message);
+    return 1;
+  }
 
   let seen = 0;
   let saved = 0;
+  let repaired = 0;
   let skippedKnown = 0;
 
   try {
@@ -364,40 +437,58 @@ async function cmdFetch(argv: string[]): Promise<number> {
         mail.date.toISOString(),
         mail.subject,
       );
-      if (fetched.has(hash)) {
+      // APP-11：先解析预期的 .eml 目标路径，只有 state 命中**且**文件存在且非空
+      // 才跳过。否则换缓存目录 / 删除样本后，state 会谎称邮件已知，新目录永远为空。
+      const emlPath = join(outDir, monthDir(mail.date), `${hash}.eml`);
+      const cached = fileExistsNonEmpty(emlPath);
+      if (store.hasFetched(hash) && cached) {
         skippedKnown++;
         continue;
       }
-      const emlPath = join(outDir, monthDir(mail.date), `${hash}.eml`);
 
       if (opts.dryRun) {
-        log.info(`[dry-run] would save ${emlPath} (subject="${mail.subject}")`);
+        const why = store.hasFetched(hash) ? '(state 已记录但缓存缺失，需要重新抓取)' : '';
+        log.info(`[dry-run] would save ${emlPath} (subject="${mail.subject}")${why}`);
         continue;
       }
 
-      if (!existsSync(emlPath)) {
+      if (!cached) {
+        if (store.hasFetched(hash)) {
+          repaired++;
+          log.info(`cached eml missing/empty, re-fetching ${hash}: ${emlPath}`);
+        }
         writeEmlAtomic(emlPath, mail.raw);
       } else {
         log.info(`eml exists, skip write: ${emlPath}`);
       }
 
+      // 缓存补写后同样修复 INDEX，避免出现「文件在但索引缺行」的空目录假象。
       const midKey = mail.messageId ?? '';
-      if (midKey.length === 0 || !indexContainsMessageId(indexCsv, midKey)) {
+      if (midKey.length === 0 || !indexedMessageIds.has(midKey)) {
         appendIndexRow(indexCsv, mail);
+        if (midKey.length > 0) indexedMessageIds.add(midKey);
       }
 
-      fetched.add(hash);
-      state.fetchedHashes = Array.from(fetched);
-      saveState(statePath, state);
+      store.addFetched(hash);
+      store.checkpoint();
       saved++;
       log.info(`saved ${hash} subject="${mail.subject}"`);
     }
+    // 命令结束时显式 flush，未达阈值的增量才算真正落盘。
+    store.flush();
   } catch (e) {
+    // 有界批量 checkpoint 必须在致命错误时显式 flush，否则本次已落盘的 .eml 会
+    // 失去对应的 state 记录（CODE-07）。
+    try {
+      store.flush();
+    } catch (flushErr) {
+      log.error(`state flush failed: ${(flushErr as Error).message}`);
+    }
     log.error(`fetch aborted: ${(e as Error).message}`);
     return 1;
   }
 
-  log.info(`done: seen=${seen} saved=${saved} skippedKnown=${skippedKnown} dryRun=${opts.dryRun}`);
+  log.info(`done: seen=${seen} saved=${saved} repaired=${repaired} skippedKnown=${skippedKnown} dryRun=${opts.dryRun}`);
   return 0;
 }
 
@@ -475,6 +566,142 @@ function archivedMessageIdSet(cfg: Config): Set<string> {
     .filter((messageId) => messageId.length > 0));
 }
 
+// ---------------------------------------------------------------------------
+// 状态重建（APP-18A）：只读缓存与台账，不删除任何业务数据
+// ---------------------------------------------------------------------------
+
+/** msgIdHash 的输出形态：12 位小写十六进制。真实 Message-Id 必然含 `@`。 */
+const BARE_HASH_RE = /^[0-9a-f]{12}$/;
+
+/**
+ * 台账行 -> 运行期身份。pipeline 写 CSV 时 messageId 取 `mail.messageId || hash`，
+ * 所以看起来就是裸 hash 的行直接采用，其余按同一个 msgIdHash 重算。
+ */
+function hashFromLedgerRow(row: Record<string, string>): string {
+  const messageId = row.messageId ?? '';
+  if (BARE_HASH_RE.test(messageId)) return messageId;
+  return msgIdHash(
+    messageId.length > 0 ? messageId : undefined,
+    row.from ?? '',
+    row.date ?? '',
+    row.subject ?? '',
+  );
+}
+
+/**
+ * 缓存 .eml 的文件名就是 fetch 身份，因此这是唯一可信的 fetched 证据来源：
+ * 文件不在（或为空）就不该记为已抓取，否则又会回到 APP-11 的空目录假象。
+ */
+async function fetchedHashesFromCache(samplesDir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const emlPath of await collectEmlPaths(samplesDir)) {
+    if (!fileExistsNonEmpty(emlPath)) continue;
+    const hash = basename(emlPath, '.eml');
+    if (hash.length > 0) out.push(hash);
+  }
+  return out;
+}
+
+/** 从 invoices.csv（已归档）与 pending.csv（已进入待确认）恢复 processed 身份。 */
+function processedHashesFromLedgers(cfg: Config): string[] {
+  const out: string[] = [];
+  for (const row of readCsvRows(resolve(cfg.output.csv))) out.push(hashFromLedgerRow(row));
+  for (const row of readCsvRows(join(resolve(cfg.paths.pending), 'pending.csv'))) {
+    out.push(hashFromLedgerRow(row));
+  }
+  return out.filter((h) => h.length > 0);
+}
+
+async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<State> {
+  return {
+    processedHashes: processedHashesFromLedgers(cfg),
+    fetchedHashes: await fetchedHashesFromCache(samplesDir),
+  };
+}
+
+/**
+ * state.json 损坏时的自动恢复：损坏文件已由 StateStore 隔离到带时间戳的备份，
+ * 这里再从 INDEX/缓存/invoices.csv 重建可恢复身份，让 fetch/run 能继续跑完。
+ */
+async function recoverQuarantinedState(store: StateStore, cfg: Config, samplesDir: string): Promise<void> {
+  if (!store.quarantine) return;
+  log.warn(store.quarantine.message);
+  const rebuilt = await rebuildStateFromDisk(cfg, samplesDir);
+  store.replaceAll(rebuilt);
+  log.info(`state rebuilt from disk: fetched=${store.fetchedCount} processed=${store.processedCount}`);
+}
+
+interface RebuildStateOpts {
+  configPath: string;
+  statePath: string;
+  outDir: string | undefined;
+  dryRun: boolean;
+}
+
+function parseRebuildStateArgs(argv: string[]): RebuildStateOpts | 'help' {
+  const opts: RebuildStateOpts = {
+    configPath: './config.json',
+    statePath: './state.json',
+    outDir: undefined,
+    dryRun: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--dry-run') { opts.dryRun = true; continue; }
+    if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
+    if (a === '--state') { opts.statePath = requireValue(argv, ++i, a); continue; }
+    if (a === '--out') { opts.outDir = requireValue(argv, ++i, a); continue; }
+    throw new Error(`unknown option: ${a}`);
+  }
+  return opts;
+}
+
+async function cmdRebuildState(argv: string[]): Promise<number> {
+  let parsed: RebuildStateOpts | 'help';
+  try {
+    parsed = parseRebuildStateArgs(argv);
+  } catch (e) {
+    process.stderr.write(`${(e as Error).message}\n\n`);
+    process.stderr.write(REBUILD_STATE_USAGE);
+    return 2;
+  }
+  if (parsed === 'help') { process.stdout.write(REBUILD_STATE_USAGE); return 0; }
+
+  let cfg: Config;
+  try {
+    cfg = loadConfig(resolve(parsed.configPath));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 2;
+  }
+
+  const samplesDir = resolve(parsed.outDir ?? cfg.paths.samples);
+  const statePath = resolve(parsed.statePath);
+  try {
+    const rebuilt = await rebuildStateFromDisk(cfg, samplesDir);
+    if (parsed.dryRun) {
+      log.info(`[dry-run] would rebuild ${statePath}: fetched=${new Set(rebuilt.fetchedHashes).size} processed=${new Set(rebuilt.processedHashes).size}`);
+      return 0;
+    }
+    const store = StateStore.open(statePath);
+    if (store.quarantine) log.warn(store.quarantine.message);
+    // 已处理身份只做并集：重建不应让历史上已处理的邮件重新进入处理队列。
+    const existing = store.snapshot();
+    store.replaceAll({
+      processedHashes: [...existing.processedHashes, ...rebuilt.processedHashes],
+      // 已抓取身份必须以缓存文件为准，缺失的条目要允许重新抓取。
+      fetchedHashes: rebuilt.fetchedHashes,
+    });
+    log.info(`state rebuilt: ${statePath} fetched=${store.fetchedCount} processed=${store.processedCount}`);
+    log.info('仅重建了状态文件，缓存邮件、INDEX.csv、invoices.csv、归档文件与待确认队列均未改动。');
+    return 0;
+  } catch (e) {
+    log.error(`rebuild-state failed: ${(e as Error).message}`);
+    return 1;
+  }
+}
+
 async function cmdRun(argv: string[]): Promise<number> {
   let parsed: RunOpts | 'help';
   try {
@@ -496,24 +723,22 @@ async function cmdRun(argv: string[]): Promise<number> {
   }
 
   const statePath = resolve(opts.statePath);
-  const state: State = loadState(statePath);
-  const processedHashes = new Set(state.processedHashes);
+  let store: StateStore;
+  try {
+    store = StateStore.open(statePath);
+    await recoverQuarantinedState(store, cfg, resolve(cfg.paths.samples));
+  } catch (e) {
+    log.error((e as Error).message);
+    return 1;
+  }
   const archivedMessageIds = archivedMessageIdSet(cfg);
 
-  const saveStateFn = () => {
-    state.processedHashes = Array.from(processedHashes);
-    saveState(statePath, state);
-  };
   let browserInstance: Browser | undefined;
   let browserPromise: Promise<Browser> | undefined;
   const getBrowser = async (): Promise<Browser> => {
     if (!browserInstance) {
-      browserPromise ??= launchBrowser(cfg).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(
-          `网页自动下载浏览器启动失败。请安装最新版 Chrome 或 Microsoft Edge 后重试。原始错误：${message}`,
-        );
-      });
+      // launchBrowser() 已经给出准确的中文错误（说明需要系统 Chrome/Edge）。
+      browserPromise ??= launchBrowser(cfg);
       browserInstance = await browserPromise;
     }
     return browserInstance;
@@ -530,7 +755,9 @@ async function cmdRun(argv: string[]): Promise<number> {
 
   const handleEml = async (emlPath: string): Promise<void> => {
     const raw = readFileSync(emlPath);
-    const mail = await simpleParser(raw);
+    // 缓存的 .eml 同样是不可信输入：沿用抓取侧的大小上限、linkify 关闭与解析超时
+    // （APP-09）。超限/超时的邮件计入 failed 并保留在缓存里，不提交任何状态。
+    const mail = await parseMailWithGuards(raw);
 
     const hash = msgIdHash(
       mail.messageId ?? undefined,
@@ -559,19 +786,19 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (excludeReason) {
       log.info(`Excluded ${hash}: ${excludeReason}`);
       processed++;
-      processedHashes.add(hash);
-      saveStateFn();
+      store.addProcessed(hash);
+      store.checkpoint();
       return;
     }
 
     if (opts.onlyMail === undefined && !opts.force && messageId && archivedMessageIds.has(messageId)) {
-      processedHashes.add(hash);
-      saveStateFn();
+      store.addProcessed(hash);
+      store.checkpoint();
       skipped++;
       return;
     }
 
-    if (opts.onlyMail === undefined && !opts.force && processedHashes.has(hash)) {
+    if (opts.onlyMail === undefined && !opts.force && store.hasProcessed(hash)) {
       skipped++;
       return;
     }
@@ -579,16 +806,19 @@ async function cmdRun(argv: string[]): Promise<number> {
     inFlight.add(hash);
     try {
       const taskState: State = {
-        processedHashes: Array.from(processedHashes),
-        fetchedHashes: state.fetchedHashes,
+        // 只带当前邮件的判定所需：pipeline 仅用 `includes(hash)` 判断是否已处理，
+        // 全量复制会让每封邮件都付出 O(n) 复制成本（CODE-07）。
+        processedHashes: store.hasProcessed(hash) ? [hash] : [],
+        // pipeline 不读取 fetchedHashes，无需复制整份集合。
+        fetchedHashes: [],
       };
       const taskSaveState = () => {
-        for (const item of taskState.processedHashes) processedHashes.add(item);
-        saveStateFn();
+        for (const item of taskState.processedHashes) store.addProcessed(item);
+        store.checkpoint();
       };
 
       const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, { force: opts.force || opts.onlyMail !== undefined, raw });
-      for (const item of taskState.processedHashes) processedHashes.add(item);
+      for (const item of taskState.processedHashes) store.addProcessed(item);
       if (result.outcome === 'pdf' && result.messageId.length > 0) {
         archivedMessageIds.add(result.messageId);
       }
@@ -629,7 +859,14 @@ async function cmdRun(argv: string[]): Promise<number> {
     };
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    // 有界批量 checkpoint 之后必须显式 flush，命令结束时状态才算真正落盘。
+    store.flush();
   } catch (e) {
+    try {
+      store.flush();
+    } catch (flushErr) {
+      log.error(`state flush failed: ${(flushErr as Error).message}`);
+    }
     log.error(`run aborted: ${(e as Error).message}`);
     return 1;
   } finally {
@@ -739,6 +976,47 @@ async function cmdOrganize(argv: string[]): Promise<number> {
   return summary.failed > 0 ? 1 : 0;
 }
 
+/**
+ * OCR 运行期 PID 记录（APP-16）。
+ *
+ * Windows 上父进程用 `SIGTERM` 终止本 CLI 时不会执行任何 JS 清理
+ * （等价于 TerminateProcess），而托管的 `efapiao serve` 是 unref 的子进程，
+ * 因此本进程无法保证自己停掉它。这里把 PID 写入文件并打印一行稳定标记，
+ * 让父进程（GUI）可以按 PID 终止整棵进程树。
+ */
+let activeOcrPidFile: string | undefined;
+
+function writeOcrRuntimePid(cfg: Config): void {
+  try {
+    const pidPath = join(resolve(cfg.paths.invoices), 'ocr', '.mfh-ocr-cli.pid');
+    ensureSecureDir(dirname(pidPath));
+    const payload = {
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      serviceHost: cfg.ocr.serviceHost,
+      servicePort: cfg.ocr.servicePort,
+    };
+    writeFileSync(pidPath, `${JSON.stringify(payload)}\n`, { encoding: 'utf8', mode: 0o600 });
+    secureFileMode(pidPath);
+    activeOcrPidFile = pidPath;
+    // 稳定前缀，供父进程解析后做进程树终止（Windows 需要 taskkill /T）。
+    process.stdout.write(`mfh:ocr-cli-pid ${process.pid}\n`);
+  } catch {
+    // PID 记录只是辅助手段，失败不应阻断 OCR。
+  }
+}
+
+function clearOcrRuntimePid(): void {
+  const pidPath = activeOcrPidFile;
+  activeOcrPidFile = undefined;
+  if (!pidPath) return;
+  try {
+    rmSync(pidPath, { force: true });
+  } catch {
+    // best-effort
+  }
+}
+
 async function cmdOcr(argv: string[]): Promise<number> {
   let parsed: OcrOpts | 'help';
   try {
@@ -786,6 +1064,7 @@ async function cmdOcr(argv: string[]): Promise<number> {
       return 0;
     }
 
+    writeOcrRuntimePid(cfg);
     const summary = await runOcrPending(cfg, log, {
       force: parsed.force,
       singleItem: parsed.singleItem,
@@ -800,6 +1079,7 @@ async function cmdOcr(argv: string[]): Promise<number> {
   } finally {
     // Kill any efapiao serve child we started so it does not outlive the CLI.
     stopEfapiaoServices();
+    clearOcrRuntimePid();
   }
 }
 
@@ -821,6 +1101,9 @@ async function main(): Promise<number> {
       return cmdPending(rest);
     case 'organize':
       return cmdOrganize(rest);
+    case 'rebuild-state':
+    case '--rebuild-state':
+      return cmdRebuildState(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n`);
       process.stderr.write(ROOT_USAGE);
@@ -831,15 +1114,34 @@ async function main(): Promise<number> {
 // The GUI kills this CLI with SIGTERM (and users press Ctrl-C = SIGINT). A signal
 // terminates the process without running cmdOcr's `finally`, so an unref'd
 // `efapiao serve` child would be orphaned holding its port. Stop it explicitly.
+//
+// APP-16：Windows 上 `ChildProcess.kill('SIGTERM')` 等价于 TerminateProcess，
+// 不会执行下面任何 JS，所以除了信号处理还必须有 `process.on('exit')` 兜底
+// （覆盖正常结束与未捕获异常两条路径），并由 writeOcrRuntimePid() 记录 PID，
+// 让父进程可以按 PID 终止整棵进程树。
 let shuttingDown = false;
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+function shutdownManagedServices(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopEfapiaoServices();
+  clearOcrRuntimePid();
+}
+
+const SIGNAL_EXIT_CODES: Record<string, number> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+  SIGBREAK: 149,
+};
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGBREAK'] as const) {
   process.on(signal, () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    stopEfapiaoServices();
-    process.exit(signal === 'SIGINT' ? 130 : 143);
+    shutdownManagedServices();
+    process.exit(SIGNAL_EXIT_CODES[signal] ?? 143);
   });
 }
+process.on('exit', () => {
+  shutdownManagedServices();
+});
 
 main().then(
   (code) => process.exit(code),

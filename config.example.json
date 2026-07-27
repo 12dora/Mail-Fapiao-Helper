@@ -1,9 +1,11 @@
 {
+  "_readme": "首次启动会把本文件复制成真实配置，因此 imap.host / imap.user / imap.pass 必须保持为空字符串：空值表示「尚未配置」，请在应用设置里填写自己的邮箱服务器、账号与授权码（不要在这里写示例值或 *** 占位符）。JSON 不支持注释，本字段仅作说明，程序会忽略它。",
+  "schemaVersion": 2,
   "imap": {
-    "host": "imap.example.com",
+    "host": "",
     "port": 993,
-    "user": "me@example.com",
-    "pass": "***",
+    "user": "",
+    "pass": "",
     "tls": true,
     "mailbox": []
   },
@@ -60,17 +62,18 @@
   },
   "llm": {
     "enabled": false,
-    "provider": "anthropic",
-    "model": "claude-haiku-4-5-20251001",
+    "provider": "",
+    "model": "",
     "apiKey": ""
   },
   "playwright": {
     "headless": true,
     "timeoutMs": 30000,
-    "browserManagement": "app-managed"
+    "browserManagement": "system"
   },
   "network": {
     "retries": 3,
-    "retryDelayMs": 1000
+    "retryDelayMs": 1000,
+    "timeoutMs": 30000
   }
 }

@@ -3,6 +3,51 @@ import { simpleParser } from 'mailparser';
 import type { Config } from '../config.js';
 import type { Logger } from '../log.js';
 import { nonInvoiceReason } from './exclude.js';
+import { imapSearchSince, resolveDateWindowFromFilter, type DateWindow } from '../util/dateRange.js';
+
+/**
+ * 不可信邮件的解析防护（APP-09）：
+ * - 超过 RAW_MAIL_PARSE_LIMIT 的原始邮件不进 mailparser，直接按 envelope 降级缓存；
+ * - `skipTextLinks` 关掉 linkify-it（已知二次复杂度路径）对正文的扫描；
+ * - `maxHtmlLengthToParse` 限制 HTML->文本转换的输入规模；
+ * - 解析再加一层超时，避免单封对抗性邮件把抓取循环永久占住。
+ */
+const RAW_MAIL_PARSE_LIMIT = 32 * 1024 * 1024;
+const HTML_PARSE_LIMIT = 8 * 1024 * 1024;
+const PARSE_TIMEOUT_MS = 20_000;
+
+export const MAIL_PARSE_OPTIONS = {
+  skipTextLinks: true,
+  maxHtmlLengthToParse: HTML_PARSE_LIMIT,
+} as const;
+
+/** 带超时的 MIME 解析；超时/失败由调用方降级处理，不得丢邮件。 */
+export async function parseMailWithGuards(
+  raw: Buffer,
+): Promise<Awaited<ReturnType<typeof simpleParser>>> {
+  if (raw.length > RAW_MAIL_PARSE_LIMIT) {
+    throw new Error(`mail_too_large_to_parse:${raw.length}>${RAW_MAIL_PARSE_LIMIT}`);
+  }
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`mail_parse_timeout:${PARSE_TIMEOUT_MS}ms`)), PARSE_TIMEOUT_MS);
+    timer.unref();
+  });
+  try {
+    return await Promise.race([simpleParser(raw, MAIL_PARSE_OPTIONS), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** 返回尚未填写的 IMAP 凭据字段名（COPY-03：空串代表未配置，不是配置损坏）。 */
+export function missingImapCredentials(cfg: Config): string[] {
+  const missing: string[] = [];
+  if (cfg.imap.host.trim().length === 0) missing.push('IMAP 服务器地址');
+  if (cfg.imap.user.trim().length === 0) missing.push('邮箱账号');
+  if (cfg.imap.pass.trim().length === 0) missing.push('邮箱授权码');
+  return missing;
+}
 
 export interface RawMail {
   mailbox: string;
@@ -16,30 +61,21 @@ export interface RawMail {
   bodyLinkCount: number;
 }
 
-export interface DateWindow {
-  since: Date;
-  // IMAP BEFORE is exclusive on the date (treats date-only at 00:00); we
-  // pass the day *after* untilInclusive so the user's --until is inclusive.
-  before: Date | undefined;
-}
+export type { DateWindow };
 
+/**
+ * 抓取窗口 `[since, before)`（APP-07）。date-only 按本地日历解释，完整 ISO
+ * timestamp 保留精确 instant；具体规则见 `src/util/dateRange.ts`。
+ */
 export function resolveDateWindow(cfg: Config, now: Date = new Date()): DateWindow {
-  let since: Date;
-  if (cfg.filter.since) {
-    since = new Date(Date.parse(cfg.filter.since));
-  } else {
-    since = new Date(now.getTime() - cfg.filter.sinceDays * 86_400_000);
-  }
-  let before: Date | undefined;
-  if (cfg.filter.until) {
-    // make --until inclusive by advancing one day
-    before = new Date(Date.parse(cfg.filter.until) + 86_400_000);
-  }
-  return { since, before };
+  return resolveDateWindowFromFilter({
+    since: cfg.filter.since,
+    until: cfg.filter.until,
+    sinceDays: cfg.filter.sinceDays,
+  }, now);
 }
 
-function buildSearch(cfg: Config): SearchObject {
-  const win = resolveDateWindow(cfg);
+function buildSearch(cfg: Config, win: DateWindow): SearchObject {
   const kws = cfg.filter.keywords;
   const fields: Array<'subject' | 'body'> = [];
   if (cfg.filter.matchSubject) fields.push('subject');
@@ -67,7 +103,9 @@ function buildSearch(cfg: Config): SearchObject {
   // return 0 results when an OR'd keyword expression is combined with a
   // `before:` predicate, even though SINCE+OR works fine. We apply the upper
   // bound (`before`) client-side via the per-message date filter below.
-  const out: SearchObject = { ...keywordPart, since: win.since };
+  // 服务端 SINCE 只有「日」粒度，这里放宽到本地午夜避免漏掉当天邮件，精确下界
+  // 仍由下面的客户端过滤按同一个 window 判定。
+  const out: SearchObject = { ...keywordPart, since: imapSearchSince(win) };
   return out;
 }
 
@@ -102,6 +140,10 @@ function countLinks(html: string | false | undefined, text: string | undefined):
 }
 
 export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMail> {
+  const missing = missingImapCredentials(cfg);
+  if (missing.length > 0) {
+    throw new Error(`尚未配置邮箱：请先在设置中填写 ${missing.join('、')} 后再抓取邮件。`);
+  }
   const client = new ImapFlow({
     host: cfg.imap.host,
     port: cfg.imap.port,
@@ -112,8 +154,10 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
 
   await client.connect();
   try {
-    const search = buildSearch(cfg);
+    // IMAP 查询与客户端过滤必须共享同一个窗口对象（APP-07）：先算一次再传下去，
+    // 否则两处各自取 now 会得到不一致的边界。
     const win = resolveDateWindow(cfg);
+    const search = buildSearch(cfg, win);
     const mailboxes = cfg.imap.mailbox.length > 0
       ? cfg.imap.mailbox
       : await listAllMailboxPaths(client);
@@ -144,11 +188,13 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
           const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
           let parsed: Awaited<ReturnType<typeof simpleParser>> | undefined;
           try {
-            parsed = await simpleParser(raw);
+            parsed = await parseMailWithGuards(raw);
           } catch (e) {
             // Degrade instead of dropping: the raw bytes and envelope are still in
             // hand, so cache the .eml (it can be reprocessed later) rather than
             // losing a real invoice email to a MIME-parse failure.
+            // 超限/超时同样走这条降级路径：邮件仍会落到缓存并由 pending 流程接手，
+            // 但绝不把不可信正文交给解析器（APP-09）。
             log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}, falling back to envelope: ${(e as Error).message}`);
             parsed = undefined;
           }
