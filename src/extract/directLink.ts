@@ -105,41 +105,50 @@ async function probePdfContentType(url: string, ctx: Ctx): Promise<boolean> {
   }
 }
 
-async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer | null> {
+/** 下载结果：拿到字节，或一个“不是发票”的软拒绝原因（不构成失败）。 */
+type DownloadOutcome = { data: Buffer } | { rejected: string };
+
+async function downloadPdf(url: string, ctx: Ctx): Promise<DownloadOutcome> {
   try {
     await assertPublicUrl(url);
   } catch (err) {
     ctx.log.warn(`Blocked unsafe URL ${url}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return { rejected: 'blocked_url' };
   }
   let response: Response;
   try {
+    // ctx.http 已经在同一个 attempt 内读完并缓冲了 body（APP-13），因此这里的
+    // network_retry_failed 已经覆盖 header 与 body 两个阶段的超时。
     response = await assertPublicResponse(await ctx.http(url));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.startsWith('blocked_url:')) {
       ctx.log.warn(`Blocked unsafe redirect ${url}: ${msg}`);
-      return null;
+      return { rejected: 'blocked_url' };
+    }
+    if (msg.startsWith('response_too_large:')) {
+      ctx.log.warn(`GET ${url} body rejected: ${msg}`);
+      return { rejected: msg };
     }
     throw err; // network_retry_failed etc. propagate to the caller's retry accounting
   }
   if (!response.ok) {
     ctx.log.debug(`GET ${url} failed: ${response.status}`);
-    return null;
+    return { rejected: `http_${response.status}` };
   }
   let data: Buffer;
   try {
     data = await readCappedBuffer(response);
   } catch (err) {
     ctx.log.warn(`GET ${url} body rejected: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return { rejected: 'body_rejected' };
   }
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('pdf') && data.subarray(0, 4).toString('latin1') !== '%PDF') {
     ctx.log.debug(`GET ${url} was not PDF: ${contentType || 'unknown'}`);
-    return null;
+    return { rejected: 'not_a_document' };
   }
-  return data;
+  return { data };
 }
 
 function suggestFilename(url: string): string {
@@ -178,6 +187,31 @@ function extractLinks(mail: ParsedMail): string[] {
   return normalizeExtractedUrls(links);
 }
 
+/** 没有强 PDF 特征的链接最多探测这么多个，避免营销邮件把 run 拖成线性等待。 */
+const MAX_PROBE_LINKS = 8;
+/** HEAD 探测的有界并发度。 */
+const PROBE_CONCURRENCY = 4;
+
+/** 保序的有界并发 map，用来替代逐链接串行探测。 */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      const item = items[index];
+      if (index >= items.length || item === undefined) return;
+      out[index] = await fn(item);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 /** 已被站点处理器认领的链接由 thirdParty 负责，直链流程只处理其余链接。 */
 function isSiteHandlerLink(link: string): boolean {
   return handlers.some((handler) => handler.match(link));
@@ -200,27 +234,28 @@ const directLinkExtractor: Extractor = {
     const links = plainLinks(mail);
 
     if (links.length === 0) {
-      return { kind: 'manual', reason: 'directLink:no_links' };
+      return { kind: 'not_applicable', reason: 'directLink:no_links' };
     }
 
-    const pdfCandidates: string[] = [];
-    const networkFailures: string[] = [];
-    const issues: ExtractIssue[] = [];
+    // 强 PDF 特征的链接不限量；其余链接只是“可能是发票”，探测数量设上限并做有界
+    // 并发，避免退订/隐私政策/营销链接把处理时间拉成 链接数 × 重试次数 × timeout。
+    const strongCandidates: string[] = [];
+    const probeTargets: string[] = [];
 
     for (const link of links) {
       if (isPdfUrl(link)) {
-        pdfCandidates.push(link);
+        strongCandidates.push(link);
         continue;
       }
 
       const pdfVariant = pdfVariantUrl(link);
       if (pdfVariant) {
-        pdfCandidates.push(pdfVariant);
+        strongCandidates.push(pdfVariant);
         continue;
       }
 
       if (isKnownPdfCandidate(link)) {
-        pdfCandidates.push(link);
+        strongCandidates.push(link);
         continue;
       }
 
@@ -228,24 +263,39 @@ const directLinkExtractor: Extractor = {
         continue;
       }
 
-      try {
-        if (await probePdfContentType(link, ctx)) {
-          pdfCandidates.push(link);
-        }
-      } catch (err) {
-        // HEAD 探测失败只说明“无法确认这是 PDF”，与正文里的营销链接无异，不作为
-        // 部分失败上报；只有当整封邮件一个候选都没有时才由下面的分支抛出。
-        const msg = err instanceof Error ? err.message : String(err);
-        networkFailures.push(msg);
-        ctx.log.warn(`PDF probe failed after retries for ${link}: ${msg}`);
-      }
+      probeTargets.push(link);
     }
 
-    if (pdfCandidates.length === 0) {
-      if (networkFailures.length > 0) {
-        throw new Error(networkFailures[0]);
+    const probedLinks = probeTargets.slice(0, MAX_PROBE_LINKS);
+    if (probeTargets.length > probedLinks.length) {
+      ctx.log.debug(`directLink: probing first ${MAX_PROBE_LINKS} of ${probeTargets.length} links`);
+    }
+
+    // HEAD 探测失败只说明“无法确认这是 PDF”，与正文里的营销链接无异，不作为部分
+    // 失败上报；只有当整封邮件一个候选都没有时才由下面的分支抛出。
+    const probeFailures: string[] = [];
+    const probed = await mapWithConcurrency(probedLinks, PROBE_CONCURRENCY, async (link) => {
+      try {
+        return await probePdfContentType(link, ctx) ? link : null;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        probeFailures.push(msg);
+        ctx.log.warn(`PDF probe failed after retries for ${link}: ${msg}`);
+        return null;
       }
-      return { kind: 'manual', reason: 'directLink:no_pdf_links' };
+    });
+
+    const pdfCandidates = [...strongCandidates, ...probed.filter((link): link is string => link !== null)];
+
+    if (pdfCandidates.length === 0) {
+      if (probeFailures.length > 0) {
+        // 探测失败只说明“无法确认这些链接是不是发票”，不能据此判定漏票：整封邮件
+        // 零产出时 pipeline 会用这个原因写 pending（保留 network_retry_failed 前缀），
+        // 但同一封邮件的附件成功时不会把它降级为部分成功（APP-01）。
+        return { kind: 'not_applicable', reason: `directLink:probe_unavailable:${probeFailures[0]}` };
+      }
+      // 邮件里只有普通链接，没有任何发票线索：本提取器不适用，不是提取失败。
+      return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
     }
 
     const uniquePdfCandidates = Array.from(new Map(pdfCandidates.map((url) => [pdfCandidateKey(url), url])).values());
@@ -253,11 +303,15 @@ const directLinkExtractor: Extractor = {
 
     const pdfs: PdfArtifact[] = [];
     const seenPdfs = new Set<string>();
+    const networkFailures: string[] = [];
+    const issues: ExtractIssue[] = [];
+    // 只在“强特征候选”上把软拒绝算作真实缺票：被探测判定为 PDF 却下不下来同样算。
+    let rejectedCandidates = 0;
 
     for (const url of uniquePdfCandidates) {
-      let data: Buffer | null;
+      let outcome: DownloadOutcome;
       try {
-        data = await downloadPdf(url, ctx);
+        outcome = await downloadPdf(url, ctx);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         networkFailures.push(msg);
@@ -265,12 +319,14 @@ const directLinkExtractor: Extractor = {
         ctx.log.warn(`PDF download failed after retries for ${url}: ${msg}`);
         continue;
       }
-      if (!data) {
-        issues.push({ reason: `directLink:download_rejected:${url}` });
-        ctx.log.warn(`Failed to download ${url}`);
+      if (!('data' in outcome)) {
+        rejectedCandidates++;
+        issues.push({ reason: `directLink:download_rejected:${outcome.rejected}` });
+        ctx.log.warn(`Failed to download ${url}: ${outcome.rejected}`);
         continue;
       }
 
+      const data = outcome.data;
       const key = pdfContentKey(data);
       if (seenPdfs.has(key)) continue;
       seenPdfs.add(key);
@@ -286,6 +342,9 @@ const directLinkExtractor: Extractor = {
     if (pdfs.length === 0) {
       if (networkFailures.length > 0) {
         throw new Error(networkFailures[0]);
+      }
+      if (rejectedCandidates === 0) {
+        return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
       }
       return { kind: 'manual', reason: 'directLink:download_failed' };
     }
