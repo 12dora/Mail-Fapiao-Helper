@@ -547,10 +547,30 @@ function logText(line: string): string {
   return sanitizeText(line.replace(/^\[(info|warn|error|debug)\]\s+\S+\s+/, ''), { maxLength: 240 });
 }
 
+/**
+ * 从 `key=value` 形态的 CLI 汇总行里按字段名取数。CLI 会在汇总行里增删字段
+ * （例如 fetch 新增了 `repaired=`、run 新增了 `partial=`），逐字段解析可以避免
+ * 「多了一个字段就整条终态行不再匹配」——那正好会让 APP-23 修好的终态事件重新丢失。
+ */
+function numField(text: string, key: string): number | undefined {
+  const match = new RegExp(`\\b${key}=(\\d+)\\b`).exec(text);
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * CLI 日志里的邮件身份（msgIdHash 输出形态：12 位小写十六进制）。这些行是主进程
+ * 能拿到的、逐封邮件的**真实**信号，用来拼「本次抓取 / 本次运行」的批次明细
+ * （APP-20）——而不是去 INDEX 里取最后 N 行。
+ */
+const SAVED_MAIL_RE = /\bsaved ([0-9a-f]{12})\b/;
+const PROCESSED_MAIL_RE = /\bProcessed ([0-9a-f]{12}):/;
+const MANUAL_MAIL_RE = /\bManual ([0-9a-f]{12}):/;
+
 interface FetchProgressState {
   seen: number;
   saved: number;
   skipped: number;
+  repaired: number;
 }
 
 interface OcrProgressState {
@@ -566,28 +586,35 @@ interface FileProgressState {
   processed: number;
   skipped: number;
   failed: number;
+  partial: number;
 }
 
 function parseFetchLine(line: string, current: FetchProgressState, emit: ProgressSink): void {
-  const done = /done: seen=(\d+) saved=(\d+) skippedKnown=(\d+)/.exec(line);
-  if (done) {
-    current.seen = Number(done[1]);
-    current.saved = Number(done[2]);
-    current.skipped = Number(done[3]);
+  if (line.includes('done: seen=')) {
+    current.seen = numField(line, 'seen') ?? current.seen;
+    current.saved = numField(line, 'saved') ?? current.saved;
+    current.skipped = numField(line, 'skippedKnown') ?? current.skipped;
+    current.repaired = numField(line, 'repaired') ?? current.repaired;
+    const dryRun = /\bdryRun=true\b/.test(line);
+    const repairedNote = current.repaired > 0 ? `，修复 ${current.repaired} 封缓存缺失的邮件` : '';
     emit({
       percent: 100,
       matched: current.seen,
       saved: current.saved,
       skipped: current.skipped,
+      repaired: current.repaired,
+      dryRun,
       step: '完成',
-      code: 'fetch_done',
-      message: `已保存 ${current.saved} 封新邮件，跳过 ${current.skipped} 封已缓存邮件。`,
+      code: dryRun ? 'fetch_preview_done' : 'fetch_done',
+      message: dryRun
+        ? `预览完成：命中 ${current.seen} 封邮件，本次没有写入本机（预览模式）。`
+        : `已保存 ${current.saved} 封新邮件，跳过 ${current.skipped} 封已缓存邮件${repairedNote}。`,
       kind: 'ok',
       done: true,
     });
     return;
   }
-  if (line.includes('saved ')) {
+  if (SAVED_MAIL_RE.test(line)) {
     current.saved++;
     current.seen = Math.max(current.seen, current.saved + current.skipped);
     emit({
@@ -706,11 +733,12 @@ function sendOcrPhase(message: string, emit: ProgressSink, current?: Partial<Ocr
 function parseFileLine(line: string, current: FileProgressState, emit: ProgressSink): void {
   const text = line.trim();
   if (!text) return;
-  const complete = /Run complete: processed=(\d+), skipped=(\d+), failed=(\d+)/.exec(text);
-  if (complete) {
-    current.processed = Number(complete[1]);
-    current.skipped = Number(complete[2]);
-    current.failed = Number(complete[3]);
+  if (text.includes('Run complete:')) {
+    current.processed = numField(text, 'processed') ?? current.processed;
+    current.skipped = numField(text, 'skipped') ?? current.skipped;
+    current.failed = numField(text, 'failed') ?? current.failed;
+    current.partial = numField(text, 'partial') ?? current.partial;
+    const partialNote = current.partial > 0 ? `，部分成功 ${current.partial} 封` : '';
     emit({
       operation: 'files',
       phase: '获取完成',
@@ -718,9 +746,10 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
       processed: current.processed,
       skipped: current.skipped,
       failed: current.failed,
+      partial: current.partial,
       code: 'files_done',
-      message: `获取完成：处理 ${current.processed} 封，跳过 ${current.skipped} 封，失败 ${current.failed} 封。`,
-      kind: current.failed > 0 ? 'warn' : 'ok',
+      message: `获取完成：处理 ${current.processed} 封${partialNote}，跳过 ${current.skipped} 封，失败 ${current.failed} 封。`,
+      kind: current.failed > 0 || current.partial > 0 ? 'warn' : 'ok',
       done: true,
     });
     return;
@@ -794,6 +823,19 @@ interface RunCliOptions {
   jobId?: string;
 }
 
+/**
+ * 本次运行真正触达的邮件身份（APP-20）。逐行流式收集，而不是事后从 stdout tail
+ * 里回捞——诊断输出是有界 ring buffer，长任务会把早期的 `saved/Processed` 行挤掉。
+ */
+interface RunCliMails {
+  /** fetch：本次新写入本机缓存的邮件。 */
+  saved: string[];
+  /** run：本次真正归档成功的邮件。 */
+  processed: string[];
+  /** run：本次被降级到待确认队列的邮件。 */
+  manual: string[];
+}
+
 interface RunCliResult {
   code: number | null;
   stdout: string;
@@ -801,6 +843,7 @@ interface RunCliResult {
   /** 子进程是否成功启动（spawn 失败时为 false，供 APP-17 判断是否回滚）。 */
   started: boolean;
   spawnError?: UiError;
+  mails: RunCliMails;
 }
 
 function runCli(command: string, args: string[], opts: RunCliOptions = {}): Promise<RunCliResult> {
@@ -808,12 +851,26 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
     const emitFetch = terminalGuard(sendProgress);
     const emitOcr = terminalGuard(sendOperationProgress);
     const emitFiles = terminalGuard(sendFileProgress);
-    const current: FetchProgressState = { seen: 0, saved: 0, skipped: 0 };
+    const current: FetchProgressState = { seen: 0, saved: 0, skipped: 0, repaired: 0 };
     const ocrCurrent: OcrProgressState = { total: opts.initialTotal ?? 0, parsed: 0, failed: 0, skipped: 0, processed: 0, initialized: false };
-    const fileCurrent: FileProgressState = { processed: 0, skipped: 0, failed: 0 };
+    const fileCurrent: FileProgressState = { processed: 0, skipped: 0, failed: 0, partial: 0 };
+    const savedMails = new Set<string>();
+    const processedMails = new Set<string>();
+    const manualMails = new Set<string>();
+    const mails = (): RunCliMails => ({
+      saved: Array.from(savedMails),
+      processed: Array.from(processedMails),
+      manual: Array.from(manualMails),
+    });
 
     const handleLine = (line: string): void => {
       if (!line.trim()) return;
+      const saved = SAVED_MAIL_RE.exec(line);
+      if (saved?.[1]) savedMails.add(saved[1]);
+      const processed = PROCESSED_MAIL_RE.exec(line);
+      if (processed?.[1]) processedMails.add(processed[1]);
+      const manual = MANUAL_MAIL_RE.exec(line);
+      if (manual?.[1]) manualMails.add(manual[1]);
       if (opts.progress) parseFetchLine(line, current, emitFetch);
       if (opts.operation === 'ocr') parseOcrLine(line, ocrCurrent, emitOcr);
       if (opts.operation === 'files') parseFileLine(line, fileCurrent, emitFiles);
@@ -830,7 +887,7 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
         sendFilePhase('正在从本地邮件中获取发票文件。', emitFiles, fileCurrent);
       }
       for (const line of `${fake.stdout}\n${fake.stderr}`.split(/\r?\n/)) handleLine(line);
-      resolve({ ...fake, started: true });
+      resolve({ ...fake, started: true, mails: mails() });
       return;
     }
 
@@ -896,7 +953,7 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       } else if (opts.operation === 'files') {
         emitFiles({ operation: 'files', phase: '获取失败', percent: 100, ...spawnError, kind: 'err', done: true });
       }
-      resolve({ code: null, stdout: '', stderr: spawnError.detail ?? '', started: false, spawnError });
+      resolve({ code: null, stdout: '', stderr: spawnError.detail ?? '', started: false, spawnError, mails: mails() });
     });
 
     child.on('close', (code) => {
@@ -981,7 +1038,7 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
           done: true,
         });
       }
-      resolve({ code, stdout: out, stderr: err, started: true });
+      resolve({ code, stdout: out, stderr: err, started: true, mails: mails() });
     });
   });
 }
@@ -1403,6 +1460,72 @@ function normalizedFilterFrom(range?: DateRangePayload): NormalizedFilter {
   };
 }
 
+// ---------------------------------------------------------------------------
+// 「本次抓取 / 本次运行」批次明细（APP-20）
+// ---------------------------------------------------------------------------
+
+/** 与 inbox 摘要行同形，renderer 可以直接复用同一套渲染。 */
+interface BatchRow {
+  messageId: string;
+  date: string;
+  from: string;
+  subject: string;
+  mailbox: string;
+  hasAttachment: boolean;
+  bodyLinkCount: number;
+}
+
+interface RunBatch {
+  rows: BatchRow[];
+  total: number;
+}
+
+/** 批次明细的展示上限；`total` 始终是本次真实条数，不受这个上限影响。 */
+const BATCH_ROW_LIMIT = 200;
+
+/**
+ * 读 INDEX.csv 并按邮件身份 hash 建索引。这里的 hash 与 CLI 的 `msgIdHash`
+ * （fetch 的 .eml 文件名、pipeline 的 `Processed <hash>`）是同一个算法，
+ * 因此可以把 CLI 逐封邮件的日志信号还原成完整的展示行。
+ */
+function indexRowsByHash(): Map<string, BatchRow> {
+  const out = new Map<string, BatchRow>();
+  for (const row of readCsvRows(path.join(samplesDirPath(), 'INDEX.csv'))) {
+    const messageId = row.messageId ?? '';
+    const date = row.date ?? '';
+    const from = row.from ?? '';
+    const subject = row.subject ?? '';
+    const hash = msgIdHash(messageId.length > 0 ? messageId : undefined, from, date, subject);
+    if (out.has(hash)) continue;
+    out.set(hash, {
+      messageId,
+      date,
+      from,
+      subject,
+      mailbox: row.mailbox ?? '',
+      hasAttachment: (row.hasAttachment ?? '') === '1',
+      bodyLinkCount: Number(row.bodyLinkCount ?? 0) || 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * 由本次运行真实触达的邮件 hash 构造批次。**不是**「取 INDEX 最后 N 行」——
+ * 那正是 APP-20 的原始缺陷；这里的 hash 全部来自本次子进程的逐封日志。
+ */
+function batchFromHashes(hashes: string[]): RunBatch {
+  if (hashes.length === 0) return { rows: [], total: 0 };
+  const index = indexRowsByHash();
+  const rows: BatchRow[] = [];
+  for (const hash of hashes) {
+    const row = index.get(hash);
+    if (row) rows.push(row);
+  }
+  rows.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  return { rows: rows.slice(0, BATCH_ROW_LIMIT), total: hashes.length };
+}
+
 function fetchArgs(payload: DateRangePayload): string[] {
   const args = ['--config', configPath, '--state', statePath];
   args.push('--out', samplesDirPath());
@@ -1419,6 +1542,32 @@ function fetchArgs(payload: DateRangePayload): string[] {
 ipcMain.handle('mfh:get-summary', (_event, payload: unknown) => appSummary(asSummaryOptions(payload)));
 
 ipcMain.handle('mfh:get-op-state', () => coordinator.state());
+
+/**
+ * About 页的版本与发布通道（COPY-07B）。全部由运行时真实数据推导：`app.getVersion()`
+ * 取的是安装包/package.json 的版本，channel 由「是否已打包」和版本号里的预发布
+ * 标识判定，不再是写死的「本地预览版 / v0.1.0」。
+ */
+ipcMain.handle('mfh:get-app-info', () => {
+  const version = app.getVersion();
+  const prerelease = /^\d+\.\d+\.\d+-([0-9A-Za-z.-]+)$/.exec(version)?.[1];
+  const major = Number(version.split('.')[0]);
+  const channel = !app.isPackaged
+    ? '开发版（未打包）'
+    : prerelease
+      ? `预览版（${prerelease}）`
+      : Number.isFinite(major) && major === 0
+        ? '预览版'
+        : '正式版';
+  return {
+    version,
+    channel,
+    packaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron ?? '',
+  };
+});
 
 ipcMain.handle('mfh:get-config', () => {
   const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
@@ -1494,6 +1643,9 @@ ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
     devBackend?.recordTestGlobal(mainWindow, '__mfhLastFetchArgs', args);
     const result = await runCli('fetch', args, { progress: true, jobId: gate.lease.jobId });
     const warning = recordHistory('fetch', range.dryRun ? '预览邮件' : '获取邮件', startedAt, result);
+    // 预览（--dry-run）不写缓存也不写 INDEX，没有可回显的逐封明细，因此不带
+    // `batch` 字段——让 renderer 显示「没有返回明细」，而不是谎称「本次新增 0 封」。
+    const batch = range.dryRun ? undefined : batchFromHashes(result.mails.saved);
     return {
       ok: result.code === 0,
       code: result.code,
@@ -1501,6 +1653,7 @@ ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
       stderr: result.stderr,
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(range),
+      ...(batch ? { batch } : {}),
       ...(warning ? { warning } : {}),
       summary: appSummary(),
     };
@@ -1537,6 +1690,9 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
     if (raw.force === true) args.push('--force');
     const result = await runCli('run', args, { operation: 'files', jobId: gate.lease.jobId });
     const warning = recordHistory('pipeline', raw.onlyMail ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
+    // 本次运行真正处理掉的邮件：归档成功的 + 降级到待确认的。仅被跳过（此前已处理）
+    // 的邮件不算，否则又变成「展示全量最近行」。
+    const batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
     return {
       ok: result.code === 0,
       code: result.code,
@@ -1544,6 +1700,7 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
       stderr: result.stderr,
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(),
+      batch,
       ...(warning ? { warning } : {}),
       summary: appSummary(),
     };

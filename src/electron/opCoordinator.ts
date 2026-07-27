@@ -1,7 +1,10 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import {
+  acquireDataDirLock,
+  dataOpLabel,
+  type DataDirLease,
+  type DataOpKind,
+} from '../util/dataDirLock.js';
 
 /**
  * 全局操作协调器（APP-05）。
@@ -9,12 +12,15 @@ import { randomBytes } from 'node:crypto';
  * 之前 fetch / normal-force pipeline / OCR / organize 可以互相独立启动，多个写入者
  * 会覆盖 state、擦掉新加入的 OCR 队列行并产生重复文件。这里维护：
  *   1. 进程内带 jobId 的操作注册表 + 兼容矩阵（当前全部互斥）；
- *   2. 数据目录上的跨进程文件锁（lockfile + PID + 陈旧锁回收），把 CLI、第二个
- *      应用实例一起挡在门外；
+ *   2. 数据目录上的跨进程文件锁，把 CLI、第二个应用实例一起挡在门外；
  *   3. 状态变化时向所有窗口广播 `op-state`。
+ *
+ * 锁本身复用 `src/util/dataDirLock.ts`（不依赖 Electron 的共享实现），GUI 与 CLI
+ * 必须是同一份协议实现，否则两侧会各锁各的。CLI 子进程通过「持有者 pid == 自己的
+ * 父进程 pid」识别出这是父进程的租约，不会被 GUI 自己启动的任务挡住。
  */
 
-export type OpKind = 'fetch' | 'pipeline' | 'ocr' | 'organize';
+export type OpKind = DataOpKind;
 
 export interface RunningOp {
   kind: OpKind;
@@ -42,64 +48,16 @@ const COMPATIBLE_WITH: Record<OpKind, OpKind[]> = {
   organize: [],
 };
 
-const OP_LABEL: Record<OpKind, string> = {
-  fetch: '获取邮件',
-  pipeline: '处理缓存邮件',
-  ocr: '识别文件',
-  organize: '整理输出文件',
-};
-
 export function opLabel(kind: OpKind): string {
-  return OP_LABEL[kind];
-}
-
-interface LockPayload {
-  pid: number;
-  host: string;
-  kind: OpKind;
-  jobId: string;
-  startedAt: number;
-}
-
-/** 超过这个时长且持有者仍在的锁也视为陈旧（进程卡死时不至于永远锁死）。 */
-const STALE_LOCK_MS = 6 * 60 * 60 * 1000;
-
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM 表示进程存在但不属于当前用户，仍算存活。
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-function readLock(lockPath: string): LockPayload | undefined {
-  try {
-    const raw = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as Partial<LockPayload>;
-    if (typeof raw.pid !== 'number' || typeof raw.jobId !== 'string') return undefined;
-    return {
-      pid: raw.pid,
-      host: typeof raw.host === 'string' ? raw.host : '',
-      kind: (raw.kind ?? 'fetch') as OpKind,
-      jobId: raw.jobId,
-      startedAt: typeof raw.startedAt === 'number' ? raw.startedAt : 0,
-    };
-  } catch {
-    return undefined;
-  }
+  return dataOpLabel(kind);
 }
 
 export class OperationCoordinator {
   private running: RunningOp | null = null;
-  private readonly lockPath: string;
-  private lockOwned = false;
+  private lease: DataDirLease | undefined;
   private broadcast: (payload: { running: RunningOp | null }) => void = () => {};
 
-  constructor(private readonly dataDir: string) {
-    this.lockPath = path.join(dataDir, '.mfh-cache', 'mfh-data.lock');
-  }
+  constructor(private readonly dataDir: string) {}
 
   setBroadcast(fn: (payload: { running: RunningOp | null }) => void): void {
     this.broadcast = fn;
@@ -126,9 +84,17 @@ export class OperationCoordinator {
     }
 
     const jobId = `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
-    const lock = this.acquireLock(kind, jobId);
-    if (!lock.ok) return lock;
+    const acquired = acquireDataDirLock(this.dataDir, kind, jobId);
+    if (!acquired.ok) {
+      return {
+        ok: false,
+        code: acquired.code === 'data_dir_lock_failed' ? 'operation_lock_failed' : 'operation_locked_externally',
+        message: acquired.message,
+        running: this.running,
+      };
+    }
 
+    this.lease = acquired.lease;
     this.running = { kind, jobId, startedAt: Date.now() };
     this.emit();
 
@@ -162,76 +128,14 @@ export class OperationCoordinator {
     }
   }
 
-  private acquireLock(kind: OpKind, jobId: string): { ok: true } | Extract<BeginResult, { ok: false }> {
-    fs.mkdirSync(path.dirname(this.lockPath), { recursive: true });
-    const payload: LockPayload = {
-      pid: process.pid,
-      host: os.hostname(),
-      kind,
-      jobId,
-      startedAt: Date.now(),
-    };
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const fd = fs.openSync(this.lockPath, 'wx', 0o600);
-        try {
-          fs.writeFileSync(fd, `${JSON.stringify(payload)}\n`);
-        } finally {
-          fs.closeSync(fd);
-        }
-        this.lockOwned = true;
-        return { ok: true };
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-          return {
-            ok: false,
-            code: 'operation_lock_failed',
-            message: '无法在数据目录上加锁，请确认数据目录可写后重试。',
-            running: this.running,
-          };
-        }
-      }
-
-      const holder = readLock(this.lockPath);
-      const sameHost = !holder?.host || holder.host === os.hostname();
-      const stale = !holder
-        || (sameHost && !isProcessAlive(holder.pid))
-        || (holder.startedAt > 0 && Date.now() - holder.startedAt > STALE_LOCK_MS);
-      if (!stale) {
-        return {
-          ok: false,
-          code: 'operation_locked_externally',
-          message: '数据目录正被另一个发票助手实例或命令行任务占用，请等待它结束后再试。',
-          running: this.running,
-        };
-      }
-      // 陈旧锁回收：持有者已经消失或超时，删除后重试一次。
-      try {
-        fs.rmSync(this.lockPath, { force: true });
-      } catch {
-        // 下一轮 openSync 会再报错，由上面的分支给出提示。
-      }
-    }
-
-    return {
-      ok: false,
-      code: 'operation_locked_externally',
-      message: '数据目录正被另一个任务占用，请稍后重试。',
-      running: this.running,
-    };
-  }
-
   private releaseLock(): void {
-    if (!this.lockOwned) return;
-    this.lockOwned = false;
-    const holder = readLock(this.lockPath);
-    // 只删自己写的锁，避免误删陈旧回收后别人重新获取的锁。
-    if (holder && holder.pid !== process.pid) return;
+    const lease = this.lease;
+    this.lease = undefined;
+    if (!lease) return;
     try {
-      fs.rmSync(this.lockPath, { force: true });
+      lease.release();
     } catch {
-      // best-effort
+      // best-effort：释放失败会留下一把锁，下次由陈旧回收清理。
     }
   }
 }
