@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { csvCell, parseCsv } from '../util/csv.js';
 import { contentHash } from '../util/hash.js';
-import { beginArchiveTransaction } from '../download/archiveJournal.js';
+import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, beginArchiveTransaction } from '../download/archiveJournal.js';
 import { sanitizeText } from './sanitize.js';
+import { testFaultEnabled } from '../util/testFaults.js';
 
 /**
  * 「选择文件归档」的事务化实现（APP-04）。
@@ -263,6 +264,8 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     staged.push({ source, data, format: detected.format, ext: detected.ext, hash: contentHash(data) });
   }
 
+  assertArchiveTransactionsRecovered(input.invoicesDir);
+
   // 2) 读取台账与队列现状，做去重与「半提交修复」判定。
   const ledgerFilenameByKey = new Map<string, string>();
   for (const row of bodyRows(input.ledgerCsv)) {
@@ -365,6 +368,9 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       ])),
     ];
     fs.appendFileSync(input.ocrPendingCsv, queueLines.join(''), 'utf8');
+    if (testFaultEnabled('MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV')) {
+      throw new Error('forced_after_manual_queue_csv_failure');
+    }
 
     // 6) 追加台账（只为本次真正新装的文件）。
     const ledgerLines = toInstall.map((item, i) => csvLine([
@@ -377,8 +383,9 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     // 删除已安装文件并把两个 CSV 截断回 baseLength。
     try {
       tx.rollback();
-    } catch {
-      // 回滚失败时 journal 仍在，下次启动的 recover 会再试一次。
+    } catch (rollbackErr) {
+      if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
+      throw err;
     }
     return {
       ...empty,

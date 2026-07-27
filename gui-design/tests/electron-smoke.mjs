@@ -10,7 +10,17 @@
 import { _electron as electron } from 'playwright';
 import { mkdir, copyFile, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertFreshBuild, closeElectronApp, fail, repoRoot, runSuite, useTempDir, withCleanup } from './_shared.mjs';
+import {
+  NO_GUI_E2E_ENV,
+  assertFreshBuild,
+  closeElectronApp,
+  electronTestEnv,
+  fail,
+  repoRoot,
+  runSuite,
+  useTempDir,
+  withCleanup,
+} from './_shared.mjs';
 
 const LAUNCH_TIMEOUT_MS = 60000;
 
@@ -40,19 +50,25 @@ async function main() {
     await mkdir(config.paths.samples, { recursive: true });
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 
+    const launchEnv = electronTestEnv({ MFH_CONFIG_PATH: configPath, MFH_STATE_PATH: statePath });
+    if (launchEnv[NO_GUI_E2E_ENV] !== '1') fail('Electron smoke test must launch with MFH_E2E_NO_GUI=1');
+
     const app = await scope.use(
       'Electron 应用',
       () => electron.launch({
         cwd: repoRoot,
         args: ['.', `--user-data-dir=${userDataPath}`],
         timeout: LAUNCH_TIMEOUT_MS,
-        env: { ...process.env, MFH_CONFIG_PATH: configPath, MFH_STATE_PATH: statePath },
+        env: launchEnv,
       }),
       (launched) => closeElectronApp(launched),
       { timeoutMs: LAUNCH_TIMEOUT_MS + 10000 },
     );
 
     const page = await app.firstWindow({ timeout: LAUNCH_TIMEOUT_MS });
+    const browserWindow = await app.browserWindow(page);
+    const visible = await browserWindow.evaluate((win) => win.isVisible());
+    if (visible) fail('MFH_E2E_NO_GUI=1 should keep the Electron BrowserWindow hidden');
     await page.waitForLoadState('domcontentloaded');
     await activeMain(page, '.toolbar__title').getByText('运行控制台', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
     await page.waitForURL(/dashboard\.html/);

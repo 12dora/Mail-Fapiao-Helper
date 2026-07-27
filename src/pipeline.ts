@@ -7,6 +7,7 @@ import type { Logger } from './log.js';
 import type { State } from './state.js';
 import { contentHash as contentHashOf, msgIdHash as msgIdHashFn } from './util/hash.js';
 import { csvCell, parseCsv } from './util/csv.js';
+import { testFaultEnabled } from './util/testFaults.js';
 import {
   assertPublicResponse,
   attemptDeadlineSignal,
@@ -17,7 +18,7 @@ import {
 import { extractors } from './extract/registry.js';
 import type { Ctx, ExtractIssue, PdfArtifact } from './extract/types.js';
 import { ensureSecureDir, stageDocuments } from './download/downloader.js';
-import { beginArchiveTransaction, recoverArchiveTransactions } from './download/archiveJournal.js';
+import { ArchiveRecoveryError, beginArchiveTransaction, assertArchiveTransactionsRecovered } from './download/archiveJournal.js';
 import { supportingReason } from './extract/classify.js';
 
 interface CsvRow {
@@ -130,24 +131,16 @@ function csvLength(csvPath: string): number {
   }
 }
 
-/**
- * 每个 invoices 目录只做一次崩溃恢复：进程内的并发 worker 共享同一次结果，
- * 避免同一批 journal 被重复扫描。
- */
-const recoveredInvoiceDirs = new Set<string>();
-
 function recoverArchiveTransactionsOnce(invoicesDir: string, log: Logger): void {
   const key = path.resolve(invoicesDir);
-  if (recoveredInvoiceDirs.has(key)) return;
-  recoveredInvoiceDirs.add(key);
   try {
-    const { rolledBack, skipped } = recoverArchiveTransactions(key);
+    const { rolledBack, skipped } = assertArchiveTransactionsRecovered(key);
     if (rolledBack > 0 || skipped > 0) {
       log.warn(`Archive journal recovery: rolledBack=${rolledBack}, skipped=${skipped}`);
     }
   } catch (err) {
-    // 恢复失败不能阻断本次归档，最坏情况只是残留文件留待人工处理。
-    log.warn(`Archive journal recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn('Archive journal recovery failed; archive writes are blocked until recovery succeeds.');
+    throw err;
   }
 }
 
@@ -599,22 +592,29 @@ export async function processMail(
 
     // 从这里到 tx.commit() 之间没有任何 await：同进程的其他 worker 不会插进来
     // 追加 CSV，因此 journal 里记录的 baseLength 在提交前始终有效。
-    // 4) 预留最终路径并写出持久化 journal：journal 落盘（fsync）之后才安装文件，
+    // 4) 规划最终路径并写出持久化 journal：journal 落盘（fsync）之后才安装文件，
     //    进程被强杀也能由下一次 recoverArchiveTransactions() 清掉半成品（APP-03）。
-    const reservedFiles = batch.reserve();
-    const tx = beginArchiveTransaction(cfg.paths.invoices, {
-      files: reservedFiles,
-      csv: [
-        { path: csvPath, baseLength: csvLength(csvPath) },
-        { path: ocrPendingCsvPath, baseLength: csvLength(ocrPendingCsvPath) },
-      ],
-    });
+    const plannedFiles = batch.plan();
+    let tx;
+    try {
+      tx = beginArchiveTransaction(cfg.paths.invoices, {
+        files: plannedFiles,
+        csv: [
+          { path: csvPath, baseLength: csvLength(csvPath) },
+          { path: ocrPendingCsvPath, baseLength: csvLength(ocrPendingCsvPath) },
+        ],
+      });
+    } catch (err) {
+      batch.dispose();
+      throw err;
+    }
 
     let downloads;
     try {
-      // 5) 把内容写进已预留的最终文件。
+      // 5) 在 active journal 下独占创建最终文件。
       downloads = batch.commit();
       tx.markStage('files-installed');
+      batch.dispose();
     } catch (err) {
       tx.rollback();
       batch.dispose();
@@ -667,6 +667,9 @@ export async function processMail(
 
     try {
       appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines);
+      if (testFaultEnabled('MFH_TEST_FAIL_AFTER_INVOICE_CSV')) {
+        throw new Error('forced_after_invoice_csv_failure');
+      }
       appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines);
       // 台账已全部落盘：即使这之后被强杀，恢复也只会清理 journal 本身。
       tx.markStage('ledger-committed');
@@ -678,6 +681,7 @@ export async function processMail(
     }
     tx.commit();
   } catch (err) {
+    if (err instanceof ArchiveRecoveryError) throw err;
     // Iron rule: a filesystem / CSV-lock failure during download or archive must
     // NOT abort the run. Degrade this email to the manual queue and continue.
     const errMsg = err instanceof Error ? err.message : String(err);

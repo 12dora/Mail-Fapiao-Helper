@@ -19,6 +19,17 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 export const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+export const NO_GUI_E2E_ENV = 'MFH_E2E_NO_GUI';
+
+/**
+ * Electron integration tests must launch with MFH_E2E_NO_GUI=1.
+ * The main process treats that non-packaged, test-only flag as a no-desktop
+ * contract: the BrowserWindow stays hidden and shell.openPath/showItemInFolder
+ * IPC handlers return deterministic success without opening Finder or apps.
+ */
+export function electronTestEnv(extra = {}) {
+  return { ...process.env, [NO_GUI_E2E_ENV]: '1', ...extra };
+}
 
 export function fail(message) {
   throw new Error(message);

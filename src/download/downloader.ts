@@ -5,6 +5,7 @@ import type { DocumentFormat, PdfArtifact } from '../extract/types.js';
 import { withDocumentClassification } from '../extract/classify.js';
 import { contentHash } from '../util/hash.js';
 import type { Logger } from '../log.js';
+import type { ArchivePlannedFile } from './archiveJournal.js';
 
 export interface DownloadResult {
   /** 对应输入 `pdfs` 数组的下标：批次里可能有条目被复用/跳过，不能按顺序配对。 */
@@ -106,53 +107,44 @@ function finalFilename(name: string, fallbackStem: string, ext: ArtifactExt): st
   return `${finalStem}.${ext}`;
 }
 
-function nextNumberedPath(dir: string, ext: ArtifactExt): string {
+function nextNumberedPath(dir: string, ext: ArtifactExt, reserved: Set<string>): string {
   let counter = 1;
   while (true) {
     const candidate = `${String(counter).padStart(4, '0')}.${ext}`;
     const candidatePath = path.join(dir, candidate);
-    if (!fs.existsSync(candidatePath)) return candidatePath;
+    const key = candidatePath.toLowerCase();
+    if (!reserved.has(key) && !fs.existsSync(candidatePath)) {
+      reserved.add(key);
+      return candidatePath;
+    }
     counter++;
   }
 }
 
 /**
- * 独占创建一个空占位文件把最终路径“定下来”。
- *
- * 归档事务需要在写入任何内容之前就知道最终路径，才能把它们记进持久化 journal
- * （APP-03）。`wx` 是原子的独占创建，两个 worker 抢同一个建议名时不会互相覆盖，
- * 语义与原来的 `COPYFILE_EXCL` 一致。
+ * 只规划编号文件名，不触碰最终目录。
+ * journal 必须先于任何 final path mutation 落盘；真正创建在 commit() 内用独占
+ * hard-link / copy 完成，若中途撞名则整批事务化失败。
  */
-function reserveNumbered(invoicesDir: string, ext: ArtifactExt): string {
-  while (true) {
-    const finalPath = nextNumberedPath(invoicesDir, ext);
-    try {
-      fs.closeSync(fs.openSync(finalPath, 'wx', isPosix() ? FILE_MODE : undefined));
-      hardenPath(finalPath, FILE_MODE);
-      return finalPath;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    }
-  }
+function planNumbered(invoicesDir: string, ext: ArtifactExt, reserved: Set<string>): string {
+  return nextNumberedPath(invoicesDir, ext, reserved);
 }
 
-/** 预留一个具名目标，冲突时追加 -1/-2。 */
-function reserveNamed(targetPath: string): string {
+/** 规划一个具名目标，冲突时追加 -1/-2；不创建最终文件。 */
+function planNamed(targetPath: string, reserved: Set<string>): string {
   const dir = path.dirname(targetPath);
   const ext = path.extname(targetPath);
   const base = path.basename(targetPath, ext);
   let candidate = targetPath;
   let counter = 0;
   while (true) {
-    try {
-      fs.closeSync(fs.openSync(candidate, 'wx', isPosix() ? FILE_MODE : undefined));
-      hardenPath(candidate, FILE_MODE);
+    const key = candidate.toLowerCase();
+    if (!reserved.has(key) && !fs.existsSync(candidate)) {
+      reserved.add(key);
       return candidate;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      counter++;
-      candidate = path.join(dir, `${base}-${counter}${ext}`);
     }
+    counter++;
+    candidate = path.join(dir, `${base}-${counter}${ext}`);
   }
 }
 
@@ -163,26 +155,26 @@ interface StagedDocument {
   targetName: string;
   artifact: PdfArtifact;
   contentHash: string;
-  /** `reserve()` 之后填入的最终路径。 */
+  /** `plan()` 之后填入的最终路径。 */
   finalPath?: string;
 }
 
 /**
  * 一批文档的归档事务（APP-03）。
  *
- * 使用顺序固定为 `reserve() -> beginArchiveTransaction() -> commit() -> CSV 追加`：
- * `reserve()` 先用独占创建把全部最终路径定下来（0 字节占位），调用方据此写出
- * 持久化 journal，`commit()` 才把 staging 内容写进这些已预留的路径。这样即使进程
- * 在任一步被强杀，崩溃恢复也能凭 journal 找到并清掉半成品。
+ * 使用顺序固定为 `plan() -> beginArchiveTransaction() -> commit() -> CSV 追加`：
+ * `plan()` 只在内存中选择最终路径，不创建 0 字节占位；调用方先写出持久化 journal，
+ * `commit()` 才在 active journal 下独占创建最终文件。这样 final archive 目录的第一
+ * 次 mutation 一定发生在 durable journal 之后。
  */
 export interface ArchiveBatch {
   /** 本批次需要新建文件的文档数量（不含幂等复用的条目）。 */
   readonly pending: number;
-  /** 独占预留全部最终文件路径（0 字节占位），返回绝对路径列表。 */
-  reserve(): string[];
-  /** 把 staging 内容写入已预留的最终文件；返回结果按输入顺序排列。 */
+  /** 规划全部最终文件路径，返回给 archive journal 持久化。 */
+  plan(): ArchivePlannedFile[];
+  /** 在 active journal 下独占创建最终文件；返回结果按输入顺序排列。 */
   commit(): DownloadResult[];
-  /** 回滚：删除本批次已预留/已落盘的最终文件与 staging 目录。 */
+  /** 回滚：删除能证明属于本批次的最终文件与 staging 目录。 */
   rollback(): void;
   /** 只清理 staging，不动最终文件。 */
   dispose(): void;
@@ -267,14 +259,20 @@ export function stageDocuments(
     throw err;
   }
 
-  /** 已预留（可能还是 0 字节占位）的最终路径，回滚时全部删除。 */
-  const reservedPaths: string[] = [];
+  /** 已规划的最终路径。 */
+  const plannedPaths: ArchivePlannedFile[] = [];
 
   const rollback = (): void => {
-    for (const filePath of reservedPaths.splice(0)) {
+    for (const item of staged) {
+      const filePath = item.finalPath;
+      if (!filePath) continue;
       try {
-        fs.rmSync(filePath, { force: true });
-        log.warn(`Rolled back archived file ${filePath}`);
+        const finalStat = fs.statSync(filePath);
+        const stagingStat = fs.statSync(item.stagingPath);
+        if (finalStat.dev === stagingStat.dev && finalStat.ino === stagingStat.ino) {
+          fs.rmSync(filePath, { force: true });
+          log.warn(`Rolled back archived file ${filePath}`);
+        }
       } catch (err) {
         log.warn(`Rollback failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -282,38 +280,38 @@ export function stageDocuments(
     removeStagingDir(stagingDir);
   };
 
-  const reserve = (): string[] => {
-    if (reservedPaths.length > 0) return [...reservedPaths];
-    try {
-      for (const item of staged) {
-        const finalPath = opts.avoidConflictBeforeOcr === false
-          ? reserveNamed(path.join(invoicesDir, item.targetName))
-          : reserveNumbered(invoicesDir, item.ext);
-        item.finalPath = finalPath;
-        reservedPaths.push(finalPath);
-      }
-    } catch (err) {
-      rollback();
-      throw err;
+  const plan = (): ArchivePlannedFile[] => {
+    if (plannedPaths.length > 0) return plannedPaths.map((item) => ({ ...item }));
+    const reserved = new Set<string>();
+    for (const item of staged) {
+      const finalPath = opts.avoidConflictBeforeOcr === false
+        ? planNamed(path.join(invoicesDir, item.targetName), reserved)
+        : planNumbered(invoicesDir, item.ext, reserved);
+      item.finalPath = finalPath;
+      plannedPaths.push({ path: finalPath, stagingPath: item.stagingPath });
     }
-    return [...reservedPaths];
+    return plannedPaths.map((item) => ({ ...item }));
   };
 
   const commit = (): DownloadResult[] => {
-    if (reservedPaths.length === 0) reserve();
+    if (plannedPaths.length === 0) plan();
     const results: DownloadResult[] = [...reused];
     try {
       for (const item of staged) {
         const finalPath = item.finalPath;
-        if (!finalPath) throw new Error('archive_batch_not_reserved');
-        // 目标已由 reserve() 独占创建，这里只是把内容写进我们自己的文件。
-        fs.copyFileSync(item.stagingPath, finalPath);
-        hardenPath(finalPath, FILE_MODE);
+        if (!finalPath) throw new Error('archive_batch_not_planned');
+        // 优先 hard-link staging -> final：若进程在 journal prepared 与
+        // files-installed 之间被强杀，恢复可以用 inode 证明 final 属于本事务。
         try {
-          fs.unlinkSync(item.stagingPath);
-        } catch {
-          // staging 目录整体清理时会兜底。
+          fs.linkSync(item.stagingPath, finalPath);
+        } catch (err) {
+          // Do not fall back to copy. Prepared-stage recovery proves ownership
+          // with the staging/final hard-link inode; a copied final file cannot be
+          // distinguished from a raced-in writer before `files-installed` is
+          // durably recorded.
+          throw err;
         }
+        hardenPath(finalPath, FILE_MODE);
         log.debug(`Finalized ${item.stagingPath} -> ${finalPath}`);
 
         results.push({
@@ -332,14 +330,13 @@ export function stageDocuments(
       rollback();
       throw err;
     }
-    removeStagingDir(stagingDir);
     results.sort((a, b) => a.sourceIndex - b.sourceIndex);
     return results;
   };
 
   return {
     pending: staged.length,
-    reserve,
+    plan,
     commit,
     rollback,
     dispose: (): void => removeStagingDir(stagingDir),
@@ -354,7 +351,12 @@ export async function downloadPdfs(
   log: Logger,
   opts: DownloadOptions = {},
 ): Promise<DownloadResult[]> {
-  return stageDocuments(pdfs, msgIdHash, invoicesDir, log, opts).commit();
+  const batch = stageDocuments(pdfs, msgIdHash, invoicesDir, log, opts);
+  try {
+    return batch.commit();
+  } finally {
+    batch.dispose();
+  }
 }
 
 export const downloadDocuments = downloadPdfs;

@@ -31,7 +31,7 @@ import { OperationCoordinator, type OpKind, type OpLease, type RunningOp } from 
 import { killProcessTree, terminateChildren } from './procTree.js';
 import { registerManagedRoots, redactPath, sanitizeText, type UiError } from './sanitize.js';
 import { runManualArchive } from './manualArchive.js';
-import { recoverArchiveTransactions } from '../download/archiveJournal.js';
+import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, recoverArchiveTransactions } from '../download/archiveJournal.js';
 
 interface DateRangePayload {
   from?: string;
@@ -144,6 +144,10 @@ function devFakeBackendEnabled(): boolean {
   return !app.isPackaged && process.env.MFH_E2E_FAKE_CLI === '1';
 }
 
+function e2eNoGuiMode(): boolean {
+  return !app.isPackaged && process.env.MFH_E2E_NO_GUI === '1';
+}
+
 async function loadDevFakeBackend(): Promise<void> {
   if (!devFakeBackendEnabled()) return;
   try {
@@ -169,9 +173,11 @@ function ensureUserDataConfig(): void {
 }
 
 function createWindow(): void {
+  const noGui = e2eNoGuiMode();
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
+    show: !noGui,
     minWidth: 900,
     minHeight: 640,
     title: '发票助手',
@@ -188,6 +194,16 @@ function createWindow(): void {
     sendToRenderer('op-state', coordinator.state() as unknown as Record<string, unknown>);
   });
   void mainWindow.loadFile(uiPath('pages', 'dashboard.html'));
+}
+
+async function openPathForUser(target: string): Promise<string> {
+  if (e2eNoGuiMode()) return '';
+  return shell.openPath(target);
+}
+
+function showItemInFolderForUser(target: string): void {
+  if (e2eNoGuiMode()) return;
+  shell.showItemInFolder(target);
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -1232,6 +1248,29 @@ function ledgerCsvPath(): string {
   return resolvedPath('output', 'csv', './invoices/invoices.csv');
 }
 
+const archiveRecoveryFailures = new Map<string, UiError>();
+
+function archiveRecoveryBlockedError(): UiError {
+  return {
+    code: 'archive_recovery_blocked',
+    message: '发现未完成的归档恢复，暂时不能写入发票台账。请确认数据目录可写后重试。',
+    detail: '恢复安全标记没有成功保存。本次写入已停止，以避免覆盖后续台账记录。',
+  };
+}
+
+function ensureArchiveRecoveryReady(): UiError | undefined {
+  const key = path.resolve(invoicesDirPath());
+  try {
+    assertArchiveTransactionsRecovered(key);
+    archiveRecoveryFailures.delete(key);
+    return undefined;
+  } catch {
+    const error = archiveRecoveryBlockedError();
+    archiveRecoveryFailures.set(key, error);
+    return error;
+  }
+}
+
 interface SummaryPageOptions {
   inboxLimit?: number;
   inboxOffset?: number;
@@ -1767,6 +1806,10 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
 
   const startedAt = Date.now();
   try {
+    const recoveryError = ensureArchiveRecoveryReady();
+    if (recoveryError) {
+      return { ok: false, ...recoveryError, normalizedFilter: normalizedFilterFrom(), summary: appSummary() };
+    }
     const args = ['--config', configPath, '--state', statePath, '--concurrency', String(concurrency)];
     if (typeof raw.onlyMail === 'string' && raw.onlyMail) args.push('--only-mail', raw.onlyMail);
     if (raw.force === true) args.push('--force');
@@ -1837,6 +1880,11 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   let ocrTemp: { dir: string; file: string } | undefined;
 
   try {
+    const recoveryError = ensureArchiveRecoveryReady();
+    if (recoveryError) {
+      sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...recoveryError, kind: 'err', done: true });
+      return { ok: false, ...recoveryError, summary: appSummary() };
+    }
     if (raw.resetResults === true || raw.force === true) {
       const prepared = prepareOcrRerun();
       if (!prepared.ok) {
@@ -1942,6 +1990,10 @@ ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
 
   const startedAt = Date.now();
   try {
+    const recoveryError = ensureArchiveRecoveryReady();
+    if (recoveryError) {
+      return { ok: false, ...recoveryError, summary: appSummary() };
+    }
     const cliArgs = ['--config', configPath];
     if (applyRename) cliArgs.push('--apply-rename');
     const result = await runCli('organize', cliArgs, { jobId: gate.lease.jobId });
@@ -2016,10 +2068,10 @@ ipcMain.handle('mfh:open-path', async (_event, payload: unknown) => {
     if (!fs.existsSync(resolved)) {
       return { ok: false, code: 'path_missing', error: '文件已不存在，可能被移动或删除。请重新归档。', message: '文件已不存在，可能被移动或删除。请重新归档。' };
     }
-    shell.showItemInFolder(resolved);
+    showItemInFolderForUser(resolved);
     return { ok: true, error: '' };
   }
-  const error = await shell.openPath(resolved);
+  const error = await openPathForUser(resolved);
   return {
     ok: !error,
     // 保留 error 字段名，但内容脱敏后再交给 UI。
@@ -2179,14 +2231,14 @@ ipcMain.handle('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   const emlPath = path.join(pendingDirPath(), `${hash}.eml`);
   const fallback = samplesDirPath();
   if (fs.existsSync(emlPath)) {
-    const error = await shell.openPath(emlPath);
+    const error = await openPathForUser(emlPath);
     if (!error) {
       return { ok: true, code: 'pending_mail_opened', message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
     }
-    shell.showItemInFolder(emlPath);
+    showItemInFolderForUser(emlPath);
     return { ok: true, code: 'pending_mail_revealed', message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
   }
-  const error = await shell.openPath(fallback);
+  const error = await openPathForUser(fallback);
   return {
     ok: !error,
     code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
@@ -2202,16 +2254,21 @@ ipcMain.handle('mfh:pending-manual-archive', async (_event, payload: unknown) =>
   const hash = typeof raw.hash === 'string' ? raw.hash : '';
   if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。', canceled: false };
 
-  const dialogResult = await dialog.showOpenDialog({
-    title: '选择要归档的发票文件',
-    properties: ['openFile', 'multiSelections'],
-    filters: [
-      // 不提供 zip：压缩包无法直接归档也无法识别，旧实现会把任意 PK 容器当成 OFD
-      // 塞进队列。用户仍可用「全部文件」选到压缩包，此时 runManualArchive 会明确拒绝。
-      { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg'] },
-      { name: '全部文件', extensions: ['*'] },
-    ],
-  });
+  const testSources = !app.isPackaged && process.env.MFH_TEST_MANUAL_ARCHIVE_SOURCES
+    ? process.env.MFH_TEST_MANUAL_ARCHIVE_SOURCES.split(path.delimiter).filter(Boolean)
+    : undefined;
+  const dialogResult = testSources
+    ? { canceled: false, filePaths: testSources }
+    : await dialog.showOpenDialog({
+      title: '选择要归档的发票文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        // 不提供 zip：压缩包无法直接归档也无法识别，旧实现会把任意 PK 容器当成 OFD
+        // 塞进队列。用户仍可用「全部文件」选到压缩包，此时 runManualArchive 会明确拒绝。
+        { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg'] },
+        { name: '全部文件', extensions: ['*'] },
+      ],
+    });
   if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
     return { ok: false, canceled: true, code: 'manual_archive_canceled', message: '已取消归档。' };
   }
@@ -2221,16 +2278,30 @@ ipcMain.handle('mfh:pending-manual-archive', async (_event, payload: unknown) =>
   if (!gate.ok) return { ...gate.response, canceled: false };
 
   try {
+    const recoveryError = ensureArchiveRecoveryReady();
+    if (recoveryError) {
+      return { ok: false, canceled: false, ...recoveryError, files: [], duplicates: [], summary: appSummary() };
+    }
     const pendingRow = findPendingRow(hash);
-    const result = runManualArchive({
-      sources: dialogResult.filePaths,
-      invoicesDir: invoicesDirPath(),
-      ledgerCsv: ledgerCsvPath(),
-      ocrPendingCsv: ocrPendingCsvPath(),
-      hash,
-      pendingRow,
-      removePendingRow: () => rewritePendingCsv((row) => pendingRowHash(row) !== hash).removed,
-    });
+    let result;
+    try {
+      result = runManualArchive({
+        sources: dialogResult.filePaths,
+        invoicesDir: invoicesDirPath(),
+        ledgerCsv: ledgerCsvPath(),
+        ocrPendingCsv: ocrPendingCsvPath(),
+        hash,
+        pendingRow,
+        removePendingRow: () => rewritePendingCsv((row) => pendingRowHash(row) !== hash).removed,
+      });
+    } catch (err) {
+      if (err instanceof ArchiveRecoveryError) {
+        const error = archiveRecoveryBlockedError();
+        archiveRecoveryFailures.set(path.resolve(invoicesDirPath()), error);
+        return { ok: false, canceled: false, ...error, files: [], duplicates: [], summary: appSummary() };
+      }
+      throw err;
+    }
 
     if (!result.ok) {
       return {
@@ -2317,6 +2388,13 @@ ipcMain.handle('mfh:developer-reset', () => {
 // 单实例锁：两个实例会同时写 state / CSV / 队列。显式指定 MFH_DATA_DIR 时说明
 // 调用方刻意使用隔离的数据目录（自动化测试），此时允许并行实例。
 const hasSingleInstanceLock = process.env.MFH_DATA_DIR ? true : app.requestSingleInstanceLock();
+if (e2eNoGuiMode() && process.platform === 'darwin') {
+  try {
+    app.dock?.hide();
+  } catch {
+    // Test-only best effort: hidden windows are the primary no-GUI contract.
+  }
+}
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -2342,7 +2420,7 @@ function recoverPendingArchives(): void {
   try {
     recoverArchiveTransactions(invoicesDirPath());
   } catch {
-    // 恢复失败不应阻止应用启动；journal 会留到下次再试。
+    // 启动恢复只做 best-effort；真正写入前会走 strict gate 并返回可见错误。
   }
 }
 
@@ -2383,5 +2461,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
+  if (e2eNoGuiMode()) return;
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
