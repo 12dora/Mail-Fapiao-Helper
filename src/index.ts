@@ -750,6 +750,9 @@ async function cmdRun(argv: string[]): Promise<number> {
   let processed = 0;
   let skipped = 0;
   let failed = 0;
+  // 部分成功的邮件（APP-01：有 artifact 但也有失败候选源）单独计数，避免被
+  // processed 掩盖成「完全成功」。
+  let partial = 0;
   const networkFailures: ProcessMailResult[] = [];
   const inFlight = new Set<string>();
 
@@ -822,9 +825,12 @@ async function cmdRun(argv: string[]): Promise<number> {
       if (result.outcome === 'pdf' && result.messageId.length > 0) {
         archivedMessageIds.add(result.messageId);
       }
-      if (result.outcome === 'manual' && result.reason?.includes('network_retry_failed')) {
+      // 部分成功（APP-01）同样携带 reason，且已写入待确认记录；网络失败统计必须
+      // 一并覆盖，否则「一封邮件里一半链接超时」不会出现在 run 末尾的汇总里。
+      if ((result.outcome === 'manual' || result.partial === true) && result.reason?.includes('network_retry_failed')) {
         networkFailures.push(result);
       }
+      if (result.partial === true) partial++;
       processed++;
     } finally {
       inFlight.delete(hash);
@@ -879,7 +885,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   }
 
-  log.info(`Run complete: processed=${processed}, skipped=${skipped}, failed=${failed}`);
+  log.info(`Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`);
   if (networkFailures.length > 0) {
     log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
     for (const failure of networkFailures) {
