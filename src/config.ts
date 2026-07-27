@@ -4,10 +4,50 @@ import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
 /**
  * 配置 schema 版本（APP-08）。
  * - 缺失 `schemaVersion` 的旧配置一律视为 v1，由 `migrateRawConfig()` 迁移到当前版本。
- * - v2：`llm`、`output.dir`、`output.pendingDir`、`output.csv` 在 JSON 文件里变为可选
- *   （缺失时补默认值），并新增 `network.timeoutMs`。
+ * - v2：`output.csv` 在 JSON 文件里变为可选（缺失时补默认值），并新增 `network.timeoutMs`。
+ * - v3（APP-19 / CODE-08）：**删除**四个从来不生效的字段——`llm` 整块、`output.dir`、
+ *   `output.pendingDir`、`playwright.browserManagement`。旧配置里出现时在迁移阶段
+ *   静默丢弃（不报错），迁移后的对象与 `config.example.json` 里都不再有它们，
+ *   `Config` 类型里也不再存在，避免继续暗示不存在的能力。
  */
-export const CONFIG_SCHEMA_VERSION = 2;
+export const CONFIG_SCHEMA_VERSION = 3;
+
+/**
+ * v3 迁移要丢弃的字段路径。它们曾经是「生产契约」，但都从不生效：
+ * - `llm.*`：未发布的 scaffold，loader 一直拒绝 `enabled=true`；
+ * - `output.dir` / `output.pendingDir`：真正的输出目录由 `paths.invoices` /
+ *   `paths.pending` 决定，这两个值只在破坏性重置里被读到；
+ * - `playwright.browserManagement`：从不参与浏览器选择（APP-19）。
+ */
+const REMOVED_FIELDS_V3 = [
+  'llm',
+  'output.dir',
+  'output.pendingDir',
+  'playwright.browserManagement',
+] as const;
+
+/** 从迁移中的原始对象里删掉一个 `a.b` 形式的字段路径（顶层字段直接删）。 */
+function deleteFieldPath(root: Record<string, unknown>, path: string): void {
+  const parts = path.split('.');
+  const last = parts[parts.length - 1];
+  if (last === undefined) return;
+  if (parts.length === 1) {
+    delete root[last];
+    return;
+  }
+  let cur: Record<string, unknown> = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const key = parts[i];
+    if (key === undefined) return;
+    const next = cur[key];
+    if (next === null || typeof next !== 'object' || Array.isArray(next)) return;
+    // cloneRaw 只浅拷贝了一层，这里再拷一层，避免改到调用方传入的嵌套对象。
+    const copy = { ...(next as Record<string, unknown>) };
+    cur[key] = copy;
+    cur = copy;
+  }
+  delete cur[last];
+}
 
 export interface Config {
   /** 迁移后的 schema 版本，始终等于 CONFIG_SCHEMA_VERSION。 */
@@ -34,8 +74,7 @@ export interface Config {
     pending: string;
   };
   output: {
-    dir: string;
-    pendingDir: string;
+    /** 归档台账 CSV。`dir` / `pendingDir` 已在 v3 删除：实际输出目录由 `paths.*` 决定。 */
     csv: string;
   };
   rename: {
@@ -63,21 +102,12 @@ export interface Config {
     resultsCsv: string;
     credentials: Record<string, string>;
   };
-  llm: {
-    enabled: boolean;
-    provider: string;
-    model: string;
-    apiKey: string;
-  };
+  // 说明（APP-19 / CODE-08）：这里**没有** `llm` 与 `playwright.browserManagement`。
+  // 前者是未发布的 scaffold（loader 一直拒绝启用），后者从不参与浏览器选择——网页
+  // 自动下载始终依赖系统已安装的 Chrome / Edge。两者都已在 v3 迁移中删除。
   playwright: {
     headless: boolean;
     timeoutMs: number;
-    /**
-     * 兼容保留字段（APP-19）：应用**不会**自动准备/下载浏览器，网页自动下载始终
-     * 依赖系统已安装的 Chrome / Edge。旧配置里的 `app-managed` 仍可读入，但不再
-     * 表示任何「由应用准备」的承诺。
-     */
-    browserManagement: string;
   };
   network: {
     retries: number;
@@ -104,8 +134,6 @@ export type ValidateConfigResult =
 
 const DEFAULTS = {
   outputCsv: './invoices.csv',
-  outputDir: './invoices',
-  outputPendingDir: './pending',
   ocrBinaryPath: 'auto',
   ocrServiceHost: '127.0.0.1',
   ocrServicePort: 8000,
@@ -116,7 +144,6 @@ const DEFAULTS = {
   ocrResultsCsv: './invoices/ocr/ocr-results.csv',
   renameTypeDirRule: '{documentType}',
   renameOrganizedDir: './invoices/organized',
-  playwrightBrowserManagement: 'system',
   networkRetries: 3,
   networkRetryDelayMs: 1000,
   networkTimeoutMs: 30000,
@@ -390,28 +417,19 @@ export function migrateRawConfig(raw: unknown): MigrateResult {
     ? out.schemaVersion
     : 1;
 
-  // v1 -> v2：output/llm/network.timeoutMs 允许缺省，这里补默认值。
-  const paths = asRecord(out.paths);
+  // v1 -> v2：output.csv / network.timeoutMs 允许缺省，这里补默认值。
   const output = { ...asRecord(out.output) };
-  fillMissing(output, 'dir', typeof paths.invoices === 'string' && paths.invoices.length > 0
-    ? paths.invoices
-    : DEFAULTS.outputDir);
-  fillMissing(output, 'pendingDir', typeof paths.pending === 'string' && paths.pending.length > 0
-    ? paths.pending
-    : DEFAULTS.outputPendingDir);
   fillMissing(output, 'csv', DEFAULTS.outputCsv);
-  out.output = output;
-
-  const llm = { ...asRecord(out.llm) };
-  fillMissing(llm, 'enabled', false);
-  fillMissing(llm, 'provider', '');
-  fillMissing(llm, 'model', '');
-  fillMissing(llm, 'apiKey', '');
-  out.llm = llm;
 
   const network = { ...asRecord(out.network) };
   fillMissing(network, 'timeoutMs', DEFAULTS.networkTimeoutMs);
   out.network = network;
+
+  out.output = output;
+
+  // v2 -> v3：删除从不生效的字段。旧文件里出现时只是被丢弃，不产生任何校验错误；
+  // 迁移后的对象不再携带它们，因此 GUI 原子回写时也会把它们一并清出配置文件。
+  for (const path of REMOVED_FIELDS_V3) deleteFieldPath(out, path);
 
   out.schemaVersion = CONFIG_SCHEMA_VERSION;
   return {
@@ -465,8 +483,6 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
       pending: readString(c, migrated, 'paths.pending'),
     },
     output: {
-      dir: readString(c, migrated, 'output.dir', { fallback: DEFAULTS.outputDir }),
-      pendingDir: readString(c, migrated, 'output.pendingDir', { fallback: DEFAULTS.outputPendingDir }),
       csv: readString(c, migrated, 'output.csv', { fallback: DEFAULTS.outputCsv }),
     },
     rename: {
@@ -506,19 +522,11 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
       resultsCsv: readString(c, migrated, 'ocr.resultsCsv', { fallback: DEFAULTS.ocrResultsCsv }),
       credentials: readCredentials(c, migrated, 'ocr.credentials'),
     },
-    llm: {
-      // 未发布的 LLM scaffold（CODE-08）：文件里整块可缺省，但 Config 对象里始终存在。
-      enabled: readBool(c, migrated, 'llm.enabled', false),
-      provider: readString(c, migrated, 'llm.provider', { allowEmpty: true, fallback: '' }),
-      model: readString(c, migrated, 'llm.model', { allowEmpty: true, fallback: '' }),
-      apiKey: readString(c, migrated, 'llm.apiKey', { allowEmpty: true, fallback: '' }),
-    },
+    // llm / playwright.browserManagement 已在 v3 删除，这里不再读取（旧文件里的值
+    // 由 migrateRawConfig() 丢弃，不产生校验错误）。
     playwright: {
       headless: readBool(c, migrated, 'playwright.headless', true),
       timeoutMs: readNumber(c, migrated, 'playwright.timeoutMs', { min: 1, unit: '毫秒', fallback: 30000 }),
-      browserManagement: readString(c, migrated, 'playwright.browserManagement', {
-        fallback: DEFAULTS.playwrightBrowserManagement,
-      }),
     },
     network: {
       retries: readNumber(c, migrated, 'network.retries', {
@@ -540,9 +548,8 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
   if (config.filter.since && config.filter.until && !boundsAreOrdered(config.filter.since, config.filter.until)) {
     c.add('filter.until', `config.filter.since（${config.filter.since}）必须早于或等于 config.filter.until（${config.filter.until}）`);
   }
-  if (config.llm.enabled) {
-    c.add('llm.enabled', 'config.llm.enabled=true 在当前版本中不受支持，请设置为 false');
-  }
+  // 注意：不再对 `llm.enabled=true` 报错。该字段已从 schema 中删除，旧文件里残留的
+  // 值只会被迁移丢弃——报错会把一个升级前完全合法的配置文件变成阻断项。
 
   if (!c.ok) return { ok: false, errors: c.errors };
   return { ok: true, config };

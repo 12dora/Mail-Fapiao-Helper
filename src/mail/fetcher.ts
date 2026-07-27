@@ -75,6 +75,18 @@ export function resolveDateWindow(cfg: Config, now: Date = new Date()): DateWind
   }, now);
 }
 
+/**
+ * 邮件是否落在抓取窗口 `[since, before)` 内。
+ *
+ * 所有邮件都必须过这一关，不论日期来自 Date header 还是 INTERNALDATE：服务端
+ * SEARCH 只有日粒度、而且我们有意不发 `before`，客户端过滤是唯一的精确边界（APP-07）。
+ */
+export function withinWindow(date: Date, win: DateWindow): boolean {
+  if (date.getTime() < win.since.getTime()) return false;
+  if (win.before && date.getTime() >= win.before.getTime()) return false;
+  return true;
+}
+
 function buildSearch(cfg: Config, win: DateWindow): SearchObject {
   const kws = cfg.filter.keywords;
   const fields: Array<'subject' | 'body'> = [];
@@ -202,12 +214,20 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
           const from = parsed?.from?.text
             ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
           const subject = parsed?.subject ?? env?.subject ?? '';
-          // Prefer a real header date for filtering; fall back to the server
-          // INTERNALDATE (which the SINCE search already matched) for storage so a
-          // missing/unparseable Date header can no longer collapse to epoch (1970)
-          // and get silently discarded by the window filter below.
+          // 有效日期：优先真实 Date header，缺失/非法时回退服务器 INTERNALDATE。
+          // 存储和过滤必须用**同一个** effectiveDate（APP-07）：旧代码只在 headerDate
+          // 存在时才过滤，于是没有合法 header date 的邮件既不受精确 since 下界约束，
+          // 也完全绕过 until 上界；而 IMAP 查询有意不发 before，客户端是唯一的上界。
           const headerDate = validDate(parsed?.date) ?? validDate(env?.date);
-          const date = headerDate ?? validDate(msg.internalDate) ?? new Date(0);
+          const internalDate = validDate(msg.internalDate);
+          const effectiveDate = headerDate ?? internalDate;
+          if (!effectiveDate) {
+            // 两个来源都不可用：不静默放行，也不再退化成 epoch(1970)（那会把邮件
+            // 归档到 1970 月份目录并绕开窗口）。记一条可见告警后跳过。
+            log.warn(`skip mailbox="${mailbox}" uid=${msg.uid} reason=no_usable_date subject="${subject}"`);
+            continue;
+          }
+          const date = effectiveDate;
           const messageId = parsed?.messageId ?? env?.messageId ?? undefined;
           const hasAttachment = (parsed?.attachments?.length ?? 0) > 0;
           const bodyLinkCount = parsed ? countLinks(parsed.html, parsed.text) : 0;
@@ -217,16 +237,14 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
             continue;
           }
 
-          // Defensive header-date filter: some servers return messages outside the
-          // IMAP SEARCH window (mismatch between INTERNALDATE and the Date header).
-          // Only applied when a real header date exists — an absent/invalid header
-          // date means we trust the server's INTERNALDATE match and keep the mail.
-          if (headerDate && headerDate.getTime() < win.since.getTime()) {
-            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${headerDate.toISOString()} < since=${win.since.toISOString()}`);
-            continue;
-          }
-          if (headerDate && win.before && headerDate.getTime() >= win.before.getTime()) {
-            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${headerDate.toISOString()} >= before=${win.before.toISOString()}`);
+          // 无条件用同一个 [since, before) 窗口过滤：不能因为缺 header date 就放行。
+          // 日期来源在日志里标出，便于排查 INTERNALDATE 与 header 不一致的服务器。
+          const dateSource = headerDate ? 'header' : 'internal';
+          if (!withinWindow(effectiveDate, win)) {
+            const bound = effectiveDate.getTime() < win.since.getTime()
+              ? `< since=${win.since.toISOString()}`
+              : `>= before=${win.before ? win.before.toISOString() : ''}`;
+            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${effectiveDate.toISOString()}(${dateSource}) ${bound}`);
             continue;
           }
 

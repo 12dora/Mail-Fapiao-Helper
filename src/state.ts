@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 export interface State {
@@ -19,6 +19,19 @@ export class StateWriteError extends Error {
   }
 }
 
+/**
+ * state.json 的**内容**已损坏（不是合法 JSON、不是对象、字段类型不对）。
+ *
+ * 只有这一类错误才允许隔离备份；`EACCES` / `EIO` 这类 I/O 故障必须原样上报，
+ * 否则会把一个内容完全有效的状态文件改名搬走（APP-18A）。
+ */
+export class StateCorruptionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StateCorruptionError';
+  }
+}
+
 /** state.json 损坏时的隔离结果（APP-18A）。 */
 export interface StateQuarantine {
   /** 损坏文件被移动到的带时间戳备份路径。 */
@@ -29,14 +42,31 @@ export interface StateQuarantine {
 
 const isWindows = process.platform === 'win32';
 
-/** POSIX 上把目录收紧到 0700；Windows 上跳过且不报错（APP-22）。 */
+/**
+ * 确保目录存在，并且**只对本次新建的目录**收紧到 0700（APP-22）。
+ *
+ * 用户可能把 `--state`、缓存或 INDEX 指向一个既有的共享/组目录；无条件 chmod 会在
+ * 后台移走其他用户和组的访问权限。`mkdirSync(recursive)` 返回本次创建的最外层目录，
+ * 从它到目标目录这一段才是我们新建的，其余一律不碰（与 download/downloader.ts 的
+ * 同名实现保持同一规则）。
+ */
 export function ensureSecureDir(dir: string): void {
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (isWindows) return;
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    // 目录可能由其他用户创建；权限收紧失败不应中断业务流程。
+  const firstCreated = mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (isWindows || firstCreated === undefined) return;
+  const target = resolve(dir);
+  const created = resolve(firstCreated);
+  // 从最外层新建目录逐级向下收紧，直到目标目录本身。
+  let current = target;
+  for (;;) {
+    try {
+      chmodSync(current, 0o700);
+    } catch {
+      // 新建目录理论上属于当前用户；失败也不应中断业务流程。
+    }
+    if (current === created) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
 }
 
@@ -58,26 +88,48 @@ export function uniqueTempPath(target: string): string {
   return `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
 }
 
-export function loadState(path: string): State {
-  if (!existsSync(path)) {
-    return { processedHashes: [], fetchedHashes: [] };
+/**
+ * 严格校验一个哈希数组字段：必须存在、必须是数组、每一项都必须是字符串。
+ * 不符合就是内容损坏（要备份），而不是静默转成空数组——静默转空会让下一次保存
+ * 在没有任何备份的情况下覆盖掉原状态（APP-18A）。
+ */
+function requireHashArray(value: unknown, path: string, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new StateCorruptionError(`state at ${path}: ${field} must be an array of strings`);
   }
-  const text = readFileSync(path, 'utf8');
+  for (let i = 0; i < value.length; i++) {
+    if (typeof value[i] !== 'string') {
+      throw new StateCorruptionError(`state at ${path}: ${field}[${i}] must be a string`);
+    }
+  }
+  return value as string[];
+}
+
+export function loadState(path: string): State {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (e) {
+    // 文件不存在＝还没有状态，属于正常起点；其余 I/O 错误（EACCES/EIO/EISDIR…）
+    // 必须原样上报，绝不能被当成 corruption 而把有效文件改名搬走。
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { processedHashes: [], fetchedHashes: [] };
+    }
+    throw e;
+  }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    throw new Error(`state at ${path} is not valid JSON: ${(e as Error).message}`);
+    throw new StateCorruptionError(`state at ${path} is not valid JSON: ${(e as Error).message}`);
   }
-  if (raw === null || typeof raw !== 'object') {
-    throw new Error(`state at ${path} must be a JSON object`);
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new StateCorruptionError(`state at ${path} must be a JSON object`);
   }
   const r = raw as Record<string, unknown>;
-  const processed = r.processedHashes;
-  const fetched = r.fetchedHashes;
   return {
-    processedHashes: Array.isArray(processed) ? processed.filter((x): x is string => typeof x === 'string') : [],
-    fetchedHashes: Array.isArray(fetched) ? fetched.filter((x): x is string => typeof x === 'string') : [],
+    processedHashes: requireHashArray(r.processedHashes, path, 'processedHashes'),
+    fetchedHashes: requireHashArray(r.fetchedHashes, path, 'fetchedHashes'),
   };
 }
 
@@ -121,11 +173,34 @@ export interface StateStoreOptions {
 }
 
 /**
+ * 当前进程里所有打开着的 state store。信号退出路径（SIGINT/SIGTERM 等）拿不到命令
+ * 内部的局部变量，必须靠这个注册表在 `process.exit()` 之前把未达阈值的增量刷盘，
+ * 否则有界 checkpoint 会丢掉「每封邮件落盘」的崩溃安全语义（CODE-07）。
+ */
+const activeStores = new Set<StateStore>();
+
+/**
+ * 同步刷新所有活动 store。用于信号处理器与 `process.on('exit')`：这里不能抛异常，
+ * 失败只回报给调用方去打日志。返回未能落盘的错误列表。
+ */
+export function flushActiveStates(): Error[] {
+  const errors: Error[] = [];
+  for (const store of activeStores) {
+    try {
+      store.flush();
+    } catch (e) {
+      errors.push(e as Error);
+    }
+  }
+  return errors;
+}
+
+/**
  * Set 支撑的状态存储（CODE-07）。
  *
  * - 成员判定用 `Set`，取代旧代码里对完整数组的线性 `includes`；
- * - 写盘采用有界批量 checkpoint（条数或时间任一达到阈值），命令结束或致命错误
- *   时必须显式 `flush()`；
+ * - 写盘采用有界批量 checkpoint（条数或时间任一达到阈值），命令结束、致命错误
+ *   与信号退出时必须显式 `flush()`（信号路径见 `flushActiveStates()`）；
  * - 写盘失败仍抛 `StateWriteError`，保持 IRON RULE 语义不变。
  */
 export class StateStore {
@@ -150,16 +225,24 @@ export class StateStore {
   }
 
   /**
-   * 打开状态文件。JSON 损坏时不再直接抛错阻断 fetch/run，而是隔离备份并以空状态
-   * 继续（调用方随后可以用 `replaceAll()` 写入重建结果）。
+   * 打开状态文件。**内容损坏**时不再直接抛错阻断 fetch/run，而是隔离备份并以空状态
+   * 继续（调用方随后可以用 `replaceAll()` 写入重建结果）；权限/瞬时 I/O 错误则原样
+   * 抛出，绝不隔离一个内容其实有效的文件（APP-18A）。
    */
   static open(path: string, options: StateStoreOptions = {}): StateStore {
+    let state: State;
     try {
-      return new StateStore(path, loadState(path), options, undefined);
+      state = loadState(path);
     } catch (e) {
-      const quarantine = quarantineCorruptState(path, (e as Error).message);
-      return new StateStore(path, { processedHashes: [], fetchedHashes: [] }, options, quarantine);
+      if (!(e instanceof StateCorruptionError)) throw e;
+      const quarantine = quarantineCorruptState(path, e.message);
+      const store = new StateStore(path, { processedHashes: [], fetchedHashes: [] }, options, quarantine);
+      activeStores.add(store);
+      return store;
     }
+    const store = new StateStore(path, state, options, undefined);
+    activeStores.add(store);
+    return store;
   }
 
   hasProcessed(hash: string): boolean {
@@ -229,6 +312,15 @@ export class StateStore {
     this.dirty = false;
     this.pendingChanges = 0;
     this.lastFlushAt = Date.now();
+  }
+
+  /** 落盘并从活动注册表移除；命令正常结束时调用。 */
+  dispose(): void {
+    try {
+      this.flush();
+    } finally {
+      activeStores.delete(this);
+    }
   }
 }
 
