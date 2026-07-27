@@ -1,8 +1,8 @@
 import type { ParsedMail } from 'mailparser';
-import path from 'node:path';
-import AdmZip from 'adm-zip';
-import type { Ctx, Extractor, ExtractResult, PdfArtifact } from './types.js';
-import { looksLikeItineraryText, looksLikeOfdItineraryText } from './classify.js';
+import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import { looksLikeItineraryText } from './classify.js';
+import { looksLikeOfdItinerary, preferPdfOverDuplicateOfd } from './documentIdentity.js';
+import { documentsFromZip } from '../sites/common.js';
 import { MAX_DOC_BYTES } from '../util/net.js';
 
 // Bound how much attachment data one email can pull into memory. A single
@@ -10,7 +10,6 @@ import { MAX_DOC_BYTES } from '../util/net.js';
 // entry count degrades to manual instead of risking an OOM (ARCHITECTURE R4).
 const PER_DOC_CAP = MAX_DOC_BYTES;
 const PER_EMAIL_CAP = MAX_DOC_BYTES;
-const MAX_ZIP_ENTRIES = 512;
 
 function isPdfAttachment(att: { contentType?: string; filename?: string }): boolean {
   if (att.contentType === 'application/pdf') return true;
@@ -59,84 +58,9 @@ function isArchivableAttachment(att: AttachmentMeta): boolean {
   return isImageAttachment(att) && !isInlineImage(att);
 }
 
-function basename(value: string): string {
-  try {
-    const parsed = new URL(value);
-    const last = parsed.pathname.split('/').filter(Boolean).pop();
-    if (last) return decodeURIComponent(last);
-  } catch {
-    // Not a URL; fall through to path handling.
-  }
-  return path.basename(value);
-}
-
-function normalizedDocumentKey(artifact: PdfArtifact): string {
-  let name = basename(artifact.suggestedName || artifact.source).toLowerCase();
-  name = name
-    .replace(/\.ofd[_\s-]*查阅需ofd阅读器/gi, '')
-    .replace(/[_\s-]*查阅需ofd阅读器/gi, '')
-    .replace(/\.(pdf|ofd)$/gi, '');
-  return name
-    .replace(/\.(pdf|ofd)$/gi, '')
-    .replace(/[\s_()（）【】\[\]-]+/g, '')
-    .trim();
-}
-
-function invoiceNoKey(artifact: PdfArtifact): string {
-  const haystack = `${artifact.suggestedName || ''} ${artifact.source}`;
-  const match = haystack.match(/(?:^|\D)(\d{20})(?:\D|$)/);
-  return match?.[1] ?? '';
-}
-
 function looksLikeItinerary(artifact: PdfArtifact): boolean {
   const text = `${artifact.suggestedName || ''} ${artifact.source}`.toLowerCase();
   return looksLikeItineraryText(text);
-}
-
-function looksLikeOfdItinerary(artifact: PdfArtifact): boolean {
-  const text = `${artifact.suggestedName || ''} ${artifact.source}`.toLowerCase();
-  return looksLikeOfdItineraryText(text);
-}
-
-function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
-  const aNo = invoiceNoKey(a);
-  const bNo = invoiceNoKey(b);
-  if (aNo && bNo && aNo === bNo) return true;
-
-  const aKey = normalizedDocumentKey(a);
-  const bKey = normalizedDocumentKey(b);
-  return aKey.length > 0 && aKey === bKey;
-}
-
-function preferPdfOverDuplicateOfd(artifacts: PdfArtifact[], log: Ctx['log']): PdfArtifact[] {
-  const pdfs = artifacts.filter((item) => (item.format ?? 'pdf') === 'pdf');
-  const out: PdfArtifact[] = [];
-
-  for (const artifact of artifacts) {
-    if (artifact.format !== 'ofd') {
-      out.push(artifact);
-      continue;
-    }
-
-    if (looksLikeOfdItinerary(artifact)) {
-      out.push({ ...artifact, documentType: 'itinerary', requiresOcr: true });
-      continue;
-    }
-
-    // Only drop the OFD when a PDF in the SAME email is demonstrably the same
-    // document (matching 20-digit invoice number or normalized name). Dropping
-    // an OFD merely because *some* unrelated PDF (e.g. a supporting statement or
-    // a different invoice) is present loses a genuine invoice.
-    const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf));
-    if (duplicatePdf) {
-      log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source}`);
-      continue;
-    }
-
-    out.push({ ...artifact, documentType: 'invoice', requiresOcr: true });
-  }
-
-  return out;
 }
 
 const attachmentExtractor: Extractor = {
@@ -158,16 +82,21 @@ const attachmentExtractor: Extractor = {
 
     let totalBytes = 0;
     let skippedOversize = false;
+    // 逐条记录被跳过 / 解析失败的附件，即使本封邮件还有其他成功文档，也必须把这些
+    // 失败上报给 pipeline，避免“一个小文件 + 一个超限文件”被当成完整成功（APP-01）。
+    const issues: ExtractIssue[] = [];
     // Returns false (and marks the skip) when adding `size` bytes would breach
     // the per-document or cumulative per-email cap.
     const admit = (size: number, label: string): boolean => {
       if (size > PER_DOC_CAP) {
         skippedOversize = true;
+        issues.push({ reason: `attachment:doc_size_cap_exceeded:${label}` });
         ctx.log.warn(`Skip oversized document ${label}: ${size} > ${PER_DOC_CAP} bytes`);
         return false;
       }
       if (totalBytes + size > PER_EMAIL_CAP) {
         skippedOversize = true;
+        issues.push({ reason: `attachment:mail_size_cap_exceeded:${label}` });
         ctx.log.warn(`Skip document ${label}: per-email ${PER_EMAIL_CAP} byte cap exceeded`);
         return false;
       }
@@ -198,44 +127,24 @@ const attachmentExtractor: Extractor = {
           requiresOcr: true,
         });
       } else if (isZipAttachment(att)) {
+        const zipName = att.filename || 'unnamed.zip';
         try {
-          const zip = new AdmZip(att.content);
-          const entries = zip.getEntries();
-          let entryCount = 0;
-          for (const entry of entries) {
-            if (entry.isDirectory) continue;
-            const entryName = entry.name.toLowerCase();
-            const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(entryName);
-            if (!entryName.endsWith('.pdf') && !entryName.endsWith('.ofd') && !isImage) continue;
-            if (++entryCount > MAX_ZIP_ENTRIES) {
-              skippedOversize = true;
-              ctx.log.warn(`ZIP ${att.filename} exceeds ${MAX_ZIP_ENTRIES} entries; stopping extraction`);
-              break;
-            }
-
-            const label = `${att.filename || 'unnamed.zip'}/${entry.name}`;
-            // Guard against decompression bombs using the DECLARED uncompressed
-            // size before ever calling getData() (which allocates the buffer).
-            if (!admit(entry.header.size, label)) continue;
-
-            const content = entry.getData();
-            const isOfd = entryName.endsWith('.ofd');
-            pdfs.push({
-              data: content,
-              source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
-              suggestedName: entry.name,
-              format: isImage ? 'image' : (isOfd ? 'ofd' : 'pdf'),
-              documentType: isOfd && looksLikeOfdItinerary({
-                data: content,
-                source: `${att.filename || 'unnamed.zip'}/${entry.name}`,
-                suggestedName: entry.name,
-                format: 'ofd',
-              }) ? 'itinerary' : 'invoice',
-              requiresOcr: true,
-            });
+          // 与站点处理器共用同一个 ZIP 解包器：entry 数量、单条/总解压上限和
+          // 压缩比（zip bomb）防护都在其中（APP-09）。
+          const { documents, skipped } = documentsFromZip(att.content, zipName);
+          for (const item of skipped) {
+            skippedOversize = true;
+            issues.push({ reason: `attachment:zip_entry_skipped:${item}` });
+            ctx.log.warn(`Skipped ZIP entry ${item}`);
+          }
+          for (const doc of documents) {
+            if (!admit(doc.data.length, doc.source)) continue;
+            pdfs.push(doc);
           }
         } catch (err) {
-          ctx.log.warn(`Failed to extract ZIP ${att.filename}: ${err}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          issues.push({ reason: `attachment:zip_failed:${zipName}:${msg}` });
+          ctx.log.warn(`Failed to extract ZIP ${zipName}: ${msg}`);
         }
       } else if (isImageAttachment(att)) {
         // Skip signature logos / embedded images; only real image attachments archive.
@@ -261,7 +170,11 @@ const attachmentExtractor: Extractor = {
       ctx.log.warn(`Archived ${pdfs.length} document(s); some attachments were skipped for exceeding the size cap`);
     }
 
-    return { kind: 'pdf', pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log) };
+    return {
+      kind: 'pdf',
+      pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log, mail.subject ?? undefined),
+      issues,
+    };
   },
 };
 

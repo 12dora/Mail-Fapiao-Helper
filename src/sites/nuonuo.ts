@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
 import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
+import { assertDocumentResponse } from './common.js';
 
 function isNuonuoHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
@@ -114,11 +115,11 @@ async function downloadPdf(url: string, ctx: Ctx): Promise<Buffer> {
   }
 
   const contentType = response.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/pdf')) {
-    throw new Error(`nuonuo_pdf_content_type_${contentType || 'unknown'}`);
-  }
-
-  return readCappedBuffer(response);
+  const data = await readCappedBuffer(response);
+  // 只认 magic bytes：带 `%PDF` 头的通用 MIME 也是合法发票，不能因为 CDN 返回
+  // application/octet-stream 就把有效 PDF 打进待确认（APP-10D）。
+  assertDocumentResponse({ data, contentType, label: 'nuonuo_pdf', allow: ['pdf'] });
+  return data;
 }
 
 const nuonuoHandler: SiteHandler = {

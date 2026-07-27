@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
+import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function extractInvoiceUrl(html: string): string | null {
   const match = html.match(/invoiceUrl\s*=\s*'([^']+)'/);
@@ -52,16 +52,16 @@ const pinganHandler: SiteHandler = {
     const downloadUrl = `https://dscs-ucup-evp-core.pingan.com.cn/ucup-evp-dmz/api/v1/preview?t=1&v=3&q=${encodeURIComponent(token)}`;
     const { data, contentType } = await fetchBuffer(downloadUrl, ctx);
 
-    if (!contentType.includes('pdf') && !contentType.includes('octet-stream')
-        && data.subarray(0, 4).toString('latin1') !== '%PDF') {
-      throw new Error(`pingan_no_pdf:${contentType || 'unknown'}`);
-    }
+    // 通用 MIME（octet-stream）必须配合 magic bytes 才放行，否则 JSON 错误页
+    // 或网关响应会被当成发票归档并送进 OCR（APP-10D）。
+    assertDocumentResponse({ data, contentType, label: 'pingan', allow: ['pdf'] });
 
     const head = await ctx.http(downloadUrl, { method: 'HEAD' }).catch(() => null);
     return [{
       data,
       source: downloadUrl,
       suggestedName: filenameFromDisposition(head?.headers.get('content-disposition') ?? null),
+      format: 'pdf',
     }];
   },
 };

@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, pdfsFromZip } from './common.js';
+import { decodeHtmlEntities, detectDocumentKind, documentsFromZip, fetchBuffer } from './common.js';
 
 const taobaoFlashHandler: SiteHandler = {
   name: 'taobaoFlash',
@@ -20,14 +20,21 @@ const taobaoFlashHandler: SiteHandler = {
     const cleanUrl = decodeHtmlEntities(url);
     const { data, contentType } = await fetchBuffer(cleanUrl, ctx);
 
-    if (contentType.includes('application/zip')
-        || contentType.includes('application/octet-stream')
-        || data.subarray(0, 2).toString('latin1') === 'PK') {
-      const pdfs = pdfsFromZip(data, cleanUrl);
-      if (pdfs.length > 0) return pdfs;
+    const kind = detectDocumentKind(data);
+    if (kind === 'pdf') {
+      return [{ data, source: cleanUrl, suggestedName: 'taobao-flash-invoice.pdf', format: 'pdf' }];
     }
 
-    throw new Error(`taobaoFlash_no_pdf:${contentType || 'unknown'}`);
+    if (kind === 'archive') {
+      // PDF / OFD / 图片都是受支持的发票格式（APP-10C）。
+      const { documents, skipped } = documentsFromZip(data, cleanUrl);
+      if (skipped.length > 0) {
+        ctx.log.warn(`taobaoFlash ZIP entries skipped: ${skipped.join(', ')}`);
+      }
+      if (documents.length > 0) return documents;
+    }
+
+    throw new Error(`taobaoFlash_no_document:${contentType || 'unknown'}:${kind}`);
   },
 };
 

@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import type { Ctx, PdfArtifact } from '../extract/types.js';
 import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, pdfsFromZip } from './common.js';
+import { decodeHtmlEntities, detectDocumentKind, documentsFromZip, fetchBuffer } from './common.js';
 
 const taobaoHandler: SiteHandler = {
   name: 'taobao',
@@ -20,18 +20,22 @@ const taobaoHandler: SiteHandler = {
     const cleanUrl = decodeHtmlEntities(url);
     const { data, contentType } = await fetchBuffer(cleanUrl, ctx);
 
-    if (data.subarray(0, 4).toString('latin1') === '%PDF') {
-      return [{ data, source: cleanUrl, suggestedName: 'taobao-invoice.pdf' }];
+    // 只按 magic bytes 判定，避免把 JSON 错误页当成发票（APP-10D）。
+    const kind = detectDocumentKind(data);
+    if (kind === 'pdf') {
+      return [{ data, source: cleanUrl, suggestedName: 'taobao-invoice.pdf', format: 'pdf' }];
     }
 
-    if (contentType.includes('application/zip')
-        || contentType.includes('application/octet-stream')
-        || data.subarray(0, 2).toString('latin1') === 'PK') {
-      const pdfs = pdfsFromZip(data, cleanUrl);
-      if (pdfs.length > 0) return pdfs;
+    if (kind === 'archive') {
+      // PDF / OFD / 图片都是受支持的发票格式，OFD-only 包不再被当成失败（APP-10C）。
+      const { documents, skipped } = documentsFromZip(data, cleanUrl);
+      if (skipped.length > 0) {
+        ctx.log.warn(`taobao ZIP entries skipped: ${skipped.join(', ')}`);
+      }
+      if (documents.length > 0) return documents;
     }
 
-    throw new Error(`taobao_no_pdf:${contentType || 'unknown'}`);
+    throw new Error(`taobao_no_document:${contentType || 'unknown'}:${kind}`);
   },
 };
 
