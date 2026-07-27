@@ -58,19 +58,26 @@ if (mismatched.length > 0) {
   process.exit(1);
 }
 
+// This script only ever runs on the stable publishing path. An official release
+// must be fully signed, so anything less is a hard failure rather than a
+// disclaimer printed on top of an untrustworthy download.
+const notStable = infos.filter((info) => info.channel !== 'stable');
 const unsigned = infos.filter((info) => !info.signed);
-const signedNotNotarized = infos.filter((info) => info.signed && info.platform === 'mac' && !info.notarized);
+const macNotNotarized = infos.filter((info) => info.platform === 'mac' && !info.notarized);
+
+if (notStable.length > 0 || unsigned.length > 0 || macNotNotarized.length > 0) {
+  console.error('compose-release-notes: refusing to publish an official release from artifacts that lack a full trust chain:');
+  for (const info of notStable) console.error(`  - ${info.name}: channel=${info.channel} (expected "stable")`);
+  for (const info of unsigned) console.error(`  - ${info.name}: signed=false`);
+  for (const info of macNotNotarized) console.error(`  - ${info.name}: notarized=false`);
+  console.error(
+    '\nUnsigned binaries are published through the development workflow as workflow artifacts only,\n' +
+      'never as a GitHub Release.\n',
+  );
+  process.exit(1);
+}
 
 const lines = [];
-
-if (unsigned.length > 0) {
-  lines.push('> ⚠️ **本次发布包含未签名的开发构建（unsigned development build）**');
-  lines.push('>');
-  lines.push('> 未签名的安装包不会通过 macOS Gatekeeper / Windows SmartScreen 的信任校验，');
-  lines.push('> 系统无法向你证明文件来源和完整性。请只从本仓库的 Releases 页面下载，');
-  lines.push('> 并在安装前核对下方的 commit 与 SHA256。文件名带 `-unsigned` 后缀的即为未签名构建。');
-  lines.push('');
-}
 
 lines.push('## 来源（provenance）');
 lines.push('');
@@ -86,28 +93,16 @@ lines.push('');
 lines.push('| 产物 | 代码签名 | 公证 / 时间戳 |');
 lines.push('|---|---|---|');
 for (const info of infos) {
-  const signCell = info.signed ? '✅ 已签名' : '❌ **未签名（unsigned development build）**';
   const notaryCell = info.platform === 'mac'
-    ? (info.notarized ? '✅ 已公证并 staple' : (info.signed ? '⚠️ 未公证' : '—'))
-    : (info.signed ? '✅ Authenticode + RFC3161 时间戳' : '—');
-  lines.push(`| ${info.name} | ${signCell} | ${notaryCell} |`);
+    ? '✅ 已公证并 staple'
+    : '✅ Authenticode + RFC3161 时间戳';
+  lines.push(`| ${info.name} | ✅ 已签名 | ${notaryCell} |`);
 }
 lines.push('');
-
-if (signedNotNotarized.length > 0) {
-  lines.push('> 部分 macOS 产物已签名但未公证，首次打开仍会看到 Gatekeeper 提示。');
-  lines.push('');
-}
-
-if (unsigned.length > 0) {
-  lines.push('### 未签名构建的处理方式');
-  lines.push('');
-  lines.push('- **macOS**：在“应用程序”里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。');
-  lines.push('  只对这一个 app 放行，不要对整个目录递归执行 `xattr -dr`。');
-  lines.push('- **Windows**：SmartScreen 提示时点 **更多信息 → 仍要运行**。');
-  lines.push('- 受管设备 / 企业环境不建议部署未签名构建，请等待签名版本或自行从源码构建。');
-  lines.push('');
-}
+lines.push('发布流水线在打包后逐个产物执行了严格校验：macOS 跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate`，Windows 校验 Authenticode 状态与时间戳反签名。任一项失败即中止发布。');
+lines.push('');
+lines.push('未签名的开发构建只以 CI workflow artifact 的形式提供，**不会**出现在 Releases 页面。');
+lines.push('');
 
 writeFileSync(out, `${lines.join('\n')}\n`);
-console.log(`compose-release-notes: wrote ${out} (${infos.length} platform(s), ${unsigned.length} unsigned)`);
+console.log(`compose-release-notes: wrote ${out} (${infos.length} signed platform(s))`);

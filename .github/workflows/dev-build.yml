@@ -1,0 +1,131 @@
+name: Development build (unsigned)
+
+# CODE-05A: the *only* sanctioned way to produce an unsigned build.
+#
+# Everything here is deliberately incapable of creating a GitHub Release:
+#   * `permissions: contents: read` — the job has no write scope at all;
+#   * artifacts are uploaded as workflow artifacts with a short retention;
+#   * every filename carries an `-unsigned` suffix, enforced by
+#     scripts/verify-release-artifacts.mjs --channel development.
+#
+# Signed, publishable builds are cut exclusively by release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的分支、tag 或 commit SHA（留空则用默认分支）'
+        required: false
+        type: string
+      platform:
+        description: '构建目标'
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - mac
+          - win
+
+# No write scope anywhere in this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-build-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The `matrix` context is not available in a job-level `if`, so the platform
+  # selection is resolved into an explicit matrix here instead.
+  plan:
+    name: Plan targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Build matrix
+        id: plan
+        shell: bash
+        env:
+          SELECTED: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          MAC='{"name":"macOS arm64","platform":"mac","os":"macos-15"}'
+          WIN='{"name":"Windows x64","platform":"win","os":"windows-2025"}'
+          case "${SELECTED}" in
+            mac)  INCLUDE="[${MAC}]" ;;
+            win)  INCLUDE="[${WIN}]" ;;
+            both) INCLUDE="[${MAC},${WIN}]" ;;
+            *)    echo "::error::unknown platform input '${SELECTED}'"; exit 1 ;;
+          esac
+          echo "matrix={\"include\":${INCLUDE}}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Unsigned ${{ matrix.name }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Test
+        run: npm test
+
+      # No signing secrets are referenced here at all — a development build must
+      # never accidentally consume a production certificate.
+      - name: Build unsigned package
+        env:
+          MFH_RELEASE_CHANNEL: development
+        run: npm run dist:${{ matrix.platform }}
+
+      # Asserts the artifacts are honestly labelled unsigned (build-info,
+      # filenames, and — on macOS — an ad-hoc rather than Developer ID signature),
+      # in addition to the usual CODE-04 / CODE-06 structural checks.
+      - name: Verify packaged artifacts
+        run: npm run verify:artifacts -- --platform ${{ matrix.platform }} --channel development
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-dev-build-${{ matrix.platform }}
+          retention-days: 14
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/build-info-*.json
+          if-no-files-found: error
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### ⚠️ 未签名开发构建 — ${{ matrix.name }}"
+            echo
+            echo "这些产物**没有代码签名**，macOS Gatekeeper / Windows SmartScreen 无法验证其来源与完整性。"
+            echo
+            echo "- 仅作开发与测试用途，**不要**分发给最终用户。"
+            echo "- 它们只以 workflow artifact 形式存在（保留 14 天），**不会**出现在 Releases 页面。"
+            echo "- 正式安装包请从 [Releases](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases) 下载，"
+            echo "  那里的产物一律经过签名、公证与严格校验。"
+          } >> "$GITHUB_STEP_SUMMARY"

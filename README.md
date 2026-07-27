@@ -10,7 +10,7 @@
 
 - [软件能做什么](#一软件能做什么)
 - [下载](#二下载)
-- [首次打开（绕过系统拦截）](#三首次打开绕过系统拦截)
+- [首次打开](#三首次打开)
 - [首次使用](#四首次使用)
 - [页面一览](#五页面一览)
 - [本机数据保存在哪里](#六本机数据保存在哪里)
@@ -53,35 +53,33 @@
 
 ---
 
-## 三、首次打开（绕过系统拦截）
+## 三、首次打开
 
-### 先看这里：当前发布物是**未签名的开发构建**
+### 正式发布物一律经过签名与公证
 
-本项目暂时没有 Apple Developer ID / Windows Authenticode 证书，Releases 页面上文件名带 **`-unsigned`** 后缀的安装包即为未签名构建。发布说明（release notes）里也会逐个平台列出签名状态与源码 commit。
+[Releases](../../releases) 页面上的安装包由发布流水线签名：macOS 使用 Apple Developer ID 证书并完成 **公证（notarization）+ staple**，Windows 使用 **Authenticode + RFC3161 时间戳**。流水线在打包后会逐个产物跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate` 与 Authenticode 校验，**任一项不过就不会发布**。所以正常情况下双击即可安装，不会遇到 Gatekeeper / SmartScreen 拦截。
 
-这意味着：
+发布说明里会列出源码 commit 和逐平台签名状态，可自行核对。
 
-- **系统无法替你验证来源和完整性。** Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
-- 请**只从本仓库的 [Releases](../../releases) 页面下载**，并核对发布说明里的 commit；不要从转发的网盘、群文件安装。
-- **受管设备、公司电脑、处理敏感票据的机器不建议安装未签名构建**——请等待签名版本，或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
+> **未签名的开发构建不会出现在 Releases 页面。** CI 的「Development build (unsigned)」workflow 产出的未签名包只以 workflow artifact 形式存在（保留 14 天），文件名带 `-unsigned` 后缀，仅供开发测试。该 workflow 没有写权限，无法创建 Release。
 
-一旦仓库配置了签名证书，发布流水线会自动产出已签名 + 已公证的包，文件名不再带 `-unsigned`，下面的放行步骤也就不再需要。
+### 如果你拿到的是未签名包（开发构建，或本项目早期版本）
 
-### macOS
+未签名包意味着**系统无法替你验证来源和完整性**，Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
 
-1. 双击 `.dmg`，把"发票助手"拖进 **应用程序**。
-2. 第一次打开：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），在弹窗里再点 **打开**。
-3. 系统记住这一次授权后，之后正常双击即可。
+- 请只从本仓库下载，并核对 commit；不要从转发的网盘、群文件安装。
+- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——用 Releases 里的正式版，或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
+- macOS：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），弹窗里再点 **打开**。系统记住这一次授权后即可正常使用。
+- Windows：SmartScreen 提示时，先确认文件来源，再点 **更多信息 → 仍要运行**。
 
 > **不要**执行 `xattr -dr com.apple.quarantine` 之类的递归命令去"修好"它。那会把整个目录下所有文件的隔离标记一起清掉——包括你并不打算信任的东西——而且会掩盖掉真正的损坏/篡改提示。上面的"右键 → 打开"只对这一个 app 生效，是范围最小的做法。
 >
-> 如果右键打开后系统仍然坚持"已损坏"，请把下载的文件删掉并重新从 Releases 下载：这通常说明文件在传输中被截断或被改动过。
+> 如果右键打开后系统仍然坚持"已损坏"，请把下载的文件删掉重新下载：这通常说明文件在传输中被截断或被改动过。
 
-### Windows
+### 安装步骤
 
-1. 双击 `发票助手 Setup <version>.exe`，按引导安装。
-2. SmartScreen 提示"Windows 已保护你的电脑"时，先确认文件确实来自本仓库 Releases，再点 **更多信息 → 仍要运行**。
-3. 从开始菜单找到"发票助手"打开。
+- **macOS**：双击 `.dmg`，把"发票助手"拖进 **应用程序**，然后双击打开。
+- **Windows**：双击 `发票助手 Setup <version>.exe`，按引导安装，从开始菜单打开。
 
 > 免安装方案：下载 `发票助手-<version>-win.zip`，解压到任意目录，双击 `发票助手.exe`，第一次同样会触发 SmartScreen。
 
@@ -172,9 +170,9 @@ pending/               # 待确认邮件（含原 .eml 与索引）
 <details>
 <summary>macOS 提示"应用已损坏，无法打开"</summary>
 
-这是 macOS 对**未签名应用**的标准提示（当前发布物即为未签名开发构建，见 [第三节](#三首次打开绕过系统拦截)）。
+Releases 上的正式安装包已签名并公证，正常不会出现这个提示。如果你看到它，说明手上的包是**未签名的开发构建**（CI workflow artifact 或早期版本），或者文件在下载中被改动了。参见 [第三节](#三首次打开)。
 
-正确做法：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。这只对这一个 app 放行。
+未签名开发构建的正确做法：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。这只对这一个 app 放行。
 
 **请不要**用 `xattr -dr com.apple.quarantine <目录>` 递归清除隔离标记：它会连带信任你没打算信任的文件，并且会让真正的"文件损坏/被篡改"提示也一并消失。
 
@@ -255,40 +253,53 @@ npm run test:browser      # 渲染进程 E2E，需要 Playwright Chromium，单�
 ### 打包本地安装包
 
 ```bash
-npm run dist:mac          # macOS dmg + zip（arm64）
-npm run dist:win          # Windows nsis + zip（x64）
-npm run verify:artifacts -- --platform mac   # 校验产物
+npm run dist:mac          # macOS dmg + zip（arm64），未签名开发构建
+npm run dist:win          # Windows nsis + zip（x64），未签名开发构建
+npm run verify:artifacts -- --platform mac --channel development
 ```
 
 产物写入 `release/`（已 gitignore）。
 
-打包经由 [scripts/build-release.mjs](scripts/build-release.mjs)：环境里有签名证书就签名（macOS 还会在有 Apple 凭据时公证），没有则产出**未签名构建**并在文件名上加 `-unsigned` 后缀，同时写出 `release/build-info-<platform>-<arch>.json` 记录签名状态。`verify:artifacts` 会拒绝包含异平台可执行文件、异平台 OCR 引擎、测试代码或 dev fake backend 的产物。
+打包经由 [scripts/build-release.mjs](scripts/build-release.mjs)，它区分两个**发布通道**：
+
+| 通道 | 用在哪 | 签名要求 | 产物去向 |
+|---|---|---|---|
+| `development`（默认） | 本地 `npm run dist:*`、`dev-build.yml` | 不签名；macOS 只做 ad-hoc 签名以便 arm64 能启动；文件名强制加 `-unsigned` | 只作为 workflow artifact，**永远不会**变成 Release |
+| `stable` | `release.yml` | **强制**签名 + 公证（macOS）+ 时间戳（Windows），缺任一项在打包前就失败 | 正式 GitHub Release |
+
+`npm run verify:artifacts` 除了拒绝异平台可执行文件、异平台 OCR 引擎、测试代码和 dev fake backend，还会按通道校验信任级别：
+
+- `--channel stable`：macOS 跑 `codesign --verify --deep --strict`、断言非 ad-hoc 签名 + 有 Team ID + hardened runtime、`spctl --assess`、`stapler validate`，并单独校验嵌套的 efapiao OCR 二进制和 `.dmg`；Windows 校验每个 `.exe` 的 Authenticode 状态为 `Valid` 且有时间戳反签名。任一项失败即失败。
+- `--channel development`：断言产物**确实**是未签名的（build-info、文件名、ad-hoc 签名三者一致），避免开发构建被误当成正式发布。
 
 macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitlements.mac.plist)（hardened runtime + 嵌套 OCR 二进制所需的 library validation 豁免）。
 
 ### 持续集成
 
 - [.github/workflows/ci.yml](.github/workflows/ci.yml) — 每个 PR 和 push 到 main：在 macOS + Windows 上跑 `npm audit --omit=dev` 与 `npm test`；Chromium 浏览器 E2E 作为单独的可选 job。
-- [.github/workflows/release.yml](.github/workflows/release.yml) — 打包前同样跑 `npm test`。
+- [.github/workflows/dev-build.yml](.github/workflows/dev-build.yml) — 手动触发的**未签名开发构建**。`permissions: contents: read`，没有写权限，产物只上传为 workflow artifact（保留 14 天）。
+- [.github/workflows/release.yml](.github/workflows/release.yml) — **正式签名发布**，见下。
 
 ### 发布到 GitHub Release
 
-推一个 `v*` tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)。也可以用 `workflow_dispatch` 手动指定 tag，此时流水线会先做校验：
+推一个 `v*` tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)。也可以用 `workflow_dispatch` 手动指定 tag。流水线先做校验，任一项不过就中止：
 
-1. tag 必须**已经存在**于远端，并解析成唯一的 commit SHA；
-2. tag 的 semver 必须与该 commit 上 `package.json` 的 `version` 一致；
-3. 该 tag 不能已经有已发布的 Release（避免悄悄替换用户已下载的二进制）；
-4. 所有 matrix job 用 `actions/checkout` 显式 checkout 同一个 commit SHA，构建完成后再次确认 tag 没有被移动。
+1. **签名 secrets 必须齐全**——缺证书或公证凭据时在最便宜的 `resolve` job 直接失败，并提示改用 dev-build workflow。正式 Release 不存在「降级为未签名」这条路径；
+2. tag 必须**已经存在**于远端，并解析成唯一的 commit SHA；
+3. tag 的 semver 必须与该 commit 上 `package.json` 的 `version` 一致；
+4. 该 tag 不能已经有已发布的 Release（避免悄悄替换用户已下载的二进制）；
+5. 所有 matrix job 用 `actions/checkout` 显式 checkout 同一个 commit SHA，构建完成后再次确认 tag 没有被移动；
+6. 打包后逐产物做严格签名校验；发布说明生成器再次确认所有 build-info 都是 `channel=stable` 且已签名已公证，否则拒绝发布。
 
 解析出的 commit SHA 会写进发布说明，和每个平台的签名状态一起展示（见 [scripts/compose-release-notes.mjs](scripts/compose-release-notes.mjs)）。
 
-签名相关的 secrets（全部可选，缺失即降级为未签名构建）：
+正式发布所需的 secrets（**全部必需**；未配置时 release workflow 会明确失败，而不是产出未签名包）：
 
 | Secret | 用途 |
 |---|---|
 | `MACOS_CERTIFICATE_P12` / `MACOS_CERTIFICATE_PASSWORD` | macOS Developer ID 证书（base64 的 .p12）与密码 |
 | `APPLE_API_KEY_BASE64` / `APPLE_API_KEY_ID` / `APPLE_API_ISSUER` | App Store Connect API key 公证（推荐） |
-| `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 公证（备选） |
+| `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 公证（上面那组的替代） |
 | `WINDOWS_CERTIFICATE_PFX` / `WINDOWS_CERTIFICATE_PASSWORD` | Windows Authenticode 证书（base64 的 .pfx）与密码 |
 
 ### 其他文档
