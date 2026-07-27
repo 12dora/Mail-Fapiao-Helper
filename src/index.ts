@@ -9,6 +9,7 @@ import { log } from './log.js';
 import {
   ensureSecureDir,
   fileExistsNonEmpty,
+  flushActiveStates,
   secureFileMode,
   StateStore,
   StateWriteError,
@@ -56,8 +57,8 @@ Run 'mfh <command> --help' for command-specific options.
  * 网页自动下载所用的浏览器（APP-19）。
  *
  * 应用**不会**自动准备或下载浏览器：桌面版优先使用系统已安装的 Chrome / Edge，
- * 开发环境才可能命中 Playwright 自带的 Chromium。`playwright.browserManagement`
- * 仅作兼容读取，不参与这里的决策，也不代表任何「由应用准备」的承诺。
+ * 开发环境才可能命中 Playwright 自带的 Chromium。原先的 `playwright.browserManagement`
+ * 设置从不参与这里的决策，已在配置 schema v3 中删除，不再暗示任何「由应用准备」的承诺。
  */
 async function launchBrowser(cfg: Config): Promise<Browser> {
   const launchOptions = {
@@ -524,8 +525,8 @@ async function cmdFetch(argv: string[]): Promise<number> {
       saved++;
       log.info(`saved ${hash} subject="${mail.subject}"`);
     }
-    // 命令结束时显式 flush，未达阈值的增量才算真正落盘。
-    store.flush();
+    // 命令结束时显式 flush 并注销，未达阈值的增量才算真正落盘。
+    store.dispose();
   } catch (e) {
     // 有界批量 checkpoint 必须在致命错误时显式 flush，否则本次已落盘的 .eml 会
     // 失去对应的 state 记录（CODE-07）。
@@ -746,6 +747,7 @@ async function cmdRebuildState(argv: string[]): Promise<number> {
     });
     log.info(`state rebuilt: ${statePath} fetched=${store.fetchedCount} processed=${store.processedCount}`);
     log.info('仅重建了状态文件，缓存邮件、INDEX.csv、invoices.csv、归档文件与待确认队列均未改动。');
+    store.dispose();
     return 0;
   } catch (e) {
     log.error(`rebuild-state failed: ${(e as Error).message}`);
@@ -918,8 +920,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     };
 
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    // 有界批量 checkpoint 之后必须显式 flush，命令结束时状态才算真正落盘。
-    store.flush();
+    // 有界批量 checkpoint 之后必须显式 flush 并注销，命令结束时状态才算真正落盘。
+    store.dispose();
   } catch (e) {
     try {
       store.flush();
@@ -1192,6 +1194,11 @@ let shuttingDown = false;
 function shutdownManagedServices(): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  // CODE-07：先把未达 checkpoint 阈值的状态增量同步刷盘，再放锁、再退出。
+  // 顺序很重要——刷盘必须发生在仍然持有数据目录锁的时候。
+  for (const err of flushActiveStates()) {
+    log.error(`state flush failed during shutdown: ${err.message}`);
+  }
   stopEfapiaoServices();
   clearOcrRuntimePid();
   // 数据目录锁必须在信号退出路径上也释放，否则会留下一把要等陈旧回收的锁。
