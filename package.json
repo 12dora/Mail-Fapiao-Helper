@@ -20,9 +20,9 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p . --noEmit",
     "pretest:cli": "node scripts/check-test-prereqs.mjs cli",
-    "test:cli": "node gui-design/tests/cli-regression.mjs",
+    "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs",
     "pretest:electron": "node scripts/check-test-prereqs.mjs electron",
-    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-full-flow.mjs",
+    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",
     "test:browser": "node gui-design/tests/e2e-fixes.mjs && node gui-design/tests/e2e.mjs",
     "test": "npm run build && npm run typecheck && npm run test:cli && npm run test:electron"
