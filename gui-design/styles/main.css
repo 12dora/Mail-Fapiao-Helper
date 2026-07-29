@@ -989,6 +989,9 @@ kbd {
 .progress.is-done .progress__bar::after { display: none; }
 .progress.is-error .progress__bar { background: var(--err); }
 .progress.is-error .progress__bar::after { display: none; }
+/* FE-01：部分成功 — 警告色，亮/暗主题均用语义变量。 */
+.progress.is-partial .progress__bar { background: var(--warn, var(--accent)); }
+.progress.is-partial .progress__bar::after { display: none; }
 
 .ocr-runner {
   border-top: 1px solid var(--border);

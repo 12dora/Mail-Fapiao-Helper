@@ -591,9 +591,13 @@ export interface SaveConfigOutcome {
   configPath: string;
   config?: Record<string, unknown>;
   fieldErrors?: { path: string; message: string }[];
-  configError?: { message: string; detail?: string; backupPath?: string };
+  configError?: { message: string; detail?: string; backupPath?: string; backupCreated?: boolean };
   /** 显式修复损坏配置时，被隔离备份的旧文件（已脱敏）。 */
   repairedFrom?: string;
+  /** COPY-02：旧配置是否成功另存为备份。 */
+  backupCreated?: boolean;
+  /** 备份路径（已脱敏）；仅 backupCreated 为 true 时有意义。 */
+  backupPath?: string;
 }
 
 function writeConfigAtomic(candidate: Record<string, unknown>): void {
@@ -616,6 +620,7 @@ function writeConfigAtomic(candidate: Record<string, unknown>): void {
 function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): SaveConfigOutcome {
   let base: Record<string, unknown>;
   let backupPath: string | undefined;
+  let backupCreated = false;
   const current = readConfigStrict();
   if (current.ok) {
     base = current.raw;
@@ -629,10 +634,14 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
     // 显式修复：先把损坏文件隔离备份，再以内置示例为基线重建。
     const backup = `${configPath}.corrupt-${Date.now()}.json`;
     try {
-      if (fs.existsSync(configPath)) fs.copyFileSync(configPath, backup);
-      backupPath = redactPath(backup);
+      if (fs.existsSync(configPath)) {
+        fs.copyFileSync(configPath, backup);
+        backupPath = redactPath(backup);
+        backupCreated = true;
+      }
     } catch {
       backupPath = undefined;
+      backupCreated = false;
     }
     try {
       base = JSON.parse(fs.readFileSync(bundledConfigPath, 'utf8')) as Record<string, unknown>;
@@ -640,7 +649,13 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
       return {
         ok: false,
         configPath: redactPath(configPath),
-        configError: { message: '内置示例配置不可读，无法修复配置文件。', ...(backupPath ? { backupPath } : {}) },
+        configError: {
+          message: '内置示例配置不可读，无法修复配置文件。',
+          backupCreated,
+          ...(backupPath ? { backupPath } : {}),
+        },
+        backupCreated,
+        ...(backupPath ? { backupPath } : {}),
       };
     }
   }
@@ -666,15 +681,19 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
         // COPY-10：配置写失败不等于「数据目录」问题；指向可见的设置操作。
         message: '无法保存设置。请确认应用有写入权限后重试；若仍失败，请在「邮箱与保存」中检查保存位置。',
         detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
+        backupCreated,
         ...(backupPath ? { backupPath } : {}),
       },
+      backupCreated,
+      ...(backupPath ? { backupPath } : {}),
     };
   }
   return {
     ok: true,
     configPath: redactPath(configPath),
     config: redactConfig(candidate),
-    ...(backupPath ? { repairedFrom: backupPath } : {}),
+    backupCreated,
+    ...(backupPath ? { repairedFrom: backupPath, backupPath } : {}),
   };
 }
 
@@ -940,10 +959,105 @@ interface OcrProgressState {
 interface FileProgressState {
   /** 已知待处理总数（来自 Queued N）；未知时为 0，不发假 percent（FE-12-BACKEND）。 */
   total: number;
+  /** handled = archived + pending（兼容旧 processed 字段）。 */
   processed: number;
+  archived: number;
+  pending: number;
   skipped: number;
   failed: number;
+  /** archived 子集：有票落盘但仍有待确认。 */
   partial: number;
+}
+
+/** CLI `Run complete:` 结构化计数（簇 C 契约）。 */
+interface RunTerminalCounts {
+  archived: number;
+  pending: number;
+  skipped: number;
+  failed: number;
+  /** archived 子集。 */
+  partial: number;
+  /** archived + pending（兼容旧 processed=）。 */
+  processed: number;
+}
+
+function emptyRunCounts(): RunTerminalCounts {
+  return { archived: 0, pending: 0, skipped: 0, failed: 0, partial: 0, processed: 0 };
+}
+
+/** 从 stdout/stderr 解析 `Run complete: archived=…`（也兼容旧 processed=）。 */
+function parseRunCompleteCounts(output: string): RunTerminalCounts | undefined {
+  const line = output.split(/\r?\n/).find((l) => l.includes('Run complete:'));
+  if (!line) return undefined;
+  const archived = numField(line, 'archived');
+  const pending = numField(line, 'pending');
+  const skipped = numField(line, 'skipped') ?? 0;
+  const failed = numField(line, 'failed') ?? 0;
+  const partial = numField(line, 'partial') ?? 0;
+  const processedField = numField(line, 'processed');
+  // 新格式优先；旧格式只有 processed= 时把它当作 archived+pending 合计。
+  if (archived !== undefined || pending !== undefined) {
+    const a = archived ?? 0;
+    const p = pending ?? 0;
+    return {
+      archived: a,
+      pending: p,
+      skipped,
+      failed,
+      partial,
+      processed: processedField ?? (a + p),
+    };
+  }
+  if (processedField !== undefined) {
+    return {
+      archived: processedField,
+      pending: 0,
+      skipped,
+      failed,
+      partial,
+      processed: processedField,
+    };
+  }
+  return undefined;
+}
+
+function parseOcrCompleteCounts(output: string): {
+  scanned: number;
+  parsed: number;
+  skipped: number;
+  failed: number;
+  updated: number;
+} | undefined {
+  const match = /OCR complete: scanned=(\d+), parsed=(\d+), skipped=(\d+), failed=(\d+), updated=(\d+)/.exec(output);
+  if (!match) return undefined;
+  return {
+    scanned: Number(match[1]),
+    parsed: Number(match[2]),
+    skipped: Number(match[3]),
+    failed: Number(match[4]),
+    updated: Number(match[5]),
+  };
+}
+
+/**
+ * 运行历史 / IPC 终态：success | partial | failed。
+ * - 有成功侧也有失败 → partial
+ * - 仅失败 / 未启动 / 非 0 且无成功 → failed
+ * - 仅成功（含 skipped）→ success
+ */
+function deriveRunStatus(opts: {
+  code: number | null;
+  started?: boolean;
+  succeeded: number;
+  failed: number;
+  mailNotFound?: boolean;
+}): RunHistoryEntry['status'] {
+  if (opts.started === false) return 'failed';
+  if (opts.mailNotFound) return 'failed';
+  if (opts.failed > 0 && opts.succeeded > 0) return 'partial';
+  if (opts.failed > 0) return 'failed';
+  if (opts.code !== 0 && opts.code !== null) return 'failed';
+  return 'success';
 }
 
 function parseFetchLine(line: string, current: FetchProgressState, emit: ProgressSink): void {
@@ -996,20 +1110,44 @@ function parseOcrLine(line: string, current: OcrProgressState, emit: ProgressSin
     current.skipped = Number(complete[3]);
     current.failed = Number(complete[4]);
     current.processed = current.parsed + current.skipped + current.failed;
+    const status = deriveRunStatus({
+      code: current.failed > 0 ? 1 : 0,
+      succeeded: current.parsed + current.skipped,
+      failed: current.failed,
+    });
+    let message: string;
+    let kind: string;
+    let phase: string;
+    if (current.total === 0) {
+      phase = '没有文件';
+      kind = 'warn';
+      message = '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。';
+    } else if (status === 'success') {
+      phase = '识别完成';
+      kind = 'ok';
+      message = `识别完成：成功 ${current.parsed} 个，跳过 ${current.skipped} 个。`;
+    } else if (status === 'partial') {
+      phase = '部分完成';
+      kind = 'warn';
+      message = `识别部分完成：成功 ${current.parsed} 个，失败 ${current.failed} 个，跳过 ${current.skipped} 个。`;
+    } else {
+      phase = '识别失败';
+      kind = 'err';
+      message = `识别没有完成：失败 ${current.failed} 个。请稍后重试；若仍失败，请到「设置」检查识别选项。`;
+    }
     emit({
       operation: 'ocr',
-      phase: '识别完成',
+      phase,
       percent: 100,
       total: current.total,
       processed: current.processed,
       parsed: current.parsed,
       skipped: current.skipped,
       failed: current.failed,
-      code: 'ocr_done',
-      message: current.total === 0
-        ? '没有待识别文件。'
-        : `识别完成：成功 ${current.parsed} 个，跳过 ${current.skipped} 个，失败 ${current.failed} 个。`,
-      kind: current.failed > 0 ? 'warn' : 'ok',
+      status,
+      code: status === 'success' ? 'ocr_done' : status === 'partial' ? 'ocr_partial' : 'ocr_failed',
+      message,
+      kind,
       done: true,
     });
     return;
@@ -1057,18 +1195,23 @@ function parseOcrLine(line: string, current: OcrProgressState, emit: ProgressSin
     return;
   }
 
-  emit({
-    operation: 'ocr',
-    phase: '识别日志',
-    total: current.total,
-    processed: current.processed,
-    parsed: current.parsed,
-    skipped: current.skipped,
-    failed: current.failed,
-    code: 'ocr_log',
-    message: logText(text),
-    kind: text.includes('[error]') ? 'err' : text.includes('[warn]') ? 'warn' : '',
-  });
+  // COPY-06：未映射的原始 CLI 行不进普通识别日志；仅发稳定 code。
+  if (text.includes('[error]') || text.includes('[warn]')) {
+    emit({
+      operation: 'ocr',
+      phase: '识别日志',
+      total: current.total,
+      processed: current.processed,
+      parsed: current.parsed,
+      skipped: current.skipped,
+      failed: current.failed,
+      code: text.includes('[error]') ? 'ocr_log_error' : 'ocr_log_warn',
+      message: text.includes('[error]')
+        ? '识别过程中出现错误，详情见技术诊断。'
+        : '识别过程中出现警告，详情见技术诊断。',
+      kind: text.includes('[error]') ? 'err' : 'warn',
+    });
+  }
 }
 
 /** FE-12：未知 total 时不发假 percent。 */
@@ -1099,23 +1242,62 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
   const text = line.trim();
   if (!text) return;
   if (text.includes('Run complete:')) {
-    current.processed = numField(text, 'processed') ?? current.processed;
-    current.skipped = numField(text, 'skipped') ?? current.skipped;
-    current.failed = numField(text, 'failed') ?? current.failed;
-    current.partial = numField(text, 'partial') ?? current.partial;
-    const partialNote = current.partial > 0 ? `，部分成功 ${current.partial} 封` : '';
+    const counts = parseRunCompleteCounts(text);
+    if (counts) {
+      current.archived = counts.archived;
+      current.pending = counts.pending;
+      current.processed = counts.processed;
+      current.skipped = counts.skipped;
+      current.failed = counts.failed;
+      current.partial = counts.partial;
+    } else {
+      current.processed = numField(text, 'processed') ?? current.processed;
+      current.skipped = numField(text, 'skipped') ?? current.skipped;
+      current.failed = numField(text, 'failed') ?? current.failed;
+      current.partial = numField(text, 'partial') ?? current.partial;
+    }
+    const status = deriveRunStatus({
+      code: current.failed > 0 ? 1 : 0,
+      succeeded: current.archived + current.pending + current.skipped,
+      failed: current.failed,
+    });
+    const partialNote = current.partial > 0 ? `，其中 ${current.partial} 封仍有待确认` : '';
+    const pendingNote = current.pending > 0 ? `，待确认 ${current.pending} 封` : '';
+    let message: string;
+    let kind: string;
+    let phase: string;
+    if (status === 'success') {
+      phase = '获取完成';
+      kind = 'ok';
+      message = `处理完成：成功 ${current.archived} 封${pendingNote}${partialNote}，跳过 ${current.skipped} 封。`;
+    } else if (status === 'partial') {
+      phase = '部分完成';
+      kind = 'warn';
+      message = `已处理 ${current.archived + current.pending} 封邮件，其中 ${current.failed} 封没有完成${pendingNote}${partialNote}。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+    } else {
+      phase = '获取失败';
+      kind = 'err';
+      message = current.failed > 0
+        ? `处理没有完成：失败 ${current.failed} 封。请先重试；如仍失败，请展开「查看技术详情」。`
+        : '处理没有完成。请先重试；如仍失败，请展开「查看技术详情」。';
+    }
     emit({
       operation: 'files',
-      phase: '获取完成',
+      phase,
       percent: 100,
-      total: current.total > 0 ? current.total : current.processed + current.skipped + current.failed,
+      total: current.total > 0
+        ? current.total
+        : current.archived + current.pending + current.skipped + current.failed,
       processed: current.processed,
+      archived: current.archived,
+      pending: current.pending,
       skipped: current.skipped,
       failed: current.failed,
       partial: current.partial,
-      code: 'files_done',
-      message: `获取完成：处理 ${current.processed} 封${partialNote}，跳过 ${current.skipped} 封，失败 ${current.failed} 封。`,
-      kind: current.failed > 0 || current.partial > 0 ? 'warn' : 'ok',
+      status,
+      code: status === 'success' ? 'files_done' : status === 'partial' ? 'files_partial' : 'files_failed',
+      message,
+      kind,
       done: true,
     });
     return;
@@ -1195,7 +1377,7 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
   }
 
   // 未识别的原始 CLI 行不进普通进度（COPY-06 / ELEC-07）；只保留稳定 code。
-  // 原始内容只进诊断文件，不进 IPC（MUST-REWORK 8/9）。
+  // 原始内容只进诊断文件，不进 IPC。
   if (text.includes('[error]') || text.includes('[warn]')) {
     emit({
       operation: 'files',
@@ -1261,6 +1443,10 @@ interface RunCliResult {
   started: boolean;
   spawnError?: UiError;
   mails: RunCliMails;
+  /** pipeline `Run complete:` 结构化计数；无终态行时为 undefined。 */
+  runCounts?: RunTerminalCounts;
+  /** OCR `OCR complete:` 结构化计数。 */
+  ocrCounts?: ReturnType<typeof parseOcrCompleteCounts>;
 }
 
 function runCli(command: string, args: string[], opts: RunCliOptions = {}): Promise<RunCliResult> {
@@ -1270,7 +1456,9 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
     const emitFiles = terminalGuard(sendFileProgress);
     const current: FetchProgressState = { seen: 0, saved: 0, skipped: 0, repaired: 0 };
     const ocrCurrent: OcrProgressState = { total: opts.initialTotal ?? 0, parsed: 0, failed: 0, skipped: 0, processed: 0, initialized: false };
-    const fileCurrent: FileProgressState = { total: 0, processed: 0, skipped: 0, failed: 0, partial: 0 };
+    const fileCurrent: FileProgressState = {
+      total: 0, processed: 0, archived: 0, pending: 0, skipped: 0, failed: 0, partial: 0,
+    };
     const savedMails = new Set<string>();
     const processedMails = new Set<string>();
     const manualMails = new Set<string>();
@@ -1303,8 +1491,15 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       } else if (opts.operation === 'files') {
         sendFilePhase('正在从本地邮件中获取发票文件。', emitFiles, fileCurrent);
       }
-      for (const line of `${fake.stdout}\n${fake.stderr}`.split(/\r?\n/)) handleLine(line);
-      resolve({ ...fake, started: true, mails: mails() });
+      const combined = `${fake.stdout}\n${fake.stderr}`;
+      for (const line of combined.split(/\r?\n/)) handleLine(line);
+      resolve({
+        ...fake,
+        started: true,
+        mails: mails(),
+        runCounts: parseRunCompleteCounts(combined),
+        ocrCounts: parseOcrCompleteCounts(combined),
+      });
       return;
     }
 
@@ -1375,7 +1570,14 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       } else if (opts.operation === 'files') {
         emitFiles({ operation: 'files', phase: '获取失败', percent: 100, ...spawnError, kind: 'err', done: true });
       }
-      resolve({ code: null, stdout: '', stderr: spawnError.detail ?? '', started: false, spawnError, mails: mails() });
+      resolve({
+        code: null,
+        stdout: '',
+        stderr: spawnError.detail ?? '',
+        started: false,
+        spawnError,
+        mails: mails(),
+      });
     });
 
     child.on('close', (code) => {
@@ -1395,6 +1597,9 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
 
       const out = stdoutTail.toString();
       const err = stderrTail.toString();
+      const combined = `${out}\n${err}`;
+      const runCounts = parseRunCompleteCounts(combined);
+      const ocrCounts = parseOcrCompleteCounts(combined);
       const detail = sanitizeText(err.trim() || out.trim(), { maxLength: 400 });
       const stopped = opts.jobId ? ocrStopRequested.has(opts.jobId) : false;
 
@@ -1446,7 +1651,8 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
           done: true,
         });
       }
-      if (opts.operation === 'files' && code !== 0) {
+      // 非 0 且未收到 Run complete 终态时补发失败事件（有终态时 parseFileLine 已发）。
+      if (opts.operation === 'files' && code !== 0 && !runCounts) {
         emitFiles({
           operation: 'files',
           phase: '获取失败',
@@ -1463,7 +1669,15 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
           done: true,
         });
       }
-      resolve({ code, stdout: out, stderr: err, started: true, mails: mails() });
+      resolve({
+        code,
+        stdout: out,
+        stderr: err,
+        started: true,
+        mails: mails(),
+        ...(runCounts ? { runCounts } : {}),
+        ...(ocrCounts ? { ocrCounts } : {}),
+      });
     });
   });
 }
@@ -1536,28 +1750,66 @@ function reportFor(
   action: string,
   jobId: string,
   result: RunCliResult,
-  codes: { ok: string; failed: string },
+  codes: { ok: string; failed: string; partial?: string },
+  status: RunHistoryEntry['status'] = result.code === 0 ? 'success' : 'failed',
 ): CliReport {
-  if (result.code === 0) return { code: codes.ok, exitCode: result.code };
+  if (status === 'success') return { code: codes.ok, exitCode: result.code };
   const detail = sanitizeText(result.stderr.trim() || result.stdout.trim(), { maxLength: 400 });
   const diagnosticsRef = writeDiagnostics(action, jobId, result);
+  const code = status === 'partial' && codes.partial
+    ? codes.partial
+    : codes.failed;
   return {
-    code: codes.failed,
+    code,
     exitCode: result.code,
     ...(detail ? { detail } : {}),
     ...(diagnosticsRef ? { diagnosticsRef } : {}),
   };
 }
 
-function ocrRunMessage(result: { stdout: string; stderr: string }): string {
-  const output = `${result.stdout}\n${result.stderr}`;
-  const match = /OCR complete: scanned=(\d+), parsed=(\d+), skipped=(\d+), failed=(\d+), updated=(\d+)/.exec(output);
-  if (!match) return '已尝试识别本地文件。';
-  const [, scanned, parsed, skipped, failed] = match;
-  if (Number(scanned) === 0) {
+function ocrRunMessage(result: RunCliResult): string {
+  const counts = result.ocrCounts ?? parseOcrCompleteCounts(`${result.stdout}\n${result.stderr}`);
+  if (!counts) return '已尝试识别本地文件。';
+  if (counts.scanned === 0) {
     return '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。';
   }
-  return `已扫描 ${scanned} 个文件，识别成功 ${parsed} 个，跳过 ${skipped} 个，失败 ${failed} 个。`;
+  if (counts.failed > 0 && counts.parsed > 0) {
+    return `识别部分完成：成功 ${counts.parsed} 个，失败 ${counts.failed} 个，跳过 ${counts.skipped} 个。`;
+  }
+  if (counts.failed > 0) {
+    return `识别没有完成：失败 ${counts.failed} 个，跳过 ${counts.skipped} 个。`;
+  }
+  return `已扫描 ${counts.scanned} 个文件，识别成功 ${counts.parsed} 个，跳过 ${counts.skipped} 个。`;
+}
+
+function pipelineRunMessage(
+  counts: RunTerminalCounts,
+  status: RunHistoryEntry['status'],
+  onlyMail: boolean,
+  mailNotFound: boolean,
+): string {
+  if (mailNotFound) {
+    return onlyMail
+      ? '没有找到这封待处理邮件。请刷新「待确认」列表后再试。'
+      : '没有找到要处理的邮件。';
+  }
+  if (status === 'success') {
+    if (onlyMail) {
+      if (counts.pending > 0) return '这封邮件已重新处理，仍需在「待确认」中处理。';
+      if (counts.archived > 0) return '这封邮件已重新处理。';
+      if (counts.skipped > 0) return '这封邮件此前已处理，本次已跳过。';
+      return '这封邮件已重新处理。';
+    }
+    const pendingNote = counts.pending > 0 ? `，其中 ${counts.pending} 封进入待确认` : '';
+    return `处理完成，本次处理 ${counts.archived + counts.pending} 封邮件${pendingNote}。`;
+  }
+  if (status === 'partial') {
+    return `已处理 ${counts.archived + counts.pending} 封邮件，其中 ${counts.failed} 封没有完成。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+  }
+  if (onlyMail) {
+    return '这封邮件没有处理完成。请稍后重试；如仍失败，请展开「查看技术详情」。';
+  }
+  return '处理缓存邮件没有完成。请先重试；如仍失败，请展开「查看技术详情」。';
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,23 +1856,43 @@ function appendHistory(entry: Omit<RunHistoryEntry, 'id' | 'time'>): string | un
   }
 }
 
-/** 记录一条运行历史，返回非致命告警文案（写失败时）。 */
+/** 记录一条运行历史，返回非致命告警文案（写失败时）。status 必须由调用方按结构化计数推导（ELEC-12）。 */
 function recordHistory(
   action: string,
   title: string,
   startedAt: number,
-  result: { code: number | null; stdout: string; stderr: string },
+  result: { code: number | null; stdout: string; stderr: string; started?: boolean },
+  status: RunHistoryEntry['status'],
+  message?: string,
 ): string | undefined {
   const output = sanitizeText(`${result.stdout}\n${result.stderr}`.trim(), { maxLength: 500 });
-  const status: RunHistoryEntry['status'] = result.code === 0 ? 'success' : 'failed';
+  const defaultMessage = status === 'success'
+    ? '已完成'
+    : status === 'partial'
+      ? '部分完成'
+      : '运行失败';
   return appendHistory({
     action,
     title,
     status,
-    message: status === 'success' ? '已完成' : '运行失败',
+    message: message ?? defaultMessage,
     detail: output || (status === 'success' ? '命令已完成。' : '没有收到错误详情。'),
     durationMs: Date.now() - startedAt,
   });
+}
+
+/** best-effort 摘要：失败时不覆盖已提交的操作结果（ELEC-08）。 */
+function tryAppSummary(): { summary?: AppSummary; summaryUnavailable?: boolean; warning?: string } {
+  try {
+    return { summary: appSummary() };
+  } catch (err) {
+    return {
+      summaryUnavailable: true,
+      warning: '操作已完成，但本地列表暂时无法刷新。请点击「刷新列表」。',
+      // detail kept out of renderer-facing field; message is user-safe.
+      ...(err instanceof Error ? {} : {}),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2744,22 +3016,49 @@ handleTrusted('mfh:start-fetch', async (_event, payload: unknown) => {
     const args = fetchArgs(range);
     devBackend?.recordTestGlobal(mainWindow, '__mfhLastFetchArgs', args);
     const result = await runCli('fetch', args, { progress: true, jobId: gate.lease.jobId });
-    const warning = recordHistory('fetch', range.dryRun ? '预览邮件' : '获取邮件', startedAt, result);
-    // 预览（--dry-run）不写缓存也不写 INDEX，没有可回显的逐封明细，因此不带
-    // `batch` 字段——让 renderer 显示「没有返回明细」，而不是谎称「本次新增 0 封」。
-    const batch = range.dryRun ? undefined : batchFromHashes(result.mails.saved);
-    const report = reportFor('fetch', gate.lease.jobId, result, { ok: 'fetch_done', failed: 'fetch_failed' });
+    // ELEC-08：CLI 一旦返回，操作结果即最终；后续 enrich 失败不得伪装成「本地数据没有变化」。
+    const status = deriveRunStatus({
+      code: result.code,
+      started: result.started,
+      succeeded: result.code === 0 ? 1 : 0,
+      failed: result.code === 0 ? 0 : 1,
+    });
+    const ok = status === 'success';
+    const message = ok
+      ? (range.dryRun ? '预览完成。' : '获取邮件完成。')
+      : '获取邮件失败，请检查邮箱设置后重试。';
+    const historyWarning = recordHistory(
+      'fetch',
+      range.dryRun ? '预览邮件' : '获取邮件',
+      startedAt,
+      result,
+      status,
+      ok ? '已完成' : '运行失败',
+    );
+    let batch: RunBatch | undefined;
+    let enrichWarning: string | undefined;
+    if (!range.dryRun) {
+      try {
+        batch = batchFromHashes(result.mails.saved);
+      } catch {
+        enrichWarning = '邮件已保存，但本次列表明细暂时无法展示。请到「邮件记录」查看。';
+      }
+    }
+    const report = reportFor('fetch', gate.lease.jobId, result, { ok: 'fetch_done', failed: 'fetch_failed' }, status);
+    const summaryPart = tryAppSummary();
+    const warning = [historyWarning, enrichWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
-      ok: result.code === 0,
+      ok,
+      status,
+      started: result.started,
       ...report,
-      message: result.code === 0
-        ? (range.dryRun ? '预览完成。' : '获取邮件完成。')
-        : '获取邮件失败，请检查邮箱设置后重试。',
+      message,
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(range),
       ...(batch ? { batch } : {}),
       ...(warning ? { warning } : {}),
-      summary: appSummary(),
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
     };
   } finally {
     gate.lease.release();
@@ -2823,22 +3122,65 @@ handleTrusted('mfh:run-pipeline', async (_event, payload: unknown) => {
     if (onlyHash) args.push('--only-mail', onlyHash);
     if (raw.force === true) args.push('--force');
     const result = await runCli('run', args, { operation: 'files', jobId: gate.lease.jobId });
-    const warning = recordHistory('pipeline', onlyHash ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
-    // 本次运行真正处理掉的邮件：归档成功的 + 降级到待确认的。仅被跳过（此前已处理）
-    // 的邮件不算，否则又变成「展示全量最近行」。
-    const batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
-    const report = reportFor('pipeline', gate.lease.jobId, result, { ok: 'pipeline_done', failed: 'pipeline_failed' });
+
+    // ELEC-08 / 簇 C：以结构化终态计数为准，不用裸 exit code 单独判定成功。
+    const counts = result.runCounts
+      ?? parseRunCompleteCounts(`${result.stdout}\n${result.stderr}`)
+      ?? emptyRunCounts();
+    const mailNotFound = /mail_not_found/.test(`${result.stdout}\n${result.stderr}`)
+      || (Boolean(onlyHash) && counts.archived + counts.pending + counts.skipped + counts.failed === 0 && result.code !== 0);
+    const status = deriveRunStatus({
+      code: result.code,
+      started: result.started,
+      succeeded: counts.archived + counts.pending + counts.skipped,
+      failed: counts.failed + (mailNotFound ? 1 : 0),
+      mailNotFound,
+    });
+    const message = pipelineRunMessage(counts, status, Boolean(onlyHash), mailNotFound);
+    // 操作结果在 runCli 返回时即最终；history / batch / summary 均为 best-effort。
+    const historyWarning = recordHistory(
+      'pipeline',
+      onlyHash ? '重新处理单封邮件' : '处理缓存邮件',
+      startedAt,
+      result,
+      status,
+      status === 'success' ? '已完成' : status === 'partial' ? '部分完成' : '运行失败',
+    );
+    let batch: RunBatch = { rows: [], total: counts.archived + counts.pending };
+    let enrichWarning: string | undefined;
+    try {
+      batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
+    } catch {
+      enrichWarning = '邮件已处理，但本次列表明细暂时无法展示。请刷新列表。';
+    }
+    const report = reportFor(
+      'pipeline',
+      gate.lease.jobId,
+      result,
+      { ok: 'pipeline_done', failed: 'pipeline_failed', partial: 'pipeline_partial' },
+      status,
+    );
+    const summaryPart = tryAppSummary();
+    const warning = [historyWarning, enrichWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
-      ok: result.code === 0,
+      ok: status === 'success',
+      status,
+      started: result.started,
       ...report,
-      message: result.code === 0
-        ? `处理完成，本次处理 ${batch.total} 封邮件。`
-        : '处理缓存邮件失败，请查看诊断信息后重试。',
+      message,
+      counts: {
+        archived: counts.archived,
+        pending: counts.pending,
+        skipped: counts.skipped,
+        failed: counts.failed,
+        partial: counts.partial,
+      },
       jobId: gate.lease.jobId,
       normalizedFilter: normalizedFilterFrom(),
       batch,
       ...(warning ? { warning } : {}),
-      summary: appSummary(),
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
     };
   } finally {
     gate.lease.release();
@@ -2983,30 +3325,96 @@ handleTrusted('mfh:run-ocr', async (_event, payload: unknown) => {
       }
     }
 
-    const warning = recordHistory('ocr', raw.force === true ? '开始识别文件' : '识别文件', startedAt, result);
+    // ELEC-12：历史状态看结构化 OCR 计数，不把 --allow-parse-failures 的 exit 0 当成全成功。
+    const ocrCounts = result.ocrCounts
+      ?? parseOcrCompleteCounts(`${result.stdout}\n${result.stderr}`);
+    const ocrStatus = stopped
+      ? 'failed' as const
+      : deriveRunStatus({
+        code: result.code,
+        started: result.started,
+        succeeded: (ocrCounts?.parsed ?? 0) + (ocrCounts?.skipped ?? 0),
+        failed: (ocrCounts?.failed ?? 0) + (ocrCompletedCleanly ? 0 : (ocrCounts ? 0 : 1)),
+      });
+    // 有解析失败时即使 exit 0 也标 partial/failed。
+    const statusWithParseFails: RunHistoryEntry['status'] = stopped
+      ? 'failed'
+      : ocrCounts && ocrCounts.failed > 0 && ocrCounts.parsed > 0
+        ? 'partial'
+        : ocrCounts && ocrCounts.failed > 0 && ocrCounts.parsed === 0
+          ? 'failed'
+          : ocrCompletedCleanly
+            ? 'success'
+            : ocrStatus;
+    const historyWarning = recordHistory(
+      'ocr',
+      raw.force === true ? '开始识别文件' : '识别文件',
+      startedAt,
+      result,
+      statusWithParseFails,
+      statusWithParseFails === 'success'
+        ? '已完成'
+        : statusWithParseFails === 'partial'
+          ? '部分完成'
+          : stopped
+            ? '已停止'
+            : '运行失败',
+    );
     if (stopped) {
+      const summaryPart = tryAppSummary();
       return {
         ok: false,
+        status: 'failed' as const,
+        started: result.started,
         stopped: true,
         code: 'ocr_stopped',
         exitCode: result.code,
         jobId,
         message: '识别已停止。',
-        ...(warning ? { warning } : {}),
-        summary: appSummary(),
+        ...(historyWarning ? { warning: historyWarning } : {}),
+        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
+        ...(summaryPart.warning && !historyWarning ? { warning: summaryPart.warning } : {}),
       };
     }
-    const report = reportFor('ocr', jobId, result, { ok: 'ocr_done', failed: 'ocr_failed' });
-    return {
-      ok: ocrCompletedCleanly,
-      ...report,
-      code: ocrCompletedCleanly ? report.code : (result.code === 0 ? 'ocr_incomplete' : report.code),
+    const report = reportFor(
+      'ocr',
       jobId,
-      message: ocrCompletedCleanly
-        ? ocrRunMessage(result)
-        : '无法完成识别。请稍后重试；若仍失败，请到「设置」检查识别选项并查看技术详情。',
+      result,
+      { ok: 'ocr_done', failed: 'ocr_failed', partial: 'ocr_partial' },
+      statusWithParseFails,
+    );
+    const ok = statusWithParseFails === 'success';
+    const message = statusWithParseFails === 'success' || statusWithParseFails === 'partial'
+      ? ocrRunMessage(result)
+      : '无法完成识别。请稍后重试；若仍失败，请到「设置」检查识别选项并查看技术详情。';
+    const summaryPart = tryAppSummary();
+    const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
+    return {
+      ok,
+      status: statusWithParseFails,
+      started: result.started,
+      ...report,
+      code: statusWithParseFails === 'success'
+        ? report.code
+        : statusWithParseFails === 'partial'
+          ? 'ocr_partial'
+          : (result.code === 0 ? 'ocr_incomplete' : report.code),
+      jobId,
+      message,
+      ...(ocrCounts
+        ? {
+          counts: {
+            scanned: ocrCounts.scanned,
+            parsed: ocrCounts.parsed,
+            skipped: ocrCounts.skipped,
+            failed: ocrCounts.failed,
+          },
+        }
+        : {}),
       ...(warning ? { warning } : {}),
-      summary: appSummary(),
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
     };
   } finally {
     // 临时 run config 是明文；无论正常结束还是异常路径都必须删除。
@@ -3032,25 +3440,50 @@ handleTrusted('mfh:organize', async (_event, payload: unknown) => {
     const cliArgs = ['--config', configPath];
     if (applyRename) cliArgs.push('--apply-rename');
     const result = await runCli('organize', cliArgs, { jobId: gate.lease.jobId });
-    const warning = recordHistory('organize', applyRename ? '一键改名整理' : '整理输出文件', startedAt, result);
+    const status = deriveRunStatus({
+      code: result.code,
+      started: result.started,
+      succeeded: result.code === 0 ? 1 : 0,
+      failed: result.code === 0 ? 0 : 1,
+    });
+    const historyWarning = recordHistory(
+      'organize',
+      applyRename ? '一键改名整理' : '整理输出文件',
+      startedAt,
+      result,
+      status,
+    );
     const output = `${result.stdout}\n${result.stderr}`;
     const scannedMatch = /Organize complete: scanned=(\d+)/.exec(output);
     const scanned = scannedMatch ? Number(scannedMatch[1]) : NaN;
     const baseLabel = applyRename ? '改名' : '整理';
-    const message = Number.isFinite(scanned) && scanned === 0
-      ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
-      : Number.isFinite(scanned)
-        ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
-        : `${baseLabel}完成。`;
-    const report = reportFor('organize', gate.lease.jobId, result, { ok: 'organize_done', failed: 'organize_failed' });
+    const message = status !== 'success'
+      ? `${baseLabel}没有完成，请查看诊断信息了解详情。`
+      : Number.isFinite(scanned) && scanned === 0
+        ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
+        : Number.isFinite(scanned)
+          ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
+          : `${baseLabel}完成。`;
+    const report = reportFor(
+      'organize',
+      gate.lease.jobId,
+      result,
+      { ok: 'organize_done', failed: 'organize_failed' },
+      status,
+    );
+    const summaryPart = tryAppSummary();
+    const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
-      ok: result.code === 0,
+      ok: status === 'success',
+      status,
+      started: result.started,
       ...report,
       jobId: gate.lease.jobId,
-      message: result.code === 0 ? message : `${baseLabel}没有完成，请查看诊断信息了解详情。`,
+      message,
       ...(Number.isFinite(scanned) ? { scanned } : {}),
       ...(warning ? { warning } : {}),
-      summary: appSummary(),
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
     };
   } finally {
     gate.lease.release();
@@ -3337,17 +3770,37 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
       }
       const error = await openPathForUser(openedRel.path);
       if (!error) {
-        return { ok: true, code: 'pending_mail_opened', message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
+        return {
+          ok: true,
+          opened: 'mail' as const,
+          code: 'pending_mail_opened',
+          message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+        };
       }
       showItemInFolderForUser(openedRel.path);
-      return { ok: true, code: 'pending_mail_revealed', message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
+      return {
+        ok: true,
+        opened: 'mail' as const,
+        code: 'pending_mail_revealed',
+        message: '已在文件管理器中定位原始邮件。请打开后到开票平台重新下载发票，再回来选择文件归档。',
+      };
     }
     const error = await openPathForUser(opened.path);
     if (!error) {
-      return { ok: true, code: 'pending_mail_opened', message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
+      return {
+        ok: true,
+        opened: 'mail' as const,
+        code: 'pending_mail_opened',
+        message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+      };
     }
     showItemInFolderForUser(opened.path);
-    return { ok: true, code: 'pending_mail_revealed', message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
+    return {
+      ok: true,
+      opened: 'mail' as const,
+      code: 'pending_mail_revealed',
+      message: '已在文件管理器中定位原始邮件。请打开后到开票平台重新下载发票，再回来选择文件归档。',
+    };
   }
   // 回退：打开邮件缓存目录。与 open-path 共用 resolveOpenTarget（含用户配置的
   // samples 根，不要求必须在 dataDir 内），禁止直接 shell.openPath 绕过。
@@ -3355,20 +3808,31 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   if (!fallback.ok) {
     return {
       ok: false,
+      opened: 'none' as const,
       code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
       message: row
-        ? '没有找到本地副本，且邮件缓存目录不在允许的打开范围内，无法自动打开。'
-        : '没有找到对应邮件。',
+        ? '没有找到这封邮件的本地副本，且无法打开邮件缓存文件夹。'
+        : '没有找到这封邮件。',
     };
   }
   const error = await openPathForUser(fallback.path);
+  if (error) {
+    return {
+      ok: false,
+      opened: 'none' as const,
+      code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
+      message: row ? '没有找到这封邮件的本地副本。' : '没有找到这封邮件。',
+      error: sanitizeText(error, { maxLength: 200 }),
+    };
+  }
+  // COPY-05：打开的是文件夹，不是原始邮件本身。
   return {
-    ok: !error,
-    code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
+    ok: true,
+    opened: 'folder' as const,
+    code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
     message: row
-      ? '没有找到本地副本，已打开邮件缓存目录，请手动查找原始邮件并刷新链接。'
-      : '没有找到对应邮件。',
-    error: error ? sanitizeText(error, { maxLength: 200 }) : undefined,
+      ? '没有找到原始邮件文件，已打开已保存邮件文件夹，请手动查找后再到开票平台重新下载。'
+      : '没有找到这封邮件，已打开已保存邮件文件夹。',
   };
 });
 
@@ -3434,27 +3898,48 @@ handleTrusted('mfh:pending-manual-archive', async (event, payload: unknown) => {
     }
 
     if (!result.ok) {
+      // COPY-18：文件已存在 / 全部重复不是「归档失败」，用专用 code 与文案。
+      const isDup = result.code === 'manual_archive_all_duplicates';
+      const summaryPart = tryAppSummary();
       return {
         ok: false,
         canceled: false,
         code: result.code ?? 'manual_archive_failed',
-        message: result.message ?? '归档失败。',
+        message: result.message
+          ?? (isDup ? '选择的文件都已经归档过了，没有新增内容。' : '文件没有归档成功，待确认记录保持不变。'),
         ...(result.detail ? { detail: result.detail } : {}),
         files: [],
         duplicates: result.duplicates,
-        summary: appSummary(),
+        pendingRemoved: result.pendingRemoved ?? 0,
+        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
       };
     }
 
+    const pendingRemoved = result.pendingRemoved ?? 0;
     const skipped = result.duplicates.length > 0 ? `，跳过 ${result.duplicates.length} 个已归档文件` : '';
+    // COPY-04：明确区分「记录是否已从待确认移除」。
+    let message: string;
+    if (result.message) {
+      message = result.message;
+    } else if (pendingRemoved > 0) {
+      message = `文件已保存，并已从「待确认」移除${skipped}。`;
+    } else {
+      message = `文件已保存，并会在下次识别时处理；但这封邮件仍在「待确认」中${skipped}。请刷新列表后重试移除。`;
+    }
+    const summaryPart = tryAppSummary();
     return {
       ok: true,
       canceled: false,
-      code: result.code ?? 'manual_archive_done',
-      message: result.message ?? `已归档 ${result.files.length} 个文件并加入识别队列${skipped}，已从待确认队列移除。`,
+      code: result.code
+        ?? (pendingRemoved > 0 ? 'manual_archive_done' : 'manual_archive_pending_not_updated'),
+      message,
       files: result.files.map((file) => file.filename),
       duplicates: result.duplicates,
-      summary: appSummary(),
+      pendingRemoved,
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
+      ...(summaryPart.warning ? { warning: summaryPart.warning } : {}),
     };
   } finally {
     gate.lease.release();

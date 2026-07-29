@@ -168,6 +168,47 @@ function pickPath(raw: unknown, path: string): unknown {
   return cur;
 }
 
+/** COPY-11：配置字段 path → 界面中文名，错误文案不暴露 config.* / 内部枚举。 */
+const FIELD_LABELS: Record<string, string> = {
+  'imap.host': '收件服务器',
+  'imap.port': '收件服务器端口',
+  'imap.user': '邮箱账号',
+  'imap.pass': '授权码',
+  'imap.tls': '加密连接',
+  'imap.mailbox': '邮箱文件夹',
+  'filter.keywords': '关键词',
+  'filter.matchSubject': '匹配邮件标题',
+  'filter.matchBody': '匹配邮件正文',
+  'filter.since': '开始日期',
+  'filter.until': '结束日期',
+  'paths.samples': '邮件缓存位置',
+  'paths.invoices': '发票保存位置',
+  'paths.pending': '待确认保存位置',
+  'output.csv': '发票清单文件',
+  'ocr.enabled': '启用识别',
+  'ocr.provider': '识别服务',
+  'ocr.batchSize': '同时识别数量',
+  'ocr.resultsCsv': '识别结果清单文件',
+  'ocr.credentials.secretId': '云端 SecretId',
+  'ocr.credentials.secretKey': '云端 SecretKey',
+  'ocr.credentials.tencentRegion': '云端服务区域',
+  'network.retries': '重试次数',
+  'network.retryDelayMs': '每次重试间隔',
+  'playwright.timeoutMs': '开票网站等待上限',
+  'playwright.headless': '后台打开网页',
+  'rename.avoidConflictBeforeOcr': '识别前避免文件名冲突',
+  'rename.organizedDir': '整理输出目录',
+};
+
+function fieldLabel(path: string): string {
+  if (FIELD_LABELS[path]) return FIELD_LABELS[path];
+  const bare = path.replace(/\[\d+\]/g, '');
+  if (FIELD_LABELS[bare]) return FIELD_LABELS[bare];
+  // 未知字段：不暴露 config. 前缀，用最后一段作弱提示。
+  const tail = bare.split('.').pop() || bare;
+  return tail;
+}
+
 class ErrorCollector {
   readonly errors: ConfigFieldError[] = [];
 
@@ -212,10 +253,16 @@ function rangeText(rule: NumberRule): string {
 function readNumber(c: ErrorCollector, raw: unknown, path: string, rule: NumberRule): number {
   const value = pickPath(raw, path);
   const fallback = rule.fallback ?? 0;
+  const label = fieldLabel(path);
+  const range = rule.min !== undefined && rule.max !== undefined
+    ? `${rule.min}–${rule.max}`
+    : undefined;
 
   if (value === undefined || value === null) {
     if (rule.fallback === undefined) {
-      c.add(path, `config.${path} 是必填项。${rangeText(rule)}`);
+      c.add(path, range
+        ? `「${label}」是必填项，请填写 ${range} 的${rule.integer ? '整数' : '数字'}。`
+        : `「${label}」是必填项。`);
       return fallback;
     }
     return rule.fallback;
@@ -226,29 +273,37 @@ function readNumber(c: ErrorCollector, raw: unknown, path: string, rule: NumberR
     n = value;
   } else if (typeof value === 'string') {
     if (value.trim().length === 0) {
-      c.add(path, `config.${path} 不能为空。${rangeText(rule)}`);
+      c.add(path, range
+        ? `「${label}」不能为空，请填写 ${range} 的${rule.integer ? '整数' : '数字'}。`
+        : `「${label}」不能为空。`);
       return fallback;
     }
     n = Number(value);
   } else {
-    c.add(path, `config.${path} 必须是数字。${rangeText(rule)}`);
+    c.add(path, `「${label}」必须是数字。`);
     return fallback;
   }
 
   if (!Number.isFinite(n)) {
-    c.add(path, `config.${path} 不是有效数字。${rangeText(rule)}`);
+    c.add(path, `「${label}」不是有效数字。`);
     return fallback;
   }
   if (rule.integer && !Number.isInteger(n)) {
-    c.add(path, `config.${path} 必须是整数，当前值：${n}。${rangeText(rule)}`);
+    c.add(path, range
+      ? `「${label}」请填写 ${range} 的整数。`
+      : `「${label}」必须是整数。`);
     return fallback;
   }
   if (rule.min !== undefined && n < rule.min) {
-    c.add(path, `config.${path} 超出范围，当前值：${n}。${rangeText(rule)}`);
+    c.add(path, range
+      ? `「${label}」请填写 ${range} 的${rule.integer ? '整数' : '数字'}。`
+      : `「${label}」不能小于 ${rule.min}。`);
     return fallback;
   }
   if (rule.max !== undefined && n > rule.max) {
-    c.add(path, `config.${path} 超出范围，当前值：${n}。${rangeText(rule)}`);
+    c.add(path, range
+      ? `「${label}」请填写 ${range} 的${rule.integer ? '整数' : '数字'}。`
+      : `「${label}」不能大于 ${rule.max}。`);
     return fallback;
   }
   return n;
@@ -265,19 +320,20 @@ interface StringRule {
 function readString(c: ErrorCollector, raw: unknown, path: string, rule: StringRule = {}): string {
   const value = pickPath(raw, path);
   const fallback = rule.fallback ?? '';
+  const label = fieldLabel(path);
   if (value === undefined || value === null) {
     if (rule.fallback === undefined && !rule.allowEmpty) {
-      c.add(path, `config.${path} 是必填项，且必须是非空字符串。${rule.hint ?? ''}`.trimEnd());
+      c.add(path, `「${label}」是必填项，请填写。${rule.hint ? ` ${rule.hint}` : ''}`.trimEnd());
       return fallback;
     }
     return fallback;
   }
   if (typeof value !== 'string') {
-    c.add(path, `config.${path} 必须是字符串。${rule.hint ?? ''}`.trimEnd());
+    c.add(path, `「${label}」格式不正确。${rule.hint ? ` ${rule.hint}` : ''}`.trimEnd());
     return fallback;
   }
   if (value.length === 0 && !rule.allowEmpty && rule.fallback === undefined) {
-    c.add(path, `config.${path} 不能为空。${rule.hint ?? ''}`.trimEnd());
+    c.add(path, `「${label}」不能为空。${rule.hint ? ` ${rule.hint}` : ''}`.trimEnd());
     return fallback;
   }
   if (value.length === 0 && rule.fallback !== undefined) return rule.fallback;
@@ -286,15 +342,16 @@ function readString(c: ErrorCollector, raw: unknown, path: string, rule: StringR
 
 function readBool(c: ErrorCollector, raw: unknown, path: string, fallback?: boolean): boolean {
   const value = pickPath(raw, path);
+  const label = fieldLabel(path);
   if (value === undefined || value === null) {
     if (fallback === undefined) {
-      c.add(path, `config.${path} 是必填项，合法值：true 或 false`);
+      c.add(path, `「${label}」是必填项，请选择开启或关闭。`);
       return false;
     }
     return fallback;
   }
   if (typeof value !== 'boolean') {
-    c.add(path, `config.${path} 必须是布尔值，合法值：true 或 false`);
+    c.add(path, `「${label}」请选择开启或关闭。`);
     return fallback ?? false;
   }
   return value;
@@ -302,15 +359,16 @@ function readBool(c: ErrorCollector, raw: unknown, path: string, fallback?: bool
 
 function readStringArray(c: ErrorCollector, raw: unknown, path: string): string[] {
   const value = pickPath(raw, path);
+  const label = fieldLabel(path);
   if (!Array.isArray(value) || value.length === 0) {
-    c.add(path, `config.${path} 必须是至少包含一项的字符串数组`);
+    c.add(path, `「${label}」至少需要填写一项。`);
     return [];
   }
   const out: string[] = [];
   for (let i = 0; i < value.length; i++) {
     const item = value[i];
     if (typeof item !== 'string' || item.length === 0) {
-      c.add(`${path}[${i}]`, `config.${path}[${i}] 必须是非空字符串`);
+      c.add(`${path}[${i}]`, `「${label}」第 ${i + 1} 项不能为空。`);
       continue;
     }
     out.push(item);
@@ -321,17 +379,18 @@ function readStringArray(c: ErrorCollector, raw: unknown, path: string): string[
 /** mailbox 允许字符串或字符串数组；空数组表示「遍历全部文件夹」。 */
 function readMailboxList(c: ErrorCollector, raw: unknown, path: string): string[] {
   const value = pickPath(raw, path);
+  const label = fieldLabel(path);
   if (value === undefined || value === null) return [];
   if (typeof value === 'string') return value.length > 0 ? [value] : [];
   if (!Array.isArray(value)) {
-    c.add(path, `config.${path} 必须是字符串或字符串数组（空数组表示遍历全部文件夹）`);
+    c.add(path, `「${label}」格式不正确，请重新选择邮箱文件夹。`);
     return [];
   }
   const out: string[] = [];
   for (let i = 0; i < value.length; i++) {
     const item = value[i];
     if (typeof item !== 'string' || item.length === 0) {
-      c.add(`${path}[${i}]`, `config.${path}[${i}] 必须是非空字符串`);
+      c.add(`${path}[${i}]`, `「${label}」第 ${i + 1} 项不能为空。`);
       continue;
     }
     out.push(item);
@@ -351,19 +410,21 @@ function readEnum<T extends string>(
   if (typeof value === 'string' && (allowed as readonly string[]).includes(value)) {
     return value as T;
   }
-  c.add(path, `config.${path} 只能是 ${allowed.join(' / ')} 之一`);
+  // COPY-11：不暴露内部枚举字面量。
+  c.add(path, `「${fieldLabel(path)}」的取值不在允许范围内，请改回默认或界面提供的选项。`);
   return fallback;
 }
 
 function readDateBound(c: ErrorCollector, raw: unknown, path: string): string | undefined {
   const value = pickPath(raw, path);
+  const label = fieldLabel(path);
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string') {
-    c.add(path, `config.${path} 必须是日期字符串（YYYY-MM-DD 或完整 ISO 8601 时间戳）`);
+    c.add(path, `「${label}」请填写日期（例如 2026-01-01）。`);
     return undefined;
   }
   if (!isValidDateBound(value)) {
-    c.add(path, `config.${path}="${value}" 不是可解析的日期（YYYY-MM-DD 或完整 ISO 8601 时间戳）`);
+    c.add(path, `「${label}」不是有效日期，请按年-月-日填写。`);
     return undefined;
   }
   return value;
@@ -373,18 +434,18 @@ function readCredentials(c: ErrorCollector, raw: unknown, path: string): Record<
   const value = pickPath(raw, path);
   if (value === undefined || value === null) return {};
   if (typeof value !== 'object' || Array.isArray(value)) {
-    c.add(path, `config.${path} 必须是「键: 字符串」形式的对象`);
+    c.add(path, '识别服务的密钥格式不正确，请重新填写。');
     return {};
   }
   // CORE-11：逐项校验 value 为 string，禁止数字/布尔/嵌套对象靠类型断言蒙混过关。
   const out: Record<string, string> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (key.length === 0) {
-      c.add(path, `config.${path} 的键不能为空`);
+      c.add(path, '识别服务的密钥项不能为空。');
       continue;
     }
     if (typeof entry !== 'string') {
-      c.add(`${path}.${key}`, `config.${path}.${key} 必须是字符串`);
+      c.add(`${path}.${key}`, `「${fieldLabel(`${path}.${key}`)}」格式不正确，请重新填写。`);
       continue;
     }
     out[key] = entry;
@@ -626,10 +687,10 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
 
   // 跨字段约束
   if (config.filter.matchSubject === false && config.filter.matchBody === false) {
-    c.add('filter.matchSubject', 'config.filter：matchSubject 与 matchBody 至少要有一个为 true');
+    c.add('filter.matchSubject', '「匹配邮件标题」和「匹配邮件正文」至少选择一项。');
   }
   if (config.filter.since && config.filter.until && !boundsAreOrdered(config.filter.since, config.filter.until)) {
-    c.add('filter.until', `config.filter.since（${config.filter.since}）必须早于或等于 config.filter.until（${config.filter.until}）`);
+    c.add('filter.until', '「结束日期」不能早于「开始日期」。');
   }
   // 注意：不再对 `llm.enabled=true` 报错。该字段已从 schema 中删除，旧文件里残留的
   // 值只会被迁移丢弃——报错会把一个升级前完全合法的配置文件变成阻断项。

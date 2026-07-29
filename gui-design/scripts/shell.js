@@ -1020,7 +1020,8 @@
 
     function statusPill(label) {
         if (label === '完整') return pill('完整', 'ok');
-        if (label === '待补充') return pill('待补充', 'warn');
+        // COPY-03：统一「信息不完整」；兼容旧值「待补充」。
+        if (label === '信息不完整' || label === '待补充') return pill('信息不完整', 'warn');
         if (label === '识别失败') return pill('识别失败', 'err');
         if (label === '已归档') return pill('已归档');
         return pill(label || '未知状态');
@@ -1197,11 +1198,14 @@
 
     /* ---------- Accessible progress ---------- */
     function setProgressState(progressSelector, barSelector, opts) {
-        const { percent, label, indeterminate = false, done = false, error = false } = opts;
+        const {
+            percent, label, indeterminate = false, done = false, error = false, partial = false,
+        } = opts;
         document.querySelectorAll(progressSelector).forEach((el) => {
             el.classList.remove('is-idle');
             el.classList.toggle('is-error', error);
-            el.classList.toggle('is-done', done);
+            el.classList.toggle('is-partial', Boolean(partial) && !error);
+            el.classList.toggle('is-done', done && !error);
             el.classList.toggle('is-indeterminate', indeterminate);
             el.setAttribute('role', 'progressbar');
             el.setAttribute('aria-valuemin', '0');
@@ -1252,12 +1256,17 @@
         const percent = data.percent === undefined
             ? (total > 0 ? Math.min(96, Math.round((processed / total) * 100)) : 12)
             : Math.max(0, Math.min(100, Number(data.percent) || 0));
+        // FE-01：三态终态 — success / partial(warn) / failure(err)。
         const ocrErrored = data.kind === 'err';
-        const phase = data.phase || (data.done ? '识别完成' : '正在识别');
+        const ocrPartial = data.kind === 'warn' && Boolean(data.done);
+        const phase = data.phase || (data.done
+            ? (ocrErrored ? '识别失败' : ocrPartial ? '部分完成' : '识别完成')
+            : '正在识别');
         setProgressState('[data-ocr-progress]', '[data-ocr-bar]', {
             percent,
             done: !ocrErrored && (Boolean(data.done) || percent >= 100),
             error: ocrErrored,
+            partial: ocrPartial,
             label: total > 0 ? `${phase}：${processed} / ${total}，${percent}%` : `${phase}，${percent}%`,
         });
         text('[data-ocr-phase]', phase);
@@ -1274,6 +1283,7 @@
         const readable = eventMessage(data);
         appendOcrLog(readable, data.kind || '');
         if (ocrErrored) announce(`识别失败：${readable || '请查看诊断信息'}`, 'alert');
+        else if (ocrPartial) announce(`识别部分完成：成功 ${parsed}，失败 ${failed}，跳过 ${skipped}。`);
         else if (data.done) announce(`识别完成：成功 ${parsed}，跳过 ${skipped}，失败 ${failed}。`);
         else announce(`识别进行中：${processed} / ${total}`);
     }
@@ -1332,8 +1342,12 @@
         const skipped = Number(data.skipped || 0);
         const failed = Number(data.failed || 0);
         const total = Number(data.total || 0);
+        // FE-01：三态终态 — success / partial(warn) / failure(err)。
         const fileErrored = data.kind === 'err';
-        const phase = data.phase || (data.done ? '获取完成' : '正在获取');
+        const filePartial = data.kind === 'warn' && Boolean(data.done);
+        const phase = data.phase || (data.done
+            ? (fileErrored ? '获取失败' : filePartial ? '部分完成' : '获取完成')
+            : '正在获取');
         // Without a known total, never invent a fake percentage (FE-12). Even if
         // the backend still sends a synthetic percent, prefer indeterminate.
         const hasTotal = total > 0;
@@ -1352,6 +1366,7 @@
             indeterminate,
             done: !fileErrored && Boolean(data.done),
             error: fileErrored,
+            partial: filePartial,
             label: indeterminate ? `${phase}：${countLabel}` : `${phase}，${percent}%`,
         });
         text('[data-file-phase]', phase);
@@ -1364,17 +1379,25 @@
         const readable = eventMessage(data);
         appendFileLog(readable, data.kind || '');
         if (fileErrored) announce(`获取发票文件失败：${readable || '请查看诊断信息'}`, 'alert');
-        else if (data.done) announce(`获取发票文件完成：处理 ${processed}，跳过 ${skipped}，失败 ${failed}。`);
+        else if (filePartial) announce(`获取发票文件部分完成：处理 ${processed} 封，失败 ${failed} 封。`);
+        else if (data.done) announce(`获取发票文件完成：处理 ${processed} 封，跳过 ${skipped} 封，失败 ${failed} 封。`);
         else announce(`正在获取发票文件：${countLabel}`);
     }
 
-    /* Backend status enum (src/electron/summary.ts). 已识别 = 完整 only. */
+    /* Backend status enum (src/electron/summary.ts). 已识别 = 完整 only.
+       COPY-03：partial / 待补充 统一为「信息不完整」。兼容旧摘要里的「待补充」。 */
     const STATUS = {
         COMPLETE: '完整',
-        PARTIAL: '待补充',
+        PARTIAL: '信息不完整',
         ARCHIVED: '已归档',
         FAILED: '识别失败',
     };
+    function libraryStatusMatches(status, want) {
+        if (status === want) return true;
+        // 旧摘要 / 旧 CSV 可能仍是「待补充」。
+        if (want === STATUS.PARTIAL && (status === '待补充' || status === '信息不完整')) return true;
+        return false;
+    }
 
     function applySummary(summary, opts = {}) {
         window.FPH.summary = summary;
@@ -1406,6 +1429,7 @@
         text('[data-dash="cached-mails"]', fmtInt(inbox.total));
         text('[data-dash="cached-range"]', inbox.earliestMonth && inbox.latestMonth ? `${inbox.earliestMonth} 至 ${inbox.latestMonth}` : '暂无本地缓存');
         text('[data-dash="recognized"]', fmtInt(library.recognized));
+        // COPY-03：首页「识别失败」只绑真正的 failed，不含信息不完整。
         text('[data-dash="failed"]', fmtInt(library.failed));
         text('[data-dash="ignored"]', fmtInt(library.ignored));
         const ocrGroups = library.ocr?.byDocumentType || [];
@@ -2091,7 +2115,7 @@
         setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretKey"]', Boolean(secrets.tencentSecretKey ?? cfg.ocr?.credentials?.tencentSecretKey ?? cfg.ocr?.credentials?.secretKey));
         set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || '');
         // playwright.browserManagement is intentionally not surfaced: the setting
-        // was never read by the CLI (APP-19). Chrome/Edge must exist on the system.
+        // was never read by the CLI (APP-19). EXT-09：站点处理器不再依赖本机浏览器。
         set('[data-config="playwright.timeoutMs"]', msToSecondsField(cfg.playwright?.timeoutMs));
         applyOcrStatusCards();
     }
@@ -2244,7 +2268,12 @@
     }
 
     async function handleActionImpl(action, name) {
-        if (name === 'reload-summary') { await loadBridgeSummary(); showToast('已刷新', '本地列表已重新读取。'); return; }
+        if (name === 'reload-summary') {
+            // FE-04：摘要读取失败时不追加成功提示。
+            const ok = await loadBridgeSummary();
+            if (ok) showToast('已刷新', '本地列表已重新读取。');
+            return;
+        }
         if (name === 'preview-fetch') { showFetchPreview(); return; }
         if (name === 'export-log') { exportVisibleLog(); return; }
         if (name === 'export-table') { exportVisibleTable(action); return; }
@@ -2288,10 +2317,12 @@
             if (typeof window.MFH_CONFIG_CANCEL_PENDING_SAVE === 'function') {
                 try { await window.MFH_CONFIG_CANCEL_PENDING_SAVE(); } catch { /* already surfaced */ }
             }
-            await loadBridgeConfig();
+            // FE-04：配置读取失败时不追加成功提示。
+            const ok = await loadBridgeConfig();
             // Clear any lingering invalid markers since values just came from disk.
             document.querySelectorAll('[data-config].is-invalid').forEach((el) => el.classList.remove('is-invalid'));
-            showToast('已重新读取配置', '已从本机恢复最新配置。');
+            if (ok) showToast('已重新读取配置', '已从本机恢复最新配置。');
+            else showToast('读取失败', '无法从本机恢复配置，请检查配置文件后重试。', 'err');
             return;
         }
         if (name === 'repair-config') { await repairConfig(); return; }
@@ -2464,6 +2495,29 @@
         });
     }
 
+    /**
+     * 操作终态三态（簇 C / FE-01）：success | partial | failure。
+     * 仅当主进程明确 started:false（或 confirmed rollback）时才说「本地数据没有变化」。
+     */
+    function terminalKindFromResult(result) {
+        if (!result) return 'err';
+        if (result.status === 'partial' || result.kind === 'warn') return 'warn';
+        if (result.ok === true || result.status === 'success') return 'ok';
+        return 'err';
+    }
+
+    function terminalTitles(method, kind, okTitle) {
+        if (kind === 'ok') return okTitle;
+        if (kind === 'warn') {
+            if (method === 'runOcr') return '识别部分完成';
+            if (method === 'runPipeline') return '部分完成';
+            return '部分完成';
+        }
+        if (method === 'runOcr') return '识别失败';
+        if (method === 'runPipeline') return '处理未完成';
+        return '运行失败';
+    }
+
     async function runBridgeAction(method, payload, okTitle, okMessage) {
         const fn = window.mfhBridge?.[method];
         if (!fn) { bridgeUnavailable(); return; }
@@ -2473,7 +2527,8 @@
         try {
             result = await fn(payload);
         } catch (err) {
-            const failMessage = '操作没有完成，本地数据没有变化。';
+            // 抛错时无法确认 CLI 是否已提交：不谎称「本地数据没有变化」，除非明确 started:false。
+            const failMessage = '操作没有完成。请刷新列表确认结果后重试。';
             if (method === 'runOcr') {
                 applyOcrProgress({
                     phase: '识别失败',
@@ -2501,34 +2556,54 @@
             return;
         }
         if (result?.summary) applySummary(result.summary);
+        else if (result?.summaryUnavailable) {
+            // 操作可能已提交，仅列表刷新失败。
+            showToast('列表未刷新', '操作可能已完成，但本地列表暂时读不到。请点击「刷新列表」。', 'warn');
+        }
         if (result?.normalizedFilter) applyNormalizedFilter(result.normalizedFilter);
         if (method === 'runPipeline') setCurrentBatch(result);
         const readable = eventMessage(result);
         const detail = eventDetail(result);
-        if (method === 'runOcr' && !result?.ok && !result?.summary) {
+        const kind = terminalKindFromResult(result);
+        const started = result?.started;
+        // 仅当主进程明确报告未启动时，才说本地数据没有变化。
+        const noLocalChange = started === false;
+        if (method === 'runOcr' && kind === 'err' && !result?.summary) {
             applyOcrProgress({
                 phase: '识别失败',
                 percent: 100,
-                message: readable || '识别失败，请查看诊断信息。',
+                message: readable
+                    || (noLocalChange ? '操作没有启动，本地数据没有变化。' : '识别失败，请查看诊断信息。'),
                 kind: 'err',
                 done: true,
             });
         }
-        if (method === 'runPipeline' && !result?.ok && !result?.summary) {
+        if (method === 'runPipeline' && kind === 'err' && !result?.summary) {
             applyFileProgress({
                 phase: '获取失败',
                 percent: 100,
-                message: readable || '获取发票文件失败，请查看诊断信息。',
+                message: readable
+                    || (noLocalChange ? '操作没有启动，本地数据没有变化。' : '获取发票文件失败，请查看诊断信息。'),
                 kind: 'err',
                 done: true,
             });
         }
-        showToast(
-            result?.ok ? okTitle : '运行失败',
-            result?.ok ? (readable || okMessage) : (readable || '操作没有完成。展开诊断信息可以查看技术细节。'),
-            result?.ok ? 'ok' : 'err',
-            { detail: result?.ok ? '' : detail, scope: 'global' },
-        );
+        const title = terminalTitles(method, kind, okTitle);
+        const body = kind === 'ok'
+            ? (readable || okMessage)
+            : kind === 'warn'
+                ? (readable || '部分项目已完成，请查看失败项后重试。')
+                : (readable || (noLocalChange
+                    ? '操作没有启动，本地数据没有变化。'
+                    : '操作没有完成。展开诊断信息可以查看技术细节。'));
+        // FE-01 / COPY-01：只有真正 success 才用绿色成功 toast。
+        showToast(title, body, kind, {
+            detail: kind === 'ok' ? (result?.warning || '') : detail,
+            scope: 'global',
+        });
+        if (kind === 'ok' && result?.warning) {
+            showToast('提醒', result.warning, 'warn');
+        }
     }
 
     async function openConfiguredPath(key, fallback) {
@@ -2766,15 +2841,28 @@
         clearConfigError();
         applyFieldErrors([]);
         await loadBridgeConfig();
-        const backupPath = result?.backupPath || result?.configError?.backupPath || '';
-        showToast(
-            '配置已重建',
-            backupPath
-                ? `已用当前填写的内容重新生成配置，损坏的旧文件已另存为备份：${sanitizeText(backupPath)}`
-                : '已用当前填写的内容重新生成配置，损坏的旧文件已另存为备份。',
-            'ok',
-            { duration: 8000 },
-        );
+        // COPY-02：以 backupCreated 为准，不承诺未成功的备份。
+        const backupCreated = result?.backupCreated === true
+            || result?.configError?.backupCreated === true
+            || Boolean(result?.backupPath || result?.repairedFrom || result?.configError?.backupPath);
+        const backupPath = result?.backupPath || result?.repairedFrom || result?.configError?.backupPath || '';
+        if (backupCreated && backupPath) {
+            showToast(
+                '配置已重建',
+                `设置已重建，旧设置已另存为备份：${sanitizeText(backupPath)}`,
+                'ok',
+                { duration: 8000 },
+            );
+        } else if (backupCreated) {
+            showToast('配置已重建', '设置已重建，旧设置已另存为备份。', 'ok', { duration: 8000 });
+        } else {
+            showToast(
+                '配置已重建',
+                '设置已重建，但旧设置未能备份。请立即核对邮箱账号、保存位置和识别设置。',
+                'warn',
+                { duration: 10000 },
+            );
+        }
         announce('配置已重建，可以继续使用。');
     }
 
@@ -2904,19 +2992,13 @@
 
     async function developerReset() {
         const first = window.confirm([
-            '重置应用数据（将删除所有本机数据）',
+            '清空应用管理的数据（保留邮箱与保存设置）',
             '',
-            '以下内容会被永久删除，且不能撤销：',
-            '· 已归档的发票和行程单原件（财务原件，删除后无法恢复）',
-            '· 本机缓存的邮件原文',
-            '· 待确认队列',
-            '· 识别结果清册和 CSV',
-            '· 运行历史记录',
-            '· 邮箱增量同步状态（下次运行会当作首次同步）',
+            '会永久删除应用内部保存的邮件、发票和行程单、待确认记录、识别结果及处理记录。',
             '',
-            '不会删除：邮箱与保存设置。',
+            '邮箱与保存设置不会删除；你另选文件夹中的文件也不会删除。',
             '',
-            '确认继续吗？',
+            '删除后不能撤销。确认继续吗？',
         ].join('\n'));
         if (!first) return;
         const second = window.confirm('再次确认：已归档的发票原件会被删除。请先自行备份需要保留的文件。确定要删除吗？');
@@ -2948,18 +3030,39 @@
         const kind = action.dataset.actionKind;
         const hash = action.dataset.hash || '';
         if (kind === 'retry') {
-            await runBridgeAction('runPipeline', { onlyMail: hash }, '已重新尝试', '这封邮件已重新处理。');
+            // CORE-09 / COPY-01：成功文案由主进程按真实结果给出；部分成功走 warn。
+            await runBridgeAction('runPipeline', { onlyMail: hash }, '已重新处理', '这封邮件已重新处理。');
             return;
         }
         if (kind === 'refresh_link') {
             const fn = window.mfhBridge?.pendingRefreshLink;
             if (!fn) { bridgeUnavailable(); return; }
             const result = await fn({ hash });
+            // COPY-05：按 opened / code 映射标题，绝不把「打开文件夹」说成「已打开原始邮件」。
+            const opened = result?.opened || (result?.code === 'pending_mail_opened' || result?.code === 'pending_mail_revealed'
+                ? 'mail'
+                : result?.code === 'pending_mail_folder_opened'
+                    ? 'folder'
+                    : result?.ok ? 'folder' : 'none');
+            let title;
+            let kindToast;
+            if (opened === 'mail' && result?.ok) {
+                title = result.code === 'pending_mail_revealed' ? '已定位原始邮件' : '已打开原始邮件';
+                kindToast = 'ok';
+            } else if (opened === 'folder' && result?.ok) {
+                title = '已打开已保存邮件文件夹';
+                kindToast = 'warn';
+            } else {
+                title = '没有找到这封邮件';
+                kindToast = 'err';
+            }
             showToast(
-                result?.ok ? '已打开原始邮件' : '没有找到原始邮件',
-                eventMessage(result) || (result?.ok ? '请在邮件里重新获取下载链接后再回来重试。' : '本机缓存里找不到这封邮件，可以先刷新列表。'),
-                result?.ok ? 'ok' : 'err',
-                { detail: result?.ok ? '' : eventDetail(result) },
+                title,
+                eventMessage(result) || (kindToast === 'ok'
+                    ? '请到开票平台重新下载发票，然后回到这里选择文件归档。'
+                    : '本机缓存里找不到这封邮件，可以先刷新列表。'),
+                kindToast,
+                { detail: kindToast === 'ok' ? '' : eventDetail(result) },
             );
             return;
         }
@@ -3000,14 +3103,45 @@
             return;
         }
         const emptied = pendingQueueEmptyAfter(result);
-        const removed = result?.ok && !emptied ? removePendingRowInPlace(hash, '已归档并移出待确认队列') : false;
+        const pendingRemoved = Number(result?.pendingRemoved || 0);
+        // COPY-04：只有 pending 行确实移除后才隐藏卡片。
+        const removed = result?.ok && pendingRemoved > 0 && !emptied
+            ? removePendingRowInPlace(hash, '已归档并移出待确认队列')
+            : false;
         if (result?.summary) applySummary(result.summary, { preservePendingDom: removed });
-        if (result?.ok && emptied) showPendingTerminalState('已归档并移出待确认队列');
+        if (result?.ok && pendingRemoved > 0 && emptied) {
+            showPendingTerminalState('已归档并移出待确认队列');
+        }
+        // COPY-18：全部已存在不是「归档失败」。
+        const isDup = result?.code === 'manual_archive_all_duplicates';
+        let title;
+        let kindToast;
+        if (result?.ok && pendingRemoved > 0) {
+            title = '已归档';
+            kindToast = 'ok';
+        } else if (result?.ok && pendingRemoved === 0) {
+            title = '文件已保存';
+            kindToast = 'warn';
+        } else if (isDup) {
+            title = '没有新增文件';
+            kindToast = 'warn';
+        } else {
+            title = '归档失败';
+            kindToast = 'err';
+        }
         showToast(
-            result?.ok ? '已归档' : '归档失败',
-            eventMessage(result) || (result?.ok ? '文件已复制到归档目录，并加入识别队列。' : '文件没有归档成功，待确认记录保持不变。'),
-            result?.ok ? 'ok' : 'err',
-            { detail: result?.ok ? '' : eventDetail(result) },
+            title,
+            eventMessage(result) || (
+                result?.ok && pendingRemoved > 0
+                    ? '文件已保存，并已从「待确认」移除。'
+                    : result?.ok
+                        ? '文件已保存，并会在下次识别时处理；但这封邮件仍在「待确认」中。请刷新列表后重试移除。'
+                        : isDup
+                            ? '选择的文件都已经归档过了，没有新增内容。'
+                            : '文件没有归档成功，待确认记录保持不变。'
+            ),
+            kindToast,
+            { detail: kindToast === 'err' ? eventDetail(result) : '' },
         );
     }
 
@@ -3118,7 +3252,7 @@
             const status = String(row.status || '');
             const docType = String(row.documentType || '');
             if (activeTab === 'recognized' && status !== STATUS.COMPLETE) return false;
-            if (activeTab === 'partial' && status !== STATUS.PARTIAL) return false;
+            if (activeTab === 'partial' && !libraryStatusMatches(status, STATUS.PARTIAL)) return false;
             if (activeTab === 'failed' && status !== STATUS.FAILED) return false;
             if (activeTab === 'supporting' && docType !== 'supporting') return false;
             if (activeTab === 'itinerary' && docType !== 'itinerary') return false;

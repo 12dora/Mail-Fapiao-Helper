@@ -26,7 +26,10 @@ export interface OcrSummary {
   resultsCsv: string;
   total: number;
   recognized: number;
+  /** 真正识别失败（error），不含 partial。 */
   failed: number;
+  /** 服务返回成功但关键字段缺失（COPY-03：独立计数，不算进 failed）。 */
+  partial: number;
   ignored: number;
   pending: number;
   byDocumentType: OcrSummaryGroup[];
@@ -104,6 +107,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
 
   let recognized = 0;
   let failed = 0;
+  let partial = 0;
   let ignored = 0;
   let pending = 0;
 
@@ -111,7 +115,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
     const result = currentResults.get(rowIdentity(row));
     const resultStatus = (result?.status ?? '').toLowerCase();
     // APP-14C：结果 CSV 是权威来源。success/error 分别映射为 recognized/failed，
-    // 否则中断后已落盘的 error 会被 pending 行的旧状态盖成「待处理」。
+    // partial 独立计数（COPY-03），不再并进 failed。
     let status = (row.status ?? '').toLowerCase();
     let reason = row.reason ?? '';
     // 主动忽略的支撑材料保持 ignored，不被历史结果行改写。
@@ -119,11 +123,12 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
       if (resultStatus === 'success') {
         status = 'recognized';
         reason = '';
-      } else if (resultStatus === 'error' || resultStatus === 'partial') {
-        // partial：服务声称成功但字段不全，同样属于「未识别成功」，
-        // 必须留在失败/待复核工作量里（APP-14B）。
+      } else if (resultStatus === 'partial') {
+        status = 'partial';
+        reason = result?.error || reason || 'partial';
+      } else if (resultStatus === 'error') {
         status = 'failed';
-        reason = result?.error || reason || resultStatus;
+        reason = result?.error || reason || 'error';
       }
     }
     const documentType = result?.documentType || row.documentType || '';
@@ -132,9 +137,12 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
 
     if (status === 'recognized') {
       recognized++;
-    } else if (status === 'failed' || status === 'partial') {
+    } else if (status === 'failed') {
       failed++;
       bump(byFailureReason, compactReason(reason) || 'failed', example);
+    } else if (status === 'partial') {
+      partial++;
+      bump(byFailureReason, compactReason(reason) || 'partial', example);
     } else if (status === 'ignored') {
       ignored++;
       bump(bySupportingReason, reason || 'ignored', example);
@@ -143,7 +151,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
     }
   }
 
-  if (failed === 0 && resultRows.length > 0) {
+  if (failed === 0 && partial === 0 && resultRows.length > 0) {
     for (const row of resultRows) {
       const rowStatus = (row.status ?? '').toLowerCase();
       if (rowStatus !== 'error' && rowStatus !== 'partial') continue;
@@ -157,9 +165,12 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
       const documentType = row.documentType || 'invoice';
       const example = exampleFromRow(row, row.error ?? '');
       bump(byDocumentType, documentType, example);
-      if (status === 'error' || status === 'partial') {
+      if (status === 'error') {
         failed++;
         bump(byFailureReason, compactReason(row.error ?? '') || 'error', example);
+      } else if (status === 'partial') {
+        partial++;
+        bump(byFailureReason, compactReason(row.error ?? '') || 'partial', example);
       } else {
         recognized++;
       }
@@ -172,6 +183,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
     total: pendingRows.length || resultRows.length,
     recognized,
     failed,
+    partial,
     ignored,
     pending,
     byDocumentType: sortedGroups(byDocumentType),

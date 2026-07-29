@@ -12,7 +12,8 @@ import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
  */
 export const LIBRARY_STATUS = {
   COMPLETE: '完整',
-  PENDING: '待补充',
+  /** OCR 字段不全或尚未识别完：界面「信息不完整 / 待补充」。 */
+  PENDING: '信息不完整',
   ARCHIVED: '已归档',
   FAILED: '识别失败',
 } as const;
@@ -316,9 +317,10 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
     // total 是切片前的真实总数，renderer 据此判断是否还有下一页。
     total: Math.max(ocr.total, archivedTotal, rows.length),
     recognized: ocr.recognized,
+    // COPY-03：failed 只含真正识别失败；partial 计入 pending 侧，与列表「信息不完整」一致。
     failed: ocr.failed,
     ignored: ocr.ignored,
-    pending: Math.max(ocr.pending, pendingRows),
+    pending: Math.max(ocr.pending + ocr.partial, pendingRows),
     invoiceLike,
     itinerary,
     supporting,

@@ -56,15 +56,31 @@ interface OcrPendingRow {
 type FetchInput = Parameters<typeof fetch>[0];
 type FetchInit = Parameters<typeof fetch>[1];
 
+/**
+ * 单封邮件处理终态（簇 C / CORE-04）。
+ *
+ * - `archived` / `pending_durable` / `skipped`：已处理（handled），可计入成功侧
+ * - `retryable_failure`：可重试失败（含 pending 写失败）；不得伪装成 manual
+ * - `fatal_failure`：致命失败，由调用方中止整次 run
+ *
+ * 只有前三类算 handled。`partial` 仅在 `archived` 上表示「有票已落盘，但仍有待确认」。
+ */
+export type ProcessMailOutcome =
+  | 'archived'
+  | 'pending_durable'
+  | 'skipped'
+  | 'retryable_failure'
+  | 'fatal_failure';
+
 export interface ProcessMailResult {
   hash: string;
   messageId: string;
   date: string;
   from: string;
   subject: string;
-  outcome: 'pdf' | 'manual' | 'skip';
+  outcome: ProcessMailOutcome;
   reason?: string;
-  /** true 表示归档了部分文档，但同一封邮件仍有候选失败并写入了待确认记录。 */
+  /** 仅 archived：归档了部分文档，同一封邮件仍有候选失败并写入了待确认。 */
   partial?: boolean;
 }
 
@@ -765,11 +781,11 @@ export async function processMail(
   // 别名任一命中即跳过（升级后 32 位 primary 对齐旧 12 位 state）。
   if (!opts.force && identity.aliases.some((a) => state.processedHashes.includes(a))) {
     log.debug(`Skip already processed ${hash}`);
-    return { ...baseResult, outcome: 'skip', reason: 'already_processed' };
+    return { ...baseResult, outcome: 'skipped', reason: 'already_processed' };
   }
 
   if (opts.signal?.aborted) {
-    return { ...baseResult, outcome: 'skip', reason: 'aborted' };
+    return { ...baseResult, outcome: 'skipped', reason: 'aborted' };
   }
 
   const ctx: Ctx = {
@@ -779,42 +795,50 @@ export async function processMail(
     http: makeRetryingFetch(cfg, log),
   };
 
-  /** 统一的降级出口：pending 写不进去就不提交 processed state。 */
-  const degradeToManual = (reason: string): ProcessMailResult => {
-    if (!persistPending(mail, cfg, hash, reason, log, opts.raw)) {
-      return { ...baseResult, outcome: 'manual', reason: `${sanitizePendingReason(reason)}|pending_write_failed` };
+  /**
+   * 统一的待确认出口：pending 写不进去 = retryable_failure，绝不当成 pending_durable。
+   * 只有 .eml + pending.csv 都落盘后才提交 processed（CORE-04）。
+   */
+  const degradeToPending = (reason: string): ProcessMailResult => {
+    const safe = sanitizePendingReason(reason);
+    if (!persistPending(mail, cfg, hash, safe, log, opts.raw)) {
+      return {
+        ...baseResult,
+        outcome: 'retryable_failure',
+        reason: `${safe}|pending_write_failed`,
+      };
     }
     // CORE-03 非对称写：只记 primary；读侧用 aliases 覆盖旧 12 位 state。
     commitProcessed(state, hash, () => {});
     saveState();
-    return { ...baseResult, outcome: 'manual', reason: sanitizePendingReason(reason) };
+    log.info(`Manual ${hash}: ${safe}`);
+    return { ...baseResult, outcome: 'pending_durable', reason: safe };
   };
 
   const extraction = await runExtractors(mail, ctx, hash);
 
   if (extraction.matched.length === 0) {
-    log.info(`No extractor matched ${hash}, -> manual`);
-    return degradeToManual('no_extractor');
+    log.info(`No extractor matched ${hash}, -> pending`);
+    return degradeToPending('no_extractor');
   }
+  // 提取器名只进诊断日志，不进面向用户的进度文案（COPY-06）。
   log.info(`Matched extractors: ${extraction.matched.join('+')} for ${hash}`);
 
   if (extraction.artifacts.length === 0) {
     if (extraction.issues.length > 0) {
       const reason = summarizeIssues(extraction.issues);
-      log.info(`Manual ${hash}: ${reason}`);
-      return degradeToManual(reason);
+      return degradeToPending(reason);
     }
     if (extraction.notApplicable.length > 0) {
       // 没有任何提取器适用，且整封邮件零产出：仍然入待确认，让用户能补票。
       const reason = summarizeReasons(extraction.notApplicable);
-      log.info(`Manual ${hash}: ${reason}`);
-      return degradeToManual(reason);
+      return degradeToPending(reason);
     }
     // 所有匹配的提取器都明确返回 skip：这封邮件无需归档。
     log.info(`Skipped ${hash}`);
     commitProcessed(state, hash, () => {});
     saveState();
-    return { ...baseResult, outcome: 'skip' };
+    return { ...baseResult, outcome: 'skipped' };
   }
 
   const csvPath = path.resolve(cfg.output.csv);
@@ -824,7 +848,7 @@ export async function processMail(
   try {
     // CORE-02：网络/提取 await 返回后、进入同步归档区之前，再检查一次致命中止。
     if (opts.signal?.aborted) {
-      return { ...baseResult, outcome: 'skip', reason: 'aborted' };
+      return { ...baseResult, outcome: 'skipped', reason: 'aborted' };
     }
 
     // 0) 崩溃恢复：先把上次强杀留下的半成品事务清掉，再开始本次归档。
@@ -943,32 +967,41 @@ export async function processMail(
   } catch (err) {
     if (err instanceof ArchiveRecoveryError) throw err;
     // Iron rule: a filesystem / CSV-lock failure during download or archive must
-    // NOT abort the run. Degrade this email to the manual queue and continue.
+    // NOT abort the run. Degrade this email to the pending queue and continue.
     const errMsg = err instanceof Error ? err.message : String(err);
     const reason = `download_or_csv:${redactErrorDetail(errMsg)}`;
     log.warn(`Archive failed for ${hash}: ${reason}`);
-    return degradeToManual(reason);
+    return degradeToPending(reason);
   }
 
   // 部分成功：已归档的票必须保留，同时留下可见的待确认记录，不得当作完整成功。
   if (extraction.issues.length > 0) {
     const reason = `partial_extract:${summarizeIssues(extraction.issues)}`;
     log.warn(`Partial extraction for ${hash}: ${reason}`);
-    const durable = persistPending(mail, cfg, hash, reason, log, opts.raw);
-    if (durable) {
-      commitProcessed(state, hash, () => {});
-      saveState();
+    const safe = sanitizePendingReason(reason);
+    const durable = persistPending(mail, cfg, hash, safe, log, opts.raw);
+    if (!durable) {
+      // 文件已落盘，但待确认写失败：仍须非 0 退出并允许重试（幂等跳过已归档件）。
+      return {
+        ...baseResult,
+        outcome: 'retryable_failure',
+        partial: true,
+        reason: `${safe}|pending_write_failed`,
+      };
     }
+    commitProcessed(state, hash, () => {});
+    saveState();
+    log.info(`Processed ${hash}: ${downloadsCount} documents (partial)`);
     return {
       ...baseResult,
-      outcome: 'pdf',
+      outcome: 'archived',
       partial: true,
-      reason: durable ? sanitizePendingReason(reason) : `${sanitizePendingReason(reason)}|pending_write_failed`,
+      reason: safe,
     };
   }
 
   log.info(`Processed ${hash}: ${downloadsCount} documents`);
   commitProcessed(state, hash, () => {});
   saveState();
-  return { ...baseResult, outcome: 'pdf' };
+  return { ...baseResult, outcome: 'archived' };
 }

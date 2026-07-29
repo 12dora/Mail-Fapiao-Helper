@@ -180,8 +180,8 @@ async function main() {
     if (!/Run complete: processed=3, partial=0, skipped=0, failed=0/.test(runOut)) {
       fail(`真实 CLI run 的汇总不符合预期：\n${runOut}`);
     }
-    if (!/No extractor matched \w+, -> manual/.test(runOut)) {
-      fail(`没有可下载内容的邮件应被路由到 manual：\n${runOut}`);
+    if (!/No extractor matched \w+, -> pending/.test(runOut)) {
+      fail(`没有可下载内容的邮件应被路由到待确认：\n${runOut}`);
     }
 
     const archived = (await readdir(cfg.paths.invoices)).filter((name) => name.toLowerCase().endsWith('.pdf')).sort();

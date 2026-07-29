@@ -181,13 +181,13 @@
                 </details>
             </div>
 
-            <!-- 网页自动下载 -->
+            <!-- 第三方开票网站（EXT-09：站点处理器不再依赖本机浏览器） -->
             <div class="card">
                 <h2 class="card__title">第三方开票网站</h2>
-                <p class="card__sub">部分发票需要打开开票网站才能下载</p>
+                <p class="card__sub">部分发票需要访问开票网站才能下载</p>
                 <div class="small muted">
-                    这个功能需要你的电脑上已经安装 <strong>Google Chrome</strong> 或 <strong>Microsoft Edge</strong>。
-                    应用不会自己下载浏览器；如果两者都没有安装，相关邮件会进入待确认队列，你可以手动下载后再归档。
+                    应用会通过安全的网络请求获取发票文件，一般不需要你另外安装浏览器。
+                    如果某个网站暂时无法自动下载，相关邮件会进入「待确认」队列，你可以手动下载后再归档。
                 </div>
             </div>
 
@@ -350,10 +350,10 @@
             <div class="card card--danger">
                 <div class="row row--between">
                     <div>
-                        <h2 class="card__title" style="margin: 0 0 4px;">重置应用数据（将删除所有本机数据）</h2>
+                        <h2 class="card__title" style="margin: 0 0 4px;">清空应用管理的数据（保留邮箱与保存设置）</h2>
                         <p class="card__sub" style="margin: 0;">
-                            会永久删除：已归档的发票和行程单原件、本机缓存的邮件原文、待确认队列、识别结果清册、运行历史、邮箱增量同步状态。<br>
-                            不会删除：本页的邮箱与保存设置。保存在应用目录之外的位置不会被删除。
+                            会永久删除应用内部保存的邮件、发票和行程单、待确认记录、识别结果及处理记录。<br>
+                            邮箱与保存设置不会删除；你另选文件夹中的文件也不会删除。
                         </p>
                     </div>
                     <button class="btn btn--danger" type="button" data-action="developer-reset">重置应用数据…</button>
