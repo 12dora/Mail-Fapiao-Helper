@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   getOpState: () => ipcRenderer.invoke('mfh:get-op-state'),
   // About 页的真实版本与发布通道：{ version, channel, packaged, platform, arch, electron }
   getAppInfo: () => ipcRenderer.invoke('mfh:get-app-info'),
+  // 归档 journal 状态 / 用户确认后隔离（S7：可解析但无法自动清理时解除写入阻断）
+  archiveJournalStatus: () => ipcRenderer.invoke('mfh:archive-journal-status'),
+  // payload: { confirm: true }
+  archiveJournalQuarantine: (payload) => ipcRenderer.invoke('mfh:archive-journal-quarantine', payload),
   onFetchProgress: (callback) => {
     if (typeof callback !== 'function') return;
     ipcRenderer.removeAllListeners('mfh:fetch-progress');

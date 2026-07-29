@@ -625,6 +625,109 @@ function showItemInFolderForUser(target: string): void {
   shell.showItemInFolder(target);
 }
 
+/**
+ * S2：open-path 对「文件目标」的打开策略——不仅校验 where，还约束 what。
+ * 应用合法产出（pdf/ofd/csv/xml/图片/zip/eml/log）才 shell.openPath；
+ * 可执行扩展名一律拒绝；其余文件改为在文件夹中显示，避免任意程序执行。
+ * 目录打开保持允许（符号位置 / 归档目录等）。
+ */
+const OPENABLE_DOCUMENT_EXTS = new Set([
+  '.pdf', '.ofd', '.csv', '.xml',
+  '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tif', '.tiff',
+  '.zip',
+  // 应用产出的邮件缓存与诊断日志
+  '.eml', '.log',
+]);
+
+const REFUSED_EXECUTABLE_EXTS = new Set([
+  '.exe', '.bat', '.cmd', '.com', '.scr', '.ps1', '.msi',
+  '.app', '.command', '.sh',
+  // 额外常见可执行 / 脚本载体
+  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.msc', '.jar',
+  '.dll', '.so', '.dylib', '.pkg', '.dmg', '.appimage',
+]);
+
+type OpenFileDisposition =
+  | { action: 'open' }
+  | { action: 'reveal' }
+  | { action: 'refuse'; code: string; message: string };
+
+function dispositionForOpenTarget(target: string): OpenFileDisposition {
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(target);
+  } catch {
+    // 不存在时交给 openPath 报错；策略层不二次伪造缺失原因
+    return { action: 'open' };
+  }
+  if (st.isDirectory()) return { action: 'open' };
+  if (!st.isFile()) {
+    return {
+      action: 'refuse',
+      code: 'path_not_openable',
+      message: '该目标不是可打开的文件或文件夹。',
+    };
+  }
+  const ext = path.extname(target).toLowerCase();
+  if (ext && REFUSED_EXECUTABLE_EXTS.has(ext)) {
+    return {
+      action: 'refuse',
+      code: 'path_executable_refused',
+      message: '出于安全考虑，不能打开可执行文件或脚本。请在文件管理器中自行处理。',
+    };
+  }
+  if (ext && OPENABLE_DOCUMENT_EXTS.has(ext)) return { action: 'open' };
+  // 无扩展名或未识别类型：只 reveal，绝不 open（防 extensionless 可执行 / 未知脚本）
+  return { action: 'reveal' };
+}
+
+/**
+ * 按文件类型策略打开目标：允许则 open，否则 reveal 或拒绝。
+ * 返回给 IPC 的统一形状。
+ */
+async function openOrRevealByPolicy(
+  target: string,
+  opts: { forceReveal?: boolean } = {},
+): Promise<{ ok: boolean; error: string; code?: string; message?: string; revealed?: boolean }> {
+  if (opts.forceReveal) {
+    if (!fs.existsSync(target)) {
+      return {
+        ok: false,
+        error: '目标不存在。',
+        code: 'path_missing',
+        message: '目标位置不存在。',
+      };
+    }
+    showItemInFolderForUser(target);
+    return { ok: true, error: '', revealed: true };
+  }
+  const disposition = dispositionForOpenTarget(target);
+  if (disposition.action === 'refuse') {
+    return {
+      ok: false,
+      error: disposition.message,
+      code: disposition.code,
+      message: disposition.message,
+    };
+  }
+  if (disposition.action === 'reveal') {
+    showItemInFolderForUser(target);
+    return {
+      ok: true,
+      error: '',
+      revealed: true,
+      code: 'path_revealed',
+      message: '该文件类型不适合直接打开，已在文件夹中显示。',
+    };
+  }
+  const error = await openPathForUser(target);
+  return {
+    ok: !error,
+    error: error ? sanitizeText(error, { maxLength: 200 }) : '',
+    ...(error ? { code: 'path_open_failed', message: '无法打开该文件，请确认它仍然存在且有对应的应用程序。' } : {}),
+  };
+}
+
 function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
@@ -877,53 +980,62 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
 }
 
 /**
- * 屏蔽 secret 与绝对路径后再交给 renderer（ELEC-07）。
+ * 屏蔽 secret 与绝对路径后再交给 renderer（ELEC-07 / S3）。
  *
- * 绝对 `paths.*` / `output.csv` 会泄漏 OS 用户名、项目目录与 UNC 主机；
- * 打开目录走 `mfh:open-path` 的 `location` / opaque handle，renderer 不需要真路径。
- * 相对路径保留（无用户名泄漏，配置表单可回显）；绝对路径脱敏为展示串。
+ * 规则驱动（非字段白名单）：
+ * - 字段名命中 secret/key/token/pass → 清空字符串
+ * - 任意字符串若像绝对路径 / 盘符 / UNC → redactPath
+ * - 递归处理嵌套对象与数组，新增路径字段默认脱敏，避免遗漏 ocr.binaryPath 等
+ *
+ * 相对路径保留（无用户名泄漏，配置表单可回显）。打开目录走 `mfh:open-path`
+ * 的 `location` / opaque handle，renderer 不需要真路径。
  */
 function redactConfig(raw: Record<string, unknown>): Record<string, unknown> {
-  const isSecretKey = (k: string): boolean => /secret|key|token|pass/i.test(k);
-  const redactMaybePath = (value: unknown): unknown => {
-    if (typeof value !== 'string' || value.length === 0) return value;
-    // 绝对路径、盘符路径、UNC 一律脱敏；相对路径保留（便于 UI 展示配置）。
-    if (
-      path.isAbsolute(value)
-      || /^[A-Za-z]:[\\/]/.test(value)
-      || value.startsWith('\\\\')
-      || value.startsWith('//')
-    ) {
-      return redactPath(value);
+  /**
+   * 字段名像凭据才清空。刻意不用裸 `/key/`，避免误伤 `keywords` 等业务字段；
+   * 命中 secret/token/pass、*apiKey、*secretKey/Id、以及单独的 `key`/`pass`。
+   */
+  const isSecretKey = (k: string): boolean => {
+    const n = k.toLowerCase();
+    if (n === 'keywords' || n === 'keyword') return false;
+    if (n === 'key' || n === 'pass' || n === 'password' || n === 'passwd' || n === 'token' || n === 'secret') {
+      return true;
+    }
+    return /secret|token|password|passwd|credential|api[_-]?key|secret[_-]?key|secret[_-]?id/.test(n);
+  };
+  const looksLikeAbsolutePath = (value: string): boolean => (
+    path.isAbsolute(value)
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || value.startsWith('\\\\')
+    || value.startsWith('//')
+  );
+
+  const redactValue = (value: unknown, key?: string): unknown => {
+    if (typeof value === 'string') {
+      if (key && isSecretKey(key)) return '';
+      if (value.length > 0 && looksLikeAbsolutePath(value)) return redactPath(value);
+      return value;
+    }
+    if (Array.isArray(value)) {
+      // 数组本身若挂在 secret 键下（少见），整组不回传
+      if (key && isSecretKey(key)) return [];
+      return value.map((item) => redactValue(item));
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, redactValue(v, k)]),
+      );
     }
     return value;
   };
-  const imap = { ...asObject(raw.imap), pass: '' };
-  const ocrSrc = asObject(raw.ocr);
-  const creds = asObject(ocrSrc.credentials);
-  const ocr = {
-    ...ocrSrc,
-    resultsCsv: redactMaybePath(ocrSrc.resultsCsv),
-    credentials: Object.fromEntries(Object.entries(creds).map(([k, v]) => [k, isSecretKey(k) ? '' : v])),
-  };
-  const pathsSrc = asObject(raw.paths);
-  const paths = {
-    ...pathsSrc,
-    samples: redactMaybePath(pathsSrc.samples),
-    invoices: redactMaybePath(pathsSrc.invoices),
-    pending: redactMaybePath(pathsSrc.pending),
-  };
-  const outputSrc = asObject(raw.output);
-  const output = {
-    ...outputSrc,
-    csv: redactMaybePath(outputSrc.csv),
-  };
-  const renameSrc = asObject(raw.rename);
-  const rename = {
-    ...renameSrc,
-    organizedDir: redactMaybePath(renameSrc.organizedDir),
-  };
-  return { ...raw, imap, ocr, paths, output, rename };
+
+  // imap.pass 始终清空（即便字段名规则已覆盖，显式保证）
+  const result = redactValue(raw) as Record<string, unknown>;
+  const imap = asObject(result.imap);
+  if (Object.keys(imap).length > 0) {
+    result.imap = { ...imap, pass: '' };
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1173,17 +1285,12 @@ function stripCliLogEnvelope(line: string): string {
 /**
  * 终端摘要契约：只认「逻辑行首」锚定的 `Run complete:` / `OCR complete:` / `Organize complete:`，
  * 逐行扫描，取**最后**一条匹配（中间夹带同名子串的附件名不能伪造）。
+ * 兼容 `\\x1eMFH_TERMINAL\\x1e` 增强锚定通道与 `[info] ts …` 日志信封。
  */
 function lastAnchoredTerminalLine(output: string, marker: string): string | undefined {
   let found: string | undefined;
   for (const raw of output.split(/\r?\n/)) {
-    const line = raw.trimEnd();
-    if (!line) continue;
-    if (line.startsWith(marker)) {
-      found = line;
-      continue;
-    }
-    const body = stripCliLogEnvelope(line);
+    const body = logicalTerminalLine(raw);
     if (body.startsWith(marker)) found = body;
   }
   return found;
@@ -1504,8 +1611,28 @@ function fileProgressPercent(current: FileProgressState): number | undefined {
   return Math.min(95, Math.max(1, Math.round((done / current.total) * 100)));
 }
 
+/**
+ * 终态行上的未命中/失败标记（C6）：CLI 在 `Run complete:` 同行携带
+ * `mail_not_found` / `outcome=mail_not_found|failed` 时，直播进度必须立刻标失败，
+ * 不得先闪绿色零计数成功再等 process-close 翻盘。
+ */
+function terminalLineFailureMarkers(text: string): { mailNotFound: boolean; forcedFail: boolean } {
+  const mailNotFound = /\bmail_not_found\b/i.test(text)
+    || /\boutcome\s*=\s*mail_not_found\b/i.test(text);
+  const outcomeFailed = /\boutcome\s*=\s*failed\b/i.test(text);
+  return { mailNotFound, forcedFail: mailNotFound || outcomeFailed };
+}
+
+/** 去掉 CLI 日志信封与 MFH 终态锚定前缀，得到可供 startsWith 判定的逻辑行。 */
+function logicalTerminalLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) return '';
+  const unwrapped = stripCliLogEnvelope(trimmed);
+  return unwrapped.replace(/^\x1eMFH_TERMINAL\x1e\s*/, '');
+}
+
 function parseFileLine(line: string, current: FileProgressState, emit: ProgressSink): void {
-  const text = stripCliLogEnvelope(line.trim());
+  const text = logicalTerminalLine(line);
   if (!text) return;
   // 行首锚定 `Run complete:`（禁止附件文件名里的同名子串伪造终态）
   if (text.startsWith('Run complete:')) {
@@ -1523,18 +1650,24 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
       current.failed = numField(text, 'failed') ?? current.failed;
       current.partial = numField(text, 'partial') ?? current.partial;
     }
+    const markers = terminalLineFailureMarkers(text);
     const status = deriveRunStatus({
-      code: current.failed > 0 ? 1 : 0,
+      code: markers.forcedFail || current.failed > 0 ? 1 : 0,
       succeeded: current.archived + current.pending + current.skipped,
-      failed: current.failed,
+      failed: current.failed + (markers.forcedFail ? 1 : 0),
       partial: current.partial,
+      mailNotFound: markers.mailNotFound,
     });
     const partialNote = current.partial > 0 ? `，其中 ${current.partial} 封仍有待确认` : '';
     const pendingNote = current.pending > 0 ? `，待确认 ${current.pending} 封` : '';
     let message: string;
     let kind: string;
     let phase: string;
-    if (status === 'success') {
+    if (markers.mailNotFound) {
+      phase = '获取失败';
+      kind = 'err';
+      message = '没有找到这封待处理邮件。请刷新「待确认」列表后再试。';
+    } else if (status === 'success') {
       phase = '获取完成';
       kind = 'ok';
       message = `处理完成：成功 ${current.archived} 封${pendingNote}${partialNote}，跳过 ${current.skipped} 封。`;
@@ -1567,6 +1700,7 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
       message,
       kind,
       done: true,
+      ...(markers.mailNotFound ? { mailNotFound: true } : {}),
     });
     return;
   }
@@ -1715,6 +1849,10 @@ interface RunCliResult {
   runCounts?: RunTerminalCounts;
   /** OCR `OCR complete:` 结构化计数。 */
   ocrCounts?: ReturnType<typeof parseOcrCompleteCounts>;
+  /**
+   * 终态行上捕获的 mail_not_found（独立于 ring buffer，避免后续诊断行挤掉标记）。
+   */
+  terminalMailNotFound?: boolean;
 }
 
 function runCli(command: string, args: string[], opts: RunCliOptions = {}): Promise<RunCliResult> {
@@ -1730,14 +1868,36 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
     const savedMails = new Set<string>();
     const processedMails = new Set<string>();
     const manualMails = new Set<string>();
+    // NEW DEFECT 2：终态计数独立于有界 ring——首次见到即保留，后续诊断行不得挤掉权威结果。
+    let capturedRunCounts: RunTerminalCounts | undefined;
+    let capturedOcrCounts: ReturnType<typeof parseOcrCompleteCounts> | undefined;
+    let capturedTerminalMailNotFound = false;
     const mails = (): RunCliMails => ({
       saved: Array.from(savedMails),
       processed: Array.from(processedMails),
       manual: Array.from(manualMails),
     });
 
+    const captureTerminalLine = (line: string): void => {
+      const text = logicalTerminalLine(line);
+      if (!text) return;
+      if (text.startsWith('Run complete:')) {
+        const counts = parseRunCompleteCounts(text);
+        if (counts) capturedRunCounts = counts;
+        const markers = terminalLineFailureMarkers(text);
+        if (markers.mailNotFound) capturedTerminalMailNotFound = true;
+      }
+      if (text.startsWith('OCR complete:')) {
+        const counts = parseOcrCompleteCounts(text);
+        if (counts) capturedOcrCounts = counts;
+      }
+      // 非终态行上的 mail_not_found 日志也捕获（stderr 常见），同样不依赖 ring
+      if (/\bmail_not_found\b/i.test(text)) capturedTerminalMailNotFound = true;
+    };
+
     const handleLine = (line: string): void => {
       if (!line.trim()) return;
+      captureTerminalLine(line);
       const saved = SAVED_MAIL_RE.exec(line);
       if (saved?.[1]) savedMails.add(saved[1]);
       const processed = PROCESSED_MAIL_RE.exec(line);
@@ -1765,8 +1925,9 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
         ...fake,
         started: true,
         mails: mails(),
-        runCounts: parseRunCompleteCounts(combined),
-        ocrCounts: parseOcrCompleteCounts(combined),
+        runCounts: capturedRunCounts ?? parseRunCompleteCounts(combined),
+        ocrCounts: capturedOcrCounts ?? parseOcrCompleteCounts(combined),
+        ...(capturedTerminalMailNotFound ? { terminalMailNotFound: true } : {}),
       });
       return;
     }
@@ -1816,7 +1977,9 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
     child.stderr.on('data', (chunk: Buffer) => {
       for (const line of stderrLines.push(chunk)) {
         stderrTail.push(line);
+        // OCR/files：完整 handleLine（内含 capture）。其它命令也要捕获终态/mail_not_found。
         if (opts.operation === 'ocr' || opts.operation === 'files') handleLine(line);
+        else captureTerminalLine(line);
       }
     });
 
@@ -1861,13 +2024,15 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
       for (const line of stderrLines.flush()) {
         stderrTail.push(line);
         if (opts.operation === 'ocr' || opts.operation === 'files') handleLine(line);
+        else captureTerminalLine(line);
       }
 
       const out = stdoutTail.toString();
       const err = stderrTail.toString();
       const combined = `${out}\n${err}`;
-      const runCounts = parseRunCompleteCounts(combined);
-      const ocrCounts = parseOcrCompleteCounts(combined);
+      // 优先使用流式捕获的权威终态；ring 里可能已无该行
+      const runCounts = capturedRunCounts ?? parseRunCompleteCounts(combined);
+      const ocrCounts = capturedOcrCounts ?? parseOcrCompleteCounts(combined);
       const detail = sanitizeText(err.trim() || out.trim(), { maxLength: 400 });
       const stopped = opts.jobId ? ocrStopRequested.has(opts.jobId) : false;
 
@@ -1945,6 +2110,7 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
         mails: mails(),
         ...(runCounts ? { runCounts } : {}),
         ...(ocrCounts ? { ocrCounts } : {}),
+        ...(capturedTerminalMailNotFound ? { terminalMailNotFound: true } : {}),
       });
     });
   });
@@ -2339,6 +2505,30 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
       return error;
     }
     if (again.kind === 'residual') {
+      // S7：主进程原生确认隔离，避免仅依赖未暴露的 preload 时永久卡死。
+      // e2e 无 GUI 模式不弹窗，保持 archive_recovery_blocked 契约供测试断言。
+      if (!e2eNoGuiMode()) {
+        try {
+          const choice = dialog.showMessageBoxSync({
+            type: 'warning',
+            buttons: ['隔离并继续', '取消'],
+            defaultId: 1,
+            cancelId: 1,
+            title: '归档恢复未完成',
+            message: `发现 ${again.names.length} 条未解决的归档恢复记录`,
+            detail: '自动恢复无法清理这些记录。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。',
+          });
+          if (choice === 0) {
+            const quarantined = quarantineArchiveJournalsWithConfirm(true);
+            if (quarantined.ok === true) {
+              archiveRecoveryFailures.delete(key);
+              return undefined;
+            }
+          }
+        } catch {
+          // 对话框失败时仍返回阻断错误
+        }
+      }
       // 仍有可解析但无法自动清理的 journal：阻断写入，指引人工隔离（不自动丢证据）。
       const error = archiveRecoveryBlockedError(
         `仍有 ${again.names.length} 条未解决的归档恢复记录`
@@ -3573,10 +3763,12 @@ handleTrusted('mfh:run-pipeline', async (_event, payload: unknown) => {
     const result = await runCli('run', args, { operation: 'files', jobId: gate.lease.jobId });
 
     // ELEC-08 / 簇 C：以结构化终态计数为准，不用裸 exit code 单独判定成功。
+    // runCounts / terminalMailNotFound 优先取流式捕获值（ring 挤出后仍权威）。
     const counts = result.runCounts
       ?? parseRunCompleteCounts(`${result.stdout}\n${result.stderr}`)
       ?? emptyRunCounts();
-    const mailNotFound = /mail_not_found/.test(`${result.stdout}\n${result.stderr}`)
+    const mailNotFound = result.terminalMailNotFound === true
+      || /mail_not_found/.test(`${result.stdout}\n${result.stderr}`)
       || (Boolean(onlyHash) && counts.archived + counts.pending + counts.skipped + counts.failed === 0 && result.code !== 0);
     const status = deriveRunStatus({
       code: result.code,
@@ -4069,7 +4261,7 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const reveal = raw.reveal === true;
 
-  // 优先符号位置（renderer 无需真路径）
+  // 优先符号位置（renderer 无需真路径）——目录目标；仍走类型策略作防御深度
   if (typeof raw.location === 'string' && raw.location.trim()) {
     const loc = raw.location.trim() as OpenLocationKey;
     const mapped = resolveSymbolicLocation(loc);
@@ -4090,28 +4282,18 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
         message: '该位置当前不在允许打开的范围内。',
       };
     }
-    if (reveal) {
-      if (!fs.existsSync(canon)) {
-        return {
-          ok: false,
-          code: 'path_missing',
-          error: '目标位置不存在。',
-          message: '目标位置不存在。',
-        };
-      }
-      showItemInFolderForUser(canon);
-      return { ok: true, error: '', location: loc };
+    const result = await openOrRevealByPolicy(canon, { forceReveal: reveal });
+    if (!result.ok && result.code === 'path_open_failed') {
+      return {
+        ...result,
+        location: loc,
+        message: result.message ?? '无法打开该位置，请确认它仍然存在。',
+      };
     }
-    const error = await openPathForUser(canon);
-    return {
-      ok: !error,
-      error: error ? sanitizeText(error, { maxLength: 200 }) : '',
-      location: loc,
-      ...(error ? { code: 'path_open_failed', message: '无法打开该位置，请确认它仍然存在。' } : {}),
-    };
+    return { ...result, location: loc };
   }
 
-  // 句柄或遗留 path（均经 resolveOpenTarget 严格校验）
+  // 句柄或遗留 path（均经 resolveOpenTarget 严格校验 + 文件类型策略）
   const target = typeof raw.path === 'string' && raw.path.length > 0
     ? raw.path
     : typeof raw.handle === 'string' && raw.handle.length > 0
@@ -4141,12 +4323,8 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
     showItemInFolderForUser(resolved.path);
     return { ok: true, error: '' };
   }
-  const error = await openPathForUser(resolved.path);
-  return {
-    ok: !error,
-    error: error ? sanitizeText(error, { maxLength: 200 }) : '',
-    ...(error ? { code: 'path_open_failed', message: '无法打开该文件，请确认它仍然存在且有对应的应用程序。' } : {}),
-  };
+  // S2：允许根校验之后，再按扩展名约束可 open 的文件类型
+  return openOrRevealByPolicy(resolved.path);
 });
 
 handleTrusted('mfh:copy-text', (_event, payload: unknown) => {

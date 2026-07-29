@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import type { Config } from '../config.js';
-import { isPackagedRuntime } from '../util/testFaults.js';
+import { isDevelopmentRuntime } from '../util/testFaults.js';
 import type { OcrProvider } from './types.js';
 import { createEfapiaoProvider } from './efapiao.js';
 
@@ -10,7 +10,8 @@ const require = createRequire(import.meta.url);
  * mock OCR 仅供本地开发/回归测试。生产配置即使写 `"provider":"mock"` 也不可达（OCR-11）。
  *
  * 放行条件（全部满足）：
- * 1. 非打包运行时（模块路径不在 app.asar 内）；
+ * 1. `isDevelopmentRuntime()`——能证明是源码检出开发树，且无 `dist/buildInfo.js`
+ *    `production: true` 标记（fail closed；不依赖 asar 路径）；
  * 2. 显式 `MFH_ALLOW_MOCK_OCR=1`；
  * 3. 测试专用模块 `mockProvider.js` 存在（打包时由 build.files 排除，import 失败）。
  *
@@ -18,7 +19,7 @@ const require = createRequire(import.meta.url);
  * 也不得依赖从未在仓库中设置的 `MFH_APP_IS_PACKAGED`。
  */
 function mockOcrAllowed(): boolean {
-  if (isPackagedRuntime()) return false;
+  if (!isDevelopmentRuntime()) return false;
   return process.env.MFH_ALLOW_MOCK_OCR === '1';
 }
 
