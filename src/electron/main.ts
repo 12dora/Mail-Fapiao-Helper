@@ -32,7 +32,13 @@ import { OperationCoordinator, type OpKind, type OpLease, type RunningOp } from 
 import { killProcessTree, terminateChildren } from './procTree.js';
 import { registerManagedRoots, redactPath, sanitizeText, shortId, type UiError } from './sanitize.js';
 import { runManualArchive } from './manualArchive.js';
-import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, recoverArchiveTransactions } from '../download/archiveJournal.js';
+import {
+  ArchiveRecoveryError,
+  assertArchiveTransactionsRecovered,
+  isJournalShapeFailureReason,
+  journalRecordInvalidReason,
+  recoverArchiveTransactions,
+} from '../download/archiveJournal.js';
 import { dataDirLockPath } from '../util/dataDirLock.js';
 
 interface DateRangePayload {
@@ -627,9 +633,12 @@ function showItemInFolderForUser(target: string): void {
 
 /**
  * S2：open-path 对「文件目标」的打开策略——不仅校验 where，还约束 what。
- * 应用合法产出（pdf/ofd/csv/xml/图片/zip/eml/log）才 shell.openPath；
- * 可执行扩展名一律拒绝；其余文件改为在文件夹中显示，避免任意程序执行。
- * 目录打开保持允许（符号位置 / 归档目录等）。
+ * 应用合法产出（pdf/ofd/csv/xml/图片/zip/eml/log）才 shell.openPath（真正 ALLOW-LIST）；
+ * 可执行 / 快捷方式扩展名一律拒绝；其余文件改为在文件夹中显示。
+ *
+ * 目录：bundle-like（.app 等）一律拒绝；普通目录仅当 allowDirectoryOpen（符号
+ * location 或主进程签发的 ext: 句柄）才 shell.openPath。任意 renderer 提供的
+ * 目录 path 最多 reveal，绝不 open——避免 macOS 把 .app 当目录启动。
  */
 const OPENABLE_DOCUMENT_EXTS = new Set([
   '.pdf', '.ofd', '.csv', '.xml',
@@ -645,22 +654,110 @@ const REFUSED_EXECUTABLE_EXTS = new Set([
   // 额外常见可执行 / 脚本载体
   '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.msc', '.jar',
   '.dll', '.so', '.dylib', '.pkg', '.dmg', '.appimage',
+  // 快捷方式 / 链接载体（含 x.pdf.lnk 等双扩展伪装）
+  '.lnk', '.url', '.desktop', '.webloc',
 ]);
+
+/** macOS/系统 bundle 目录后缀：对 shell.openPath 等于「启动应用」。 */
+const BUNDLE_DIRECTORY_SUFFIXES = [
+  '.app',
+  '.bundle',
+  '.framework',
+  '.plugin',
+  '.kext',
+  '.workflow',
+  '.scptd',
+  '.prefPane',
+  '.service',
+] as const;
+
+/**
+ * 规范化用于扩展名策略的 basename：去尾部点/空白（Windows 与部分 API 会忽略它们，
+ * 攻击者可用 `evil.app.` / `x.pdf ` 绕过简单 extname 检查）。
+ */
+function stripTrailingDotsAndSpaces(name: string): string {
+  let s = name;
+  while (s.length > 0) {
+    const c = s.charCodeAt(s.length - 1);
+    // space, tab, CR, LF, or '.'
+    if (c === 0x20 || c === 0x09 || c === 0x0d || c === 0x0a || c === 0x2e) {
+      s = s.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return s;
+}
+
+function policyBaseName(target: string): string {
+  return stripTrailingDotsAndSpaces(path.basename(target));
+}
+
+function policyExtname(target: string): string {
+  const base = policyBaseName(target);
+  if (!base) return '';
+  return path.extname(base).toLowerCase();
+}
+
+function isBundleLikeDirectoryName(baseName: string): boolean {
+  const lower = stripTrailingDotsAndSpaces(baseName).toLowerCase();
+  if (!lower) return false;
+  return BUNDLE_DIRECTORY_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
 
 type OpenFileDisposition =
   | { action: 'open' }
   | { action: 'reveal' }
   | { action: 'refuse'; code: string; message: string };
 
-function dispositionForOpenTarget(target: string): OpenFileDisposition {
+/**
+ * @param allowDirectoryOpen 仅符号 location / 主进程 ext: 句柄为 true；
+ *   任意 path 载荷必须为 false，目录最多 reveal。
+ */
+function dispositionForOpenTarget(
+  target: string,
+  opts: { allowDirectoryOpen?: boolean } = {},
+): OpenFileDisposition {
   let st: fs.Stats;
   try {
     st = fs.statSync(target);
   } catch {
-    // 不存在时交给 openPath 报错；策略层不二次伪造缺失原因
-    return { action: 'open' };
+    // 不存在时：仍按最终扩展名策略，避免对缺失的 .app / .exe 也走 open。
+    const missingExt = policyExtname(target);
+    const missingBase = policyBaseName(target);
+    if (missingBase && isBundleLikeDirectoryName(missingBase)) {
+      return {
+        action: 'refuse',
+        code: 'path_bundle_refused',
+        message: '出于安全考虑，不能打开应用程序包或系统插件包。',
+      };
+    }
+    if (missingExt && REFUSED_EXECUTABLE_EXTS.has(missingExt)) {
+      return {
+        action: 'refuse',
+        code: 'path_executable_refused',
+        message: '出于安全考虑，不能打开可执行文件或脚本。请在文件管理器中自行处理。',
+      };
+    }
+    if (missingExt && OPENABLE_DOCUMENT_EXTS.has(missingExt)) {
+      return { action: 'open' };
+    }
+    // 无扩展名 / 未识别：不主动 open（缺失目标交给上层 reveal/缺失处理）
+    return { action: 'reveal' };
   }
-  if (st.isDirectory()) return { action: 'open' };
+  if (st.isDirectory()) {
+    const base = policyBaseName(target);
+    if (isBundleLikeDirectoryName(base)) {
+      return {
+        action: 'refuse',
+        code: 'path_bundle_refused',
+        message: '出于安全考虑，不能打开应用程序包或系统插件包。',
+      };
+    }
+    // 普通目录：只允许 location / 主进程句柄路径 open；任意 path 只 reveal。
+    if (opts.allowDirectoryOpen === true) return { action: 'open' };
+    return { action: 'reveal' };
+  }
   if (!st.isFile()) {
     return {
       action: 'refuse',
@@ -668,7 +765,7 @@ function dispositionForOpenTarget(target: string): OpenFileDisposition {
       message: '该目标不是可打开的文件或文件夹。',
     };
   }
-  const ext = path.extname(target).toLowerCase();
+  const ext = policyExtname(target);
   if (ext && REFUSED_EXECUTABLE_EXTS.has(ext)) {
     return {
       action: 'refuse',
@@ -676,8 +773,8 @@ function dispositionForOpenTarget(target: string): OpenFileDisposition {
       message: '出于安全考虑，不能打开可执行文件或脚本。请在文件管理器中自行处理。',
     };
   }
+  // 真正 ALLOW-LIST：只有白名单文档扩展名才 open；其余一律 reveal。
   if (ext && OPENABLE_DOCUMENT_EXTS.has(ext)) return { action: 'open' };
-  // 无扩展名或未识别类型：只 reveal，绝不 open（防 extensionless 可执行 / 未知脚本）
   return { action: 'reveal' };
 }
 
@@ -687,7 +784,7 @@ function dispositionForOpenTarget(target: string): OpenFileDisposition {
  */
 async function openOrRevealByPolicy(
   target: string,
-  opts: { forceReveal?: boolean } = {},
+  opts: { forceReveal?: boolean; allowDirectoryOpen?: boolean } = {},
 ): Promise<{ ok: boolean; error: string; code?: string; message?: string; revealed?: boolean }> {
   if (opts.forceReveal) {
     if (!fs.existsSync(target)) {
@@ -698,10 +795,30 @@ async function openOrRevealByPolicy(
         message: '目标位置不存在。',
       };
     }
+    // forceReveal 仍拒绝把 bundle 当「打开」；只在文件夹中显示（不 launch）。
+    const base = policyBaseName(target);
+    try {
+      const st = fs.statSync(target);
+      if (st.isDirectory() && isBundleLikeDirectoryName(base)) {
+        // reveal 父目录中的 bundle 项是安全的（不会启动 .app）
+        showItemInFolderForUser(target);
+        return {
+          ok: true,
+          error: '',
+          revealed: true,
+          code: 'path_bundle_revealed',
+          message: '已在文件夹中显示该应用程序包（未启动）。',
+        };
+      }
+    } catch {
+      // ignore
+    }
     showItemInFolderForUser(target);
     return { ok: true, error: '', revealed: true };
   }
-  const disposition = dispositionForOpenTarget(target);
+  const disposition = dispositionForOpenTarget(target, {
+    allowDirectoryOpen: opts.allowDirectoryOpen === true,
+  });
   if (disposition.action === 'refuse') {
     return {
       ok: false,
@@ -717,7 +834,9 @@ async function openOrRevealByPolicy(
       error: '',
       revealed: true,
       code: 'path_revealed',
-      message: '该文件类型不适合直接打开，已在文件夹中显示。',
+      message: opts.allowDirectoryOpen
+        ? '该文件类型不适合直接打开，已在文件夹中显示。'
+        : '已在文件夹中显示该位置（目录需通过应用内位置标识打开）。',
     };
   }
   const error = await openPathForUser(target);
@@ -2408,7 +2527,9 @@ function inspectArchiveJournals(invoicesDir: string): JournalPresence {
 }
 
 /**
- * 仅隔离**确认损坏**（无法 JSON 解析）的 journal 条目，保留可解析条目供恢复。
+ * 仅隔离**确认无法 JSON 解析**的 journal 条目（malformed）。
+ * 形态非法（invalid_shape）虽同样不可驱动回滚，但走下方原生确认对话框 /
+ * 设置页 `archiveJournalQuarantine({confirm:true})`，不在此静默搬迁。
  * 整目录搬迁会丢掉仍可用于回滚的证据，故只挪损坏文件（OCR-05 rework）。
  */
 function quarantineCorruptArchiveJournals(invoicesDir: string): {
@@ -2436,6 +2557,7 @@ function quarantineCorruptArchiveJournals(invoicesDir: string): {
     try {
       JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
     } catch {
+      // JSON 解析失败 = malformed；形态非法留给确认隔离路径
       corrupt.push(name);
     }
   }
@@ -2462,16 +2584,69 @@ function quarantineCorruptArchiveJournals(invoicesDir: string): {
   }
 }
 
+/** 从 ArchiveRecoveryError / 嵌套 cause 提取机器可读 reason。 */
+function archiveRecoveryFailureReason(err: unknown): string {
+  if (err instanceof ArchiveRecoveryError) return err.reason;
+  if (err instanceof Error) {
+    const withCause = err as Error & { cause?: unknown; reason?: unknown };
+    if (typeof withCause.reason === 'string' && withCause.reason) return withCause.reason;
+    if (withCause.cause !== undefined) {
+      const nested = archiveRecoveryFailureReason(withCause.cause);
+      if (nested && nested !== String(withCause.cause)) return nested;
+    }
+    return err.message;
+  }
+  return String(err);
+}
+
+/**
+ * 主进程原生确认隔离（S7）。
+ * 形态/解析失败与「可解析但无法自动清理」共用此入口，保证有可达恢复路径。
+ * e2e 无 GUI 不弹窗，返回 false，保持 archive_recovery_blocked 契约。
+ */
+function offerArchiveJournalQuarantineDialog(opts: {
+  title: string;
+  message: string;
+  detail: string;
+}): boolean {
+  if (e2eNoGuiMode()) return false;
+  try {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['隔离并继续', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      title: opts.title,
+      message: opts.message,
+      detail: opts.detail,
+    });
+    if (choice === 0) {
+      const quarantined = quarantineArchiveJournalsWithConfirm(true);
+      return quarantined.ok === true;
+    }
+  } catch {
+    // 对话框失败时视为未确认
+  }
+  return false;
+}
+
 function ensureArchiveRecoveryReady(): UiError | undefined {
   const key = path.resolve(invoicesDirPath());
+  let shapeFailureOnEntry = false;
   try {
     assertArchiveTransactionsRecovered(key);
   } catch (err) {
-    const error = archiveRecoveryBlockedError(
-      err instanceof Error ? err.message : String(err),
-    );
-    archiveRecoveryFailures.set(key, error);
-    return error;
+    const reason = archiveRecoveryFailureReason(err);
+    // B6：形态/解析失败不得在此死锁——进入与 residual 相同的隔离恢复路径。
+    if (isJournalShapeFailureReason(reason)) {
+      shapeFailureOnEntry = true;
+    } else {
+      const error = archiveRecoveryBlockedError(
+        err instanceof Error ? err.message : String(err),
+      );
+      archiveRecoveryFailures.set(key, error);
+      return error;
+    }
   }
 
   const presence = inspectArchiveJournals(key);
@@ -2481,22 +2656,34 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
     archiveRecoveryFailures.set(key, error);
     return error;
   }
-  if (presence.kind === 'residual') {
-    // 先隔离确认损坏的条目，再重试恢复。
+
+  // 形态失败却已无 journal：理论上不应出现；仍 fail closed 并提示设置页隔离入口。
+  if (shapeFailureOnEntry && presence.kind === 'absent') {
+    const error = archiveRecoveryBlockedError(
+      '归档恢复记录形态异常，但未找到残留文件。请在「设置」中查看归档恢复状态后重试。',
+    );
+    archiveRecoveryFailures.set(key, error);
+    return error;
+  }
+
+  if (presence.kind === 'residual' || shapeFailureOnEntry) {
+    // 先隔离确认损坏 / 形态非法的条目，再重试恢复。
     const q = quarantineCorruptArchiveJournals(key);
     if (q.remaining < 0) {
       const error = archiveRecoveryBlockedError(q.detail);
       archiveRecoveryFailures.set(key, error);
       return error;
     }
+    // 若隔离了全部损坏/非法条目且无剩余，再 assert 一次即可放行。
     try {
       assertArchiveTransactionsRecovered(key);
     } catch (err) {
-      const error = archiveRecoveryBlockedError(
-        err instanceof Error ? err.message : String(err),
-      );
-      archiveRecoveryFailures.set(key, error);
-      return error;
+      const reason = archiveRecoveryFailureReason(err);
+      // 形态失败或其它仍阻断：不要在此直接 return，继续 residual 弹窗路径。
+      if (!isJournalShapeFailureReason(reason)) {
+        // 非形态错误（live pid / csv truncate 等）：仍尝试 residual 检查与确认隔离
+        // （用户可显式隔离以解除阻断；不自动删除）。
+      }
     }
     const again = inspectArchiveJournals(key);
     if (again.kind === 'unreadable') {
@@ -2504,32 +2691,29 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
       archiveRecoveryFailures.set(key, error);
       return error;
     }
+    if (again.kind === 'absent') {
+      archiveRecoveryFailures.delete(key);
+      return undefined;
+    }
     if (again.kind === 'residual') {
-      // S7：主进程原生确认隔离，避免仅依赖未暴露的 preload 时永久卡死。
+      // S7：主进程原生确认隔离。形态失败与「可解析未清理」都走这里。
       // e2e 无 GUI 模式不弹窗，保持 archive_recovery_blocked 契约供测试断言。
-      if (!e2eNoGuiMode()) {
-        try {
-          const choice = dialog.showMessageBoxSync({
-            type: 'warning',
-            buttons: ['隔离并继续', '取消'],
-            defaultId: 1,
-            cancelId: 1,
-            title: '归档恢复未完成',
-            message: `发现 ${again.names.length} 条未解决的归档恢复记录`,
-            detail: '自动恢复无法清理这些记录。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。',
-          });
-          if (choice === 0) {
-            const quarantined = quarantineArchiveJournalsWithConfirm(true);
-            if (quarantined.ok === true) {
-              archiveRecoveryFailures.delete(key);
-              return undefined;
-            }
-          }
-        } catch {
-          // 对话框失败时仍返回阻断错误
-        }
+      const dialogTitle = shapeFailureOnEntry ? '归档恢复记录无效' : '归档恢复未完成';
+      const dialogMessage = shapeFailureOnEntry
+        ? `发现 ${again.names.length} 条无法自动处理的归档恢复记录`
+        : `发现 ${again.names.length} 条未解决的归档恢复记录`;
+      const dialogDetail = shapeFailureOnEntry
+        ? '恢复记录格式不正确或已损坏，无法自动回滚。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可稍后在「设置」中查看状态并确认隔离。'
+        : '自动恢复无法清理这些记录。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可在「设置」中查看归档恢复状态并确认隔离。';
+      if (offerArchiveJournalQuarantineDialog({
+        title: dialogTitle,
+        message: dialogMessage,
+        detail: dialogDetail,
+      })) {
+        archiveRecoveryFailures.delete(key);
+        return undefined;
       }
-      // 仍有可解析但无法自动清理的 journal：阻断写入，指引人工隔离（不自动丢证据）。
+      // 仍有残留：阻断写入，指引人工隔离（不自动丢证据）。
       const error = archiveRecoveryBlockedError(
         `仍有 ${again.names.length} 条未解决的归档恢复记录`
         + (q.dest ? `；已隔离 ${q.quarantined} 条损坏记录到 ${q.dest}` : ''),
@@ -2572,14 +2756,19 @@ function archiveJournalStatus(): Record<string, unknown> {
       blocked: Boolean(blocked),
     };
   }
-  // residual
+  // residual：区分「形态合法可解析」与「损坏/形态非法（可安全隔离）」
   const corrupt: string[] = [];
   const parseable: string[] = [];
   const dir = path.join(key, '.journal');
   for (const name of presence.names) {
     try {
-      JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      parseable.push(name);
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as unknown;
+      const shapeReason = journalRecordInvalidReason(raw);
+      if (shapeReason && isJournalShapeFailureReason(shapeReason)) {
+        corrupt.push(name);
+      } else {
+        parseable.push(name);
+      }
     } catch {
       corrupt.push(name);
     }
@@ -2588,11 +2777,12 @@ function archiveJournalStatus(): Record<string, unknown> {
     ok: false,
     code: 'archive_journal_residual',
     status: 'residual',
-    message: `发现 ${presence.names.length} 条未解决的归档恢复记录（可解析 ${parseable.length}，损坏 ${corrupt.length}）。可重试自动恢复，或在确认后隔离这些记录以解除写入阻断。`,
+    message: `发现 ${presence.names.length} 条未解决的归档恢复记录（可解析 ${parseable.length}，损坏或格式无效 ${corrupt.length}）。可重试自动恢复，或在确认后隔离这些记录以解除写入阻断。`,
     residualCount: presence.names.length,
     parseableCount: parseable.length,
     corruptCount: corrupt.length,
     blocked: true,
+    canQuarantine: true,
     ...(blocked?.detail ? { detail: blocked.detail } : {}),
   };
 }
@@ -4282,7 +4472,11 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
         message: '该位置当前不在允许打开的范围内。',
       };
     }
-    const result = await openOrRevealByPolicy(canon, { forceReveal: reveal });
+    // 符号 location：允许打开普通目录；bundle-like 仍由策略拒绝。
+    const result = await openOrRevealByPolicy(canon, {
+      forceReveal: reveal,
+      allowDirectoryOpen: true,
+    });
     if (!result.ok && result.code === 'path_open_failed') {
       return {
         ...result,
@@ -4311,20 +4505,18 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
   if (!resolved.ok) {
     return { ok: false, code: resolved.code, error: resolved.message, message: resolved.message };
   }
+  // 主进程签发的 opaque 句柄可打开目录；任意 renderer path 不得 open 目录。
+  const isMainIssuedHandle = target.startsWith('ext:');
   if (reveal) {
-    if (!fs.existsSync(resolved.path)) {
-      return {
-        ok: false,
-        code: 'path_missing',
-        error: '文件已不存在，可能被移动或删除。请重新归档。',
-        message: '文件已不存在，可能被移动或删除。请重新归档。',
-      };
-    }
-    showItemInFolderForUser(resolved.path);
-    return { ok: true, error: '' };
+    return openOrRevealByPolicy(resolved.path, {
+      forceReveal: true,
+      allowDirectoryOpen: isMainIssuedHandle,
+    });
   }
-  // S2：允许根校验之后，再按扩展名约束可 open 的文件类型
-  return openOrRevealByPolicy(resolved.path);
+  // S2：允许根校验之后，再按扩展名 / 目录来源约束可 open 的目标
+  return openOrRevealByPolicy(resolved.path, {
+    allowDirectoryOpen: isMainIssuedHandle,
+  });
 });
 
 handleTrusted('mfh:copy-text', (_event, payload: unknown) => {

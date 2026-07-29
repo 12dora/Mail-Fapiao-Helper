@@ -71,6 +71,12 @@ export class ArchiveRecoveryError extends Error {
   constructor(cause: unknown) {
     super('archive_journal_recovery_failed');
     this.name = 'ArchiveRecoveryError';
+    // 再包一层时保留原 reason / cause，避免 message 被统一成 code 后丢失分支键。
+    if (cause instanceof ArchiveRecoveryError) {
+      this.reason = cause.reason;
+      this.cause = cause.cause ?? cause;
+      return;
+    }
     this.cause = cause;
     this.reason = cause instanceof Error
       ? cause.message
@@ -875,6 +881,9 @@ export function assertArchiveTransactionsRecovered(invoicesDir: string): { rolle
   try {
     return recoverArchiveTransactions(invoicesDir, { strict: true });
   } catch (err) {
+    // 已是 ArchiveRecoveryError：直接抛出，保留 reason（invalid_shape / malformed 等）。
+    // 再包一层时 constructor 也会透传 reason/cause，双保险供 Electron 隔离路由分支。
+    if (err instanceof ArchiveRecoveryError) throw err;
     throw new ArchiveRecoveryError(err);
   }
 }
