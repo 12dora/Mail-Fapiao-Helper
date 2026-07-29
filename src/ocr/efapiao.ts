@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +45,12 @@ interface ServiceState {
 
 /** 保留的 stderr 尾部字节数，避免长时间运行的服务把日志堆在内存里。 */
 const STDERR_TAIL_BYTES = 8192;
+/** CLI parse 的 stdout/stderr 有界 ring buffer 上限（OCR-12）。 */
+const CLI_OUTPUT_CAP_BYTES = 64 * 1024;
+/** 超时后 SIGTERM → SIGKILL 的宽限。 */
+const TERMINATE_GRACE_MS = 2_000;
+/** 强杀后再等 close 的上限。 */
+const TERMINATE_KILL_WAIT_MS = 1_000;
 
 const EFAPIAO_VERSION = '0.1.3';
 const serviceStates = new Map<string, ServiceState>();
@@ -344,6 +350,8 @@ async function ensureService(cfg: Config): Promise<void> {
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: efapiaoEnv(cfg),
+      // POSIX：独立进程组，stop 时 kill(-pid) 可清孙进程（OCR-12）。
+      detached: process.platform !== 'win32',
     });
     state.child = child;
     child.unref();
@@ -353,23 +361,189 @@ async function ensureService(cfg: Config): Promise<void> {
   return state.startup;
 }
 
+function childStillRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function sendSignal(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Windows：taskkill /T 杀整棵进程树。
+ * POSIX：对负 PGID 发信号（要求 spawn 时 `detached: true` 成为新组长）；
+ * 失败再降级到直接子进程（OCR-12）。
+ */
+function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  const pid = child.pid;
+  if (pid === undefined) return false;
+  if (process.platform === 'win32') {
+    try {
+      const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        timeout: 5000,
+        stdio: 'ignore',
+      });
+      // 0 = 成功，128 = 进程已不存在。
+      if (result.error) return sendSignal(child, 'SIGKILL');
+      if (result.status === 0 || result.status === 128) return true;
+      return sendSignal(child, 'SIGKILL');
+    } catch {
+      return sendSignal(child, 'SIGKILL');
+    }
+  }
+  // POSIX 进程组信号：覆盖 efapiao 可能拉起的孙进程。
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    return sendSignal(child, signal);
+  }
+}
+
+/**
+ * 仅在 `close` 上 resolve（stdio 全部释放）；超时返回 false，不把 exit 当完成（OCR-12）。
+ * 子孙进程仍持有管道时 exit 可能先于 close，此时不得让 OCR promise 提前 settle。
+ */
+function waitForClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (!childStillRunning(child) && child.exitCode !== null) {
+    // 已完全结束：exitCode 有值且 stdio 通常已 close；仍等一个 tick 上的 close 若未触发则视为完成。
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (ok: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      child.once('close', () => done(true));
+      const timer = setTimeout(() => done(true), 0);
+    });
+  }
+  if (!childStillRunning(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    child.once('close', () => done(true));
+    const timer = setTimeout(() => done(false), timeoutMs);
+  });
+}
+
+export class ChildTerminateError extends Error {
+  readonly code = 'efapiao_child_terminate_failed';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ChildTerminateError';
+  }
+}
+
+/**
+ * 统一子进程终止：关 stdin → 进程组 SIGTERM → 等 close → 进程组 SIGKILL → 再等 close（OCR-12）。
+ * 最终仍未 close 时抛出，调用方不得把解析结果当成成功。
+ */
+async function terminateChildTree(child: ChildProcess, graceMs = TERMINATE_GRACE_MS): Promise<void> {
+  if (!childStillRunning(child)) {
+    // 确保 close 已经发生（或立即判定完成）。
+    await waitForClose(child, 0);
+    return;
+  }
+  try {
+    child.stdin?.end();
+  } catch {
+    // ignore
+  }
+  try {
+    child.stdin?.destroy();
+  } catch {
+    // ignore
+  }
+  killProcessTree(child, 'SIGTERM');
+  if (await waitForClose(child, graceMs)) return;
+  killProcessTree(child, 'SIGKILL');
+  sendSignal(child, 'SIGKILL');
+  if (await waitForClose(child, TERMINATE_KILL_WAIT_MS)) return;
+  throw new ChildTerminateError(
+    `efapiao_child_terminate_failed:pid=${child.pid ?? 'unknown'}:close_timeout`,
+  );
+}
+
+/**
+ * 有界输出缓冲（OCR-12）：超过上限后停止累积并标记 overflow。
+ * **不得**丢弃头部后把截断尾部交给 JSON.parse——那会静默解析残缺 JSON。
+ * overflow 时 toString 仍返回已缓冲前缀，供错误消息；调用方必须先检查 overflow。
+ */
+class BoundedOutput {
+  private readonly chunks: Buffer[] = [];
+  private total = 0;
+  /** 一旦为 true，后续 chunk 丢弃且不得再解析为结构化结果。 */
+  overflow = false;
+
+  constructor(private readonly capBytes: number) {}
+
+  push(chunk: Buffer): void {
+    if (this.overflow) return;
+    if (this.total + chunk.length > this.capBytes) {
+      // 尽量保留 cap 内前缀，便于错误诊断；标记 overflow。
+      const room = this.capBytes - this.total;
+      if (room > 0) {
+        this.chunks.push(chunk.subarray(0, room));
+        this.total += room;
+      }
+      this.overflow = true;
+      return;
+    }
+    this.chunks.push(chunk);
+    this.total += chunk.length;
+  }
+
+  toString(): string {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+
 /**
  * Terminate any `efapiao serve` children this process started. Serve children
  * are unref()'d so they would otherwise outlive the CLI as orphans holding the
  * port; callers must invoke this before the process exits.
+ *
+ * 异步版本会等 close；同步 `stopEfapiaoServices` 发信号后清空 registry，
+ * 并 kick 一轮 terminate（fire-and-forget 带 grace）。
  */
-export function stopEfapiaoServices(): void {
+export async function stopEfapiaoServicesAsync(): Promise<void> {
+  const children: ChildProcess[] = [];
   for (const state of serviceStates.values()) {
-    const child = state.child;
-    if (child && !child.killed) {
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        // best-effort
-      }
-    }
+    if (state.child) children.push(state.child);
   }
   serviceStates.clear();
+  const results = await Promise.allSettled(children.map((child) => terminateChildTree(child)));
+  const failed = results.filter((r) => r.status === 'rejected');
+  if (failed.length > 0) {
+    const first = failed[0] as PromiseRejectedResult;
+    const msg = first.reason instanceof Error ? first.reason.message : String(first.reason);
+    throw new ChildTerminateError(`efapiao_stop_incomplete:${failed.length}:${msg}`);
+  }
+}
+
+export function stopEfapiaoServices(): void {
+  const children: ChildProcess[] = [];
+  for (const state of serviceStates.values()) {
+    if (state.child) children.push(state.child);
+  }
+  serviceStates.clear();
+  for (const child of children) {
+    // 同步路径：立即 SIGTERM，并调度异步升级到 SIGKILL（失败仅记入 unhandled rejection 路径外：吞掉）。
+    void terminateChildTree(child).catch(() => { /* best-effort on sync exit path */ });
+  }
 }
 
 async function runService(
@@ -455,7 +629,7 @@ function runBinary(
   cfg: Config,
   data: Buffer,
   meta: { format: DocumentFormat; documentType: DocumentType; filename: string },
-): Promise<{ code: number | null; stdout: string; stderr: string }> {
+): Promise<{ code: number | null; stdout: string; stderr: string; stdoutOverflow: boolean; stderrOverflow: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath(cfg), [
       'parse',
@@ -467,34 +641,72 @@ function runBinary(
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: efapiaoEnv(cfg),
+      // POSIX：新进程组，便于 kill(-pid) 覆盖孙进程（OCR-12）。
+      detached: process.platform !== 'win32',
     });
+
+    const stdoutBuf = new BoundedOutput(CLI_OUTPUT_CAP_BYTES);
+    const stderrBuf = new BoundedOutput(CLI_OUTPUT_CAP_BYTES);
+    let settled = false;
+    let timedOut = false;
+    let terminateFailed = false;
+
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
 
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      reject(new Error(`efapiao timeout after ${cfg.ocr.timeoutMs}ms`));
+      timedOut = true;
+      // 超时：terminate 完整进程组并**必须**等 close，再 reject（OCR-12）。
+      void terminateChildTree(child)
+        .catch(() => {
+          terminateFailed = true;
+        })
+        .finally(() => {
+          settle(() => {
+            if (terminateFailed) {
+              reject(new Error(
+                `efapiao timeout after ${cfg.ocr.timeoutMs}ms; child process group did not close`,
+              ));
+              return;
+            }
+            reject(new Error(`efapiao timeout after ${cfg.ocr.timeoutMs}ms`));
+          });
+        });
     }, cfg.ocr.timeoutMs);
 
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.stdout?.on('data', (chunk: Buffer) => stdoutBuf.push(chunk));
+    child.stderr?.on('data', (chunk: Buffer) => stderrBuf.push(chunk));
     child.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
+      // spawn 失败：仍尝试清理，再 settle。
+      void terminateChildTree(child).catch(() => {}).finally(() => {
+        settle(() => reject(err));
+      });
     });
+    // 只在 close 上 settle 成功路径：保证 stdio 释放后再解析（OCR-12）。
     child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({
-        code,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
+      if (timedOut) {
+        // 超时路径由 terminate 的 finally settle；这里只保证不会 resolve 成功。
+        return;
+      }
+      settle(() => {
+        resolve({
+          code,
+          stdout: stdoutBuf.toString(),
+          stderr: stderrBuf.toString(),
+          stdoutOverflow: stdoutBuf.overflow,
+          stderrOverflow: stderrBuf.overflow,
+        });
       });
     });
 
     // Swallow EPIPE/ECONNRESET on stdin (e.g. the child exits or is killed on
     // timeout before consuming input); the failure is reported via 'error'/'close'.
-    child.stdin.on('error', () => { /* ignore broken-pipe on stdin */ });
-    child.stdin.end(data);
+    child.stdin?.on('error', () => { /* ignore broken-pipe on stdin */ });
+    child.stdin?.end(data);
   });
 }
 
@@ -577,7 +789,13 @@ function errorResult(payload: EfapiaoPayload, fallbackError: string, transport: 
 }
 
 async function parseViaCli(cfg: Config, data: Buffer, meta: { format: DocumentFormat; documentType: DocumentType; filename: string }): Promise<OcrResult> {
-  let result: { code: number | null; stdout: string; stderr: string };
+  let result: {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+    stdoutOverflow: boolean;
+    stderrOverflow: boolean;
+  };
   try {
     result = await runBinary(cfg, data, meta);
   } catch (err) {
@@ -592,6 +810,28 @@ async function parseViaCli(cfg: Config, data: Buffer, meta: { format: DocumentFo
       raw: null,
     };
   }
+
+  // stdout 超限：明确的有界输出失败，绝不 JSON.parse 截断字节（OCR-12）。
+  if (result.stdoutOverflow) {
+    return {
+      status: 'error',
+      fields: {},
+      error: `efapiao_stdout_overflow:cap_${CLI_OUTPUT_CAP_BYTES}:exit_${result.code}`,
+      transport: 'cli',
+      raw: null,
+    };
+  }
+  // 失败路径若只有 stderr 且 stderr 溢出：同样不得当 JSON 解析。
+  if (result.code !== 0 && result.stderrOverflow && !result.stdout.trim()) {
+    return {
+      status: 'error',
+      fields: {},
+      error: `efapiao_stderr_overflow:cap_${CLI_OUTPUT_CAP_BYTES}:exit_${result.code}`,
+      transport: 'cli',
+      raw: null,
+    };
+  }
+
   const rawJson = result.code === 0 ? result.stdout : result.stderr || result.stdout;
   let payload: EfapiaoPayload;
   try {

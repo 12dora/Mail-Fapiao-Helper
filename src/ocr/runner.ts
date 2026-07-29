@@ -210,16 +210,23 @@ function migrateResultCsvIfNeeded(csvPath: string): void {
   fs.renameSync(tmpPath, csvPath);
 }
 
-function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void {
-  const exists = fs.existsSync(csvPath);
+/**
+ * 命令开始时只迁移/验证 results CSV 一次；后续 append 不再整表重读（OCR-13）。
+ * 返回 true 表示调用方已确保 header 就绪，可直接 append。
+ */
+function ensureResultCsvReady(csvPath: string): void {
   ensureDir(path.dirname(csvPath));
-  const header = RESULT_HEADER.join(',') + '\n';
-  if (!exists) {
-    fs.writeFileSync(csvPath, '﻿' + header + resultLine(row, result), 'utf8');
-  } else {
-    migrateResultCsvIfNeeded(csvPath);
-    fs.appendFileSync(csvPath, resultLine(row, result), 'utf8');
+  if (!fs.existsSync(csvPath)) {
+    const header = RESULT_HEADER.join(',') + '\n';
+    fs.writeFileSync(csvPath, '\uFEFF' + header, 'utf8');
+    return;
   }
+  migrateResultCsvIfNeeded(csvPath);
+}
+
+function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void {
+  // 假定 runOcrPending 已在循环前调用 ensureResultCsvReady。
+  fs.appendFileSync(csvPath, resultLine(row, result), 'utf8');
 }
 
 /**
@@ -281,6 +288,8 @@ export async function runOcrPending(
 
   const pendingCsv = path.join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
   const resultCsv = cfg.ocr.resultsCsv;
+  // 整次 run 只迁移/准备 results CSV 一次，避免每个结果 O(N) 重读（OCR-13）。
+  ensureResultCsvReady(resultCsv);
   const rows = readCsvRows(pendingCsv).map(pendingRow);
   const nextRows = rows.map((row) => ({ ...row }));
   const seenResults = opts.force ? new ArtifactIndex<ResultStatus>() : readResultIndex(resultCsv);
@@ -288,8 +297,13 @@ export async function runOcrPending(
   const summary: OcrRunSummary = { scanned: rows.length, parsed: 0, skipped: 0, failed: 0, updated: 0 };
   const batch: ParseJob[] = [];
   const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
-  // 行状态一旦变化就标脏，checkpoint() 随即把 pending CSV 落盘：
-  // 结果已 append、pending 却还写着 pending 的中断窗口被压缩到一批之内（APP-14C）。
+  /**
+   * OCR-13 务实改进（单次 run 内去二次方）：
+   * - 跳过/状态对齐只标脏，不在循环中反复整表重写；
+   * - 全表 checkpoint 仅发生在：每个 OCR 批次边界、致命/失败落盘点、run 结束；
+   * - 不引入跨进程 append-only journal（那是更大的持久化 redesign，超出 P2 范围）。
+   * 崩溃时未 checkpoint 的 skip 状态会在下次 run 重算，不丢 OCR 结果（results 仍逐条 append）。
+   */
   let pendingDirty = false;
 
   function checkpoint(): void {
@@ -347,6 +361,7 @@ export async function runOcrPending(
       const error = err instanceof Error ? err.message : String(err);
       for (const job of jobs) recordFailure(job.row, error);
     }
+    // 解析批次结束后强制落盘 pending（APP-14C）。
     checkpoint();
   }
 
@@ -381,7 +396,6 @@ export async function runOcrPending(
     if (row.status === 'ignored' || row.documentType === 'supporting') {
       markRow(row, 'ignored', row.reason || 'supporting_document');
       summary.skipped++;
-      checkpoint();
       continue;
     }
     const identity = rowIdentity(row);
@@ -396,7 +410,6 @@ export async function runOcrPending(
         markRow(row, 'failed', existing.error || 'already_failed_in_results');
       }
       summary.skipped++;
-      checkpoint();
       continue;
     }
 
@@ -443,10 +456,10 @@ export async function runOcrPending(
     await flushConcurrent(jobs);
   }
   await flushBatch();
-  checkpoint();
-
+  // 收尾：整次 run 最多再整表写一次（含 skip 标脏），O(N) 有界（OCR-13）。
   if (nextRows.length > 0) {
     writePendingCsv(pendingCsv, nextRows);
+    pendingDirty = false;
   }
 
   return summary;
