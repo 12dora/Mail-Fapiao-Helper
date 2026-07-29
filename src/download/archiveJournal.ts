@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { testFaultEnabled } from '../util/testFaults.js';
@@ -381,9 +382,9 @@ function removeJournalOrThrow(recordPath: string): void {
 /**
  * TEST-10：测试专用 stage barrier。
  *
- * 仅在 `MFH_TEST_FAULT_TOKEN` + sentinel 文件 + `MFH_TEST_JOURNAL_HOLD_AT_STAGE=1`
- * 同时满足时生效。写入 journal 并 fsync 到目标 stage 后：
- *   1. 若设置了 `MFH_TEST_JOURNAL_HOLD_SENTINEL`，把 stage 名写入该文件；
+ * 仅在 `testFaultEnabled`（打包运行时恒 false；非打包需 token + 包根下 sentinel）
+ * 且 `MFH_TEST_JOURNAL_HOLD_AT_STAGE=1` 时生效。写入 journal 并 fsync 到目标 stage 后：
+ *   1. 若设置了 `MFH_TEST_JOURNAL_HOLD_SENTINEL` 且路径落在 tmp/cwd 下，把 stage 名写入；
  *   2. 自旋等待直到被 SIGKILL（不是 throw，否则 journal 会走同进程 rollback）。
  *
  * 父测试在 sentinel 出现后强杀子进程，再用新进程调用 recover 验证 durable 边界。
@@ -393,11 +394,20 @@ function maybeHoldAtJournalStage(stage: ArchiveStage): void {
   if (process.env.MFH_TEST_JOURNAL_HOLD_STAGE !== stage) return;
   const sentinel = process.env.MFH_TEST_JOURNAL_HOLD_SENTINEL;
   if (sentinel && sentinel.length > 0) {
-    try {
-      fs.mkdirSync(path.dirname(sentinel), { recursive: true });
-      fs.writeFileSync(sentinel, `${stage}\n`, 'utf8');
-    } catch {
-      // parent will time out if the sentinel never appears
+    const resolved = path.resolve(sentinel);
+    const roots = [
+      path.resolve(os.tmpdir()),
+      path.resolve(process.env.TMPDIR || process.env.TEMP || os.tmpdir()),
+      path.resolve(process.cwd()),
+    ];
+    const allowed = roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+    if (allowed) {
+      try {
+        fs.mkdirSync(path.dirname(resolved), { recursive: true });
+        fs.writeFileSync(resolved, `${stage}\n`, 'utf8');
+      } catch {
+        // parent will time out if the sentinel never appears
+      }
     }
   }
   // Busy-wait until the parent SIGKILLs this process. Do not throw: a throw would
@@ -562,16 +572,34 @@ export function recoverOrphanStagingDirs(invoicesDir: string): { removed: number
 /**
  * 启动时调用一次：回滚所有未提交的残留事务。
  * 仍被活着的进程持有的、以及已经进入 `ledger-committed` 的条目不会被回滚。
+ *
+ * **严格模式（strict）fail-closed**：
+ * - journal 目录「确认不存在」(ENOENT) → 视为无残留，可继续；
+ * - journal 目录/条目「无法判定」(EACCES/EIO/损坏 JSON/非法 shape) → 抛错阻断写入；
+ * - 活 PID 持有的 journal → 抛错；
+ * - 已安装文件无法证明所有权（unresolved）：持久化 csvRollbackDisabled 后仍计 skipped
+ *   （CSV 截断已禁用；与既有回归一致）。若持久化失败则抛错。
  */
 export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRecoveryOptions = {}): { rolledBack: number; skipped: number } {
   const dir = journalDir(invoicesDir);
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);
-  } catch {
-    // journal 不存在时仍尝试清理孤儿 staging。
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') {
+      // 确认不存在：无 journal 可恢复，仍尝试清理孤儿 staging。
+      const staging = recoverOrphanStagingDirs(invoicesDir);
+      return { rolledBack: 0, skipped: staging.skipped };
+    }
+    // EACCES / EIO / 其它：无法判定是否有未提交事务 → 严格模式 fail-closed。
+    if (opts.strict) {
+      throw new ArchiveRecoveryError(
+        new Error(`archive_recovery_journal_dir_unreadable:${code ?? 'unknown'}`),
+      );
+    }
     const staging = recoverOrphanStagingDirs(invoicesDir);
-    return { rolledBack: 0, skipped: staging.skipped };
+    return { rolledBack: 0, skipped: staging.skipped + 1 };
   }
 
   let rolledBack = 0;
@@ -587,12 +615,25 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
     let record: JournalRecord;
     try {
       record = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as JournalRecord;
-    } catch {
-      // 条目本身损坏：无法安全推断要删什么，保留给人工检查。
+    } catch (err) {
+      // 无法读取或解析：严格模式不得当作「已恢复」。
+      if (opts.strict) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        throw new ArchiveRecoveryError(
+          new Error(
+            code
+              ? `archive_recovery_journal_unreadable:${code}`
+              : 'archive_recovery_journal_malformed',
+          ),
+        );
+      }
       skipped++;
       continue;
     }
     if (!Array.isArray(record.files) || !Array.isArray(record.csv)) {
+      if (opts.strict) {
+        throw new ArchiveRecoveryError(new Error('archive_recovery_journal_invalid_shape'));
+      }
       skipped++;
       continue;
     }
@@ -620,6 +661,8 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
     const cleanup = removePlannedFiles(record, invoicesDir);
     removeTransactionStaging(record, invoicesDir);
     if (cleanup.unresolved > 0) {
+      // 无法证明文件所有权：禁用 CSV 截断并保留 journal。
+      // disableCsvRollback 失败会抛错；成功后 strict 仍允许跳过（证据已 durable）。
       disableCsvRollback(recordPath, record);
       skipped++;
       continue;

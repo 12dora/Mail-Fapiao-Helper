@@ -393,6 +393,28 @@
         return window.FPH?.isChecked ? window.FPH.isChecked(el) : el?.checked === true;
     }
 
+    /**
+     * get-config 对绝对路径返回脱敏展示串（如「<数据目录>/invoices」「…/AP」）。
+     * 这些串不得写回 config.json；与密钥留空不修改同理，省略 = 保持磁盘原值。
+     * 相对路径（如 ./invoices）原样保留，可编辑并保存。
+     */
+    function looksLikeRedactedPathDisplay(raw) {
+        const v = String(raw ?? '').trim();
+        if (!v) return false;
+        if (v.includes('<') || v.includes('>') || v.includes('\0')) return true;
+        if (v.startsWith('…') || v.startsWith('...')) return true;
+        return false;
+    }
+
+    /** 路径类字段：空或脱敏展示串 → undefined（mergeDefined 会跳过，视为未改）。 */
+    function pathFieldValue(key) {
+        const raw = value(key);
+        if (raw === undefined || raw === null) return undefined;
+        const trimmed = String(raw).trim();
+        if (trimmed === '' || looksLikeRedactedPathDisplay(trimmed)) return undefined;
+        return trimmed;
+    }
+
     function collectConfigPayload() {
         const mailboxSelect = document.querySelector('[data-config="imap.mailbox"]');
         const mailbox = mailboxSelect
@@ -415,12 +437,12 @@
                 keywords: keywords.length ? keywords : ['发票'],
             },
             paths: {
-                samples: value('paths.samples'),
-                invoices: value('paths.invoices'),
-                pending: value('paths.pending'),
+                samples: pathFieldValue('paths.samples'),
+                invoices: pathFieldValue('paths.invoices'),
+                pending: pathFieldValue('paths.pending'),
             },
             output: {
-                csv: value('output.csv'),
+                csv: pathFieldValue('output.csv'),
             },
             rename: {
                 avoidConflictBeforeOcr: checkOn('rename.avoidConflictBeforeOcr'),
@@ -429,13 +451,15 @@
                 rule: value('rename.rule'),
                 fallback: value('rename.fallback'),
                 typeDirRule: value('rename.typeDirRule'),
+                // organizedDir 表单未暴露；若将来回显脱敏值，同样不得写回。
+                organizedDir: pathFieldValue('rename.organizedDir'),
             },
             ocr: {
                 enabled: document.getElementById('ocr-vendor')?.value !== 'none',
                 provider: document.getElementById('ocr-vendor')?.value === 'none' ? 'efapiao' : document.getElementById('ocr-vendor')?.value,
                 ocrMode: value('ocr.ocrMode'),
                 executionMode: value('ocr.executionMode'),
-                resultsCsv: value('ocr.resultsCsv'),
+                resultsCsv: pathFieldValue('ocr.resultsCsv'),
                 serviceHost: value('ocr.serviceHost') || undefined,
                 servicePort: numberValue('ocr.servicePort'),
                 serviceWorkers: numberValue('ocr.serviceWorkers'),

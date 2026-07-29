@@ -62,6 +62,8 @@
       "dist/**/*",
       "!dist/electron/devFakeBackend.js",
       "!dist/electron/devFakeBackend.js.map",
+      "!dist/ocr/mockProvider.js",
+      "!dist/ocr/mockProvider.js.map",
       "electron/**/*",
       "gui-design/**/*",
       "!gui-design/tests/**",

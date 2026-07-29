@@ -234,7 +234,9 @@ async function testCsvStateRecovery() {
     await mkdir(join(tmp, 'custom'), { recursive: true });
     await mkdir(cfg.paths.invoices, { recursive: true });
     await writeFile(join(tmp, 'raw', 'recover.eml'), pdfMail('<recover-case@example.com>'));
-    const archivedBefore = '%PDF-1.4\n%ALREADY-ARCHIVED\n%EOF\n';
+    // 归档字节必须与邮件附件相同：六列 legacy 升级后靠 contentHash 复用，
+    // 不再用 Message-Id 折叠整封邮件（CORE-03）。内容一致 → 不得装碰撞副本。
+    const archivedBefore = Buffer.from(PDF_BYTES_B64, 'base64');
     await writeFile(join(cfg.paths.invoices, 'invoice.pdf'), archivedBefore);
     const ledgerBefore = [
       '﻿messageId,date,from,subject,filename,source',
@@ -252,8 +254,8 @@ async function testCsvStateRecovery() {
     if (archived.length !== 1 || archived[0] !== 'invoice.pdf') {
       fail(`recovering state from output.csv must not re-archive anything; found ${JSON.stringify(archived)}`);
     }
-    const archivedAfter = await readFile(join(cfg.paths.invoices, 'invoice.pdf'), 'utf8');
-    if (archivedAfter !== archivedBefore) fail('the already-archived invoice was overwritten during recovery');
+    const archivedAfter = await readFile(join(cfg.paths.invoices, 'invoice.pdf'));
+    if (!archivedAfter.equals(archivedBefore)) fail('the already-archived invoice was overwritten during recovery');
 
     const ledger = parseSimpleCsv(await readFile(cfg.output.csv, 'utf8'));
     if (ledger.rows.length !== 1) {
@@ -261,6 +263,15 @@ async function testCsvStateRecovery() {
     }
     if (column(ledger, ledger.rows[0], 'filename') !== 'invoice.pdf') {
       fail(`output.csv row was rewritten during recovery: ${ledger.rows[0].join(',')}`);
+    }
+    // 六列 → 八列升级必须回填 contentHash / mailHash，否则 force-rerun 会装副本。
+    const contentHash = column(ledger, ledger.rows[0], 'contentHash');
+    const mailHash = column(ledger, ledger.rows[0], 'mailHash');
+    if (!contentHash || contentHash.length < 12) {
+      fail(`six-column ledger upgrade must backfill contentHash, got ${JSON.stringify(contentHash)}`);
+    }
+    if (!mailHash || !/^[0-9a-f]{12}$|^[0-9a-f]{32}$/i.test(mailHash)) {
+      fail(`six-column ledger upgrade must backfill mailHash, got ${JSON.stringify(mailHash)}`);
     }
   });
 }

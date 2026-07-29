@@ -6,7 +6,7 @@ import { chromium, type Browser } from 'playwright';
 import { loadConfig, type Config } from './config.js';
 import { fetchMails, missingImapCredentials, parseMailWithGuards, type RawMail } from './mail/fetcher.js';
 import { nonInvoiceReason } from './mail/exclude.js';
-import { log } from './log.js';
+import { emitTerminal, log } from './log.js';
 import {
   ensureSecureDir,
   fileExistsNonEmpty,
@@ -644,7 +644,7 @@ async function cmdFetch(argv: string[]): Promise<number> {
   try {
     for await (const mail of fetchMails(cfg, log)) {
       seen++;
-      // CORE-03：内容绑定 primary + legacy 别名；绝不单靠 Message-Id 跳过。
+      // CORE-03：内容绑定 primary；fetched/INDEX 只用 evidence，绝不单靠 Message-Id 跳过。
       const identity = resolveMailIdentity({
         messageId: mail.messageId,
         from: mail.from,
@@ -653,31 +653,47 @@ async function cmdFetch(argv: string[]): Promise<number> {
         raw: mail.raw,
       });
       const hash = identity.primary;
-      // APP-11：primary 与 legacy 文件名任一存在且非空即视为已缓存。
+      // APP-11：primary 缓存，或「字节完全一致」的 legacy 缓存，才算本邮件已抓取。
+      // 仅文件名存在不够：共享 Message-Id 时 legacy 路径可能是另一封邮件的 .eml。
       const month = monthDir(mail.date);
       const primaryPath = join(outDir, month, `${hash}.eml`);
       const legacyPath = identity.legacy !== hash
         ? join(outDir, month, `${identity.legacy}.eml`)
         : undefined;
       const cachedPrimary = fileExistsNonEmpty(primaryPath);
-      const cachedLegacy = legacyPath ? fileExistsNonEmpty(legacyPath) : false;
-      const cached = cachedPrimary || cachedLegacy;
-      const emlPath = cachedPrimary ? primaryPath : (cachedLegacy && legacyPath ? legacyPath : primaryPath);
+      const cachedLegacyOwn = Boolean(
+        legacyPath
+        && fileExistsNonEmpty(legacyPath)
+        && (() => {
+          try {
+            return readFileSync(legacyPath!).equals(mail.raw);
+          } catch {
+            return false;
+          }
+        })(),
+      );
+      const cached = cachedPrimary || cachedLegacyOwn;
+      const emlPath = cachedPrimary ? primaryPath : (cachedLegacyOwn && legacyPath ? legacyPath : primaryPath);
+      // 本邮件自己的 pre-upgrade 记录：legacy 文件字节与当前 raw 一致时，才把 legacy
+      // 纳入 fetched 证据（认领本邮件升级前 state）；否则不得折叠另一封邮件。
+      const fetchEvidence = cachedLegacyOwn
+        ? [...new Set([...identity.evidence, identity.legacy])]
+        : [...identity.evidence];
 
-      if (store.hasFetchedAny(identity.aliases) && cached) {
-        // 读侧任意别名命中即跳过；不回写多别名（非对称读写）。
+      if (store.hasFetchedAny(fetchEvidence) && cached) {
+        // 读侧 evidence 命中即跳过；不回写多别名（非对称读写）。
         skippedKnown++;
         continue;
       }
 
       if (opts.dryRun) {
-        const why = store.hasFetchedAny(identity.aliases) ? '(state 已记录但缓存缺失，需要重新抓取)' : '';
+        const why = store.hasFetchedAny(fetchEvidence) ? '(state 已记录但缓存缺失，需要重新抓取)' : '';
         log.info(`[dry-run] would save ${emlPath} (subject="${mail.subject}")${why}`);
         continue;
       }
 
       if (!cached) {
-        if (store.hasFetchedAny(identity.aliases)) {
+        if (store.hasFetchedAny(fetchEvidence)) {
           repaired++;
           log.info(`cached eml missing/empty, re-fetching ${hash}: ${primaryPath}`);
         }
@@ -686,10 +702,10 @@ async function cmdFetch(argv: string[]): Promise<number> {
         log.info(`eml exists, skip write: ${emlPath}`);
       }
 
-      // INDEX 按 mailHash 去重，禁止 Message-Id 单独充当「已索引」证据。
-      if (!identity.aliases.some((a) => indexedMailHashes.has(a))) {
+      // INDEX 按 primary 去重，禁止 Message-Id legacy 单独充当「已索引」证据。
+      if (!fetchEvidence.some((a) => indexedMailHashes.has(a))) {
         appendIndexRow(indexCsv, mail, hash);
-        for (const a of identity.aliases) indexedMailHashes.add(a);
+        for (const a of fetchEvidence) indexedMailHashes.add(a);
       }
 
       // CORE-03 非对称写：只记 primary 一条。
@@ -792,27 +808,30 @@ async function collectEmlPaths(dir: string): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * 台账行 -> 显式 mailHash（优先）或可安全推导的身份。
- * CORE-03c：绝不能只靠展示列重算而丢掉已持久化的 32 位键。
+ * 台账行 -> **唯一** primary 身份（write-primary / read-aliases 契约，BLOCKING 11）。
+ *
+ * - 有显式 `mailHash`/`hash`：只返回这一条，绝不附带 Message-Id 衍生的 12 位；
+ * - 无显式列：才推导一条（超大邮件 hash 写在 messageId 位，或 legacy 12 位）；
+ * - 禁止返回「32 位 + 其 12 位 legacy」双键——backfill 会把两者都写进 state，
+ *   导致 processedHashes 基数 > 邮件数，并永久压制共享 Message-Id 的另一封邮件。
  */
-function hashesFromLedgerRow(row: Record<string, string>): string[] {
-  const out = new Set<string>();
+function primaryHashFromLedgerRow(row: Record<string, string>): string | undefined {
   const explicit = (row.mailHash ?? row.hash ?? '').trim();
-  if (explicit && isMailHash(explicit)) out.add(explicit.toLowerCase());
+  if (explicit && isMailHash(explicit)) return explicit.toLowerCase();
 
   const messageId = row.messageId ?? '';
-  if (isMailHash(messageId)) out.add(messageId.toLowerCase());
+  // 超大邮件路径曾把 hash 写在 messageId 位。
+  if (isMailHash(messageId)) return messageId.toLowerCase();
 
-  // 真实 Message-Id / 展示列 → legacy 12 位别名（与升级前 .eml 文件名对齐）。
-  if (!isMailHash(messageId)) {
-    out.add(legacyMsgIdHash(
+  if (messageId.length > 0 || (row.from ?? '') || (row.date ?? '') || (row.subject ?? '')) {
+    return legacyMsgIdHash(
       messageId.length > 0 ? messageId : undefined,
       row.from ?? '',
       row.date ?? '',
       row.subject ?? '',
-    ));
+    );
   }
-  return [...out].filter((h) => h.length > 0);
+  return undefined;
 }
 
 /**
@@ -829,21 +848,19 @@ async function fetchedHashesFromCache(samplesDir: string): Promise<string[]> {
   return out;
 }
 
-/** 从 invoices.csv（已归档）与 pending.csv（已进入待确认）恢复 processed 身份。 */
+/** 从 invoices.csv（已归档）与 pending.csv（已进入待确认）恢复 processed 身份（每行一条 primary）。 */
 function processedHashesFromLedgers(cfg: Config): string[] {
-  const out: string[] = [];
-  for (const row of readCsvRows(resolve(cfg.output.csv))) {
-    out.push(...hashesFromLedgerRow(row));
-  }
-  for (const row of readCsvRows(join(resolve(cfg.paths.pending), 'pending.csv'))) {
-    out.push(...hashesFromLedgerRow(row));
-  }
+  const out = new Set<string>();
+  const add = (row: Record<string, string>): void => {
+    const h = primaryHashFromLedgerRow(row);
+    if (h) out.add(h);
+  };
+  for (const row of readCsvRows(resolve(cfg.output.csv))) add(row);
+  for (const row of readCsvRows(join(resolve(cfg.paths.pending), 'pending.csv'))) add(row);
   // OCR 队列的 hash 列即 mailHash。
   const ocrPending = join(resolve(cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
-  for (const row of readCsvRows(ocrPending)) {
-    out.push(...hashesFromLedgerRow(row));
-  }
-  return [...new Set(out.filter((h) => h.length > 0))];
+  for (const row of readCsvRows(ocrPending)) add(row);
+  return [...out];
 }
 
 async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<State> {
@@ -854,11 +871,11 @@ async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<St
 }
 
 /**
- * CORE-03：把台账（invoices.csv 等）里的显式 mailHash 幂等回填进 processed。
+ * CORE-03：把台账（invoices.csv 等）里的**primary** mailHash 幂等回填进 processed。
  *
- * 不再扫描 .eml 并把全部别名 bulk 写入 state——那会让集合基数 ≠ 邮件数。
- * 升级兼容靠**读侧** `hasProcessedAny(aliases)` / `hasFetchedAny(aliases)`：
- * 旧 state 只含 12 位时，aliases 仍含 legacy，命中即跳过，无需回写 32 位。
+ * 写侧只写 primary（每封邮件一条）；读侧用 `evidence` 覆盖升级前 12 位记录
+ * （仅当本邮件运营身份就是 legacy 时，见 resolveMailIdentity.evidence）。
+ * 禁止把 Message-Id 衍生 legacy 作为「另一封邮件」的 processed 证据写入 state。
  */
 function backfillProcessedFromLedgers(store: StateStore, cfg: Config): void {
   let added = 0;
@@ -1076,12 +1093,34 @@ async function cmdRun(argv: string[]): Promise<number> {
         skipped++;
         break;
       case 'retryable_failure':
+        // BLOCKING 2：归档已成功但 pending 写失败时 partial=true——票已落盘，必须计入 archived。
+        if (result.partial === true) {
+          archived++;
+          partial++;
+        }
+        failed++;
+        break;
       case 'fatal_failure':
         failed++;
         break;
       default:
         failed++;
         break;
+    }
+  };
+
+  /** 结构化终态：任何退出路径（含 fatal / only-mail 未命中）都必须发出（BLOCKING 3/4）。 */
+  const emitRunTerminal = (): void => {
+    const processed = archived + pending;
+    emitTerminal(
+      `Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`
+      + `, archived=${archived}, pending=${pending}`,
+    );
+    if (networkFailures.length > 0) {
+      log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
+      for (const failure of networkFailures) {
+        log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
+      }
     }
   };
 
@@ -1127,7 +1166,8 @@ async function cmdRun(argv: string[]): Promise<number> {
           store.addProcessed(hash);
           store.checkpoint();
           pending++;
-          log.info(`pending ${hash} reason=${reason}`);
+          // 与 degradeToPending 一致：批次明细靠 `Manual <hash>:` 组装（NON-BLOCKING 1）。
+          log.info(`Manual ${hash}: ${reason}`);
         } catch (writeErr) {
           // item 9：StateWriteError 必须传播到 abort，不能被吞掉。
           if (writeErr instanceof StateWriteError) {
@@ -1162,7 +1202,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       return;
     }
 
-    if (identity.aliases.some((a) => inFlight.has(a)) || inFlight.has(hash)) {
+    // 并发去重只用 evidence，避免共享 Message-Id 的两封邮件互斥（CORE-03）。
+    if (identity.evidence.some((a) => inFlight.has(a)) || inFlight.has(hash)) {
       skipped++;
       return;
     }
@@ -1180,8 +1221,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       return;
     }
 
-    // CORE-03a：禁止仅凭 Message-Id 判定已处理；读侧用别名匹配旧 12 位 state。
-    if (opts.onlyMail === undefined && !opts.force && store.hasProcessedAny(identity.aliases)) {
+    // CORE-03a：禁止仅凭 Message-Id 判定已处理；读侧只用 evidence。
+    if (opts.onlyMail === undefined && !opts.force && store.hasProcessedAny(identity.evidence)) {
       skipped++;
       return;
     }
@@ -1189,12 +1230,12 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (fatalAbort.signal.aborted) return;
 
     inFlight.add(hash);
-    for (const a of identity.aliases) inFlight.add(a);
+    for (const a of identity.evidence) inFlight.add(a);
     try {
-      const already = store.hasProcessedAny(identity.aliases);
+      const already = store.hasProcessedAny(identity.evidence);
       const taskState: State = {
-        // 只带当前邮件的判定所需：pipeline 用 aliases∩state 判断是否已处理。
-        // 已处理时 seed primary 即可（primary ∈ aliases）；写回也只记 primary。
+        // 只带当前邮件的判定所需：pipeline 用 evidence∩state 判断是否已处理。
+        // 已处理时 seed primary 即可；写回也只记 primary。
         processedHashes: already ? [hash] : [],
         // pipeline 不读取 fetchedHashes，无需复制整份集合。
         fetchedHashes: [],
@@ -1214,7 +1255,7 @@ async function cmdRun(argv: string[]): Promise<number> {
       recordOutcome(result);
     } finally {
       inFlight.delete(hash);
-      for (const a of identity.aliases) inFlight.delete(a);
+      for (const a of identity.evidence) inFlight.delete(a);
     }
   };
 
@@ -1274,6 +1315,11 @@ async function cmdRun(argv: string[]): Promise<number> {
       log.error(`state flush failed: ${(flushErr as Error).message}`);
     }
     log.error(`run aborted: ${(e as Error).message}`);
+    // BLOCKING 4：fatal 路径也必须发出终态计数，否则 Electron 丢失已归档事实。
+    if (opts.onlyMail !== undefined && !onlyMailMatched) {
+      log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
+    }
+    emitRunTerminal();
     return 1;
   } finally {
     if (browserInstance) {
@@ -1285,26 +1331,16 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   }
 
-  // 结构化终态事件：Electron 只消费这些计数，不依赖裸 exit code 推断部分成功。
-  // 字段顺序兼容旧解析器（processed/partial/skipped/failed 仍在前段）；
-  // archived/pending 为新契约字段。processed = archived + pending（不含 skipped/failed）。
-  const processed = archived + pending;
-  log.info(
-    `Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`
-    + `, archived=${archived}, pending=${pending}`,
-  );
-  if (networkFailures.length > 0) {
-    log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
-    for (const failure of networkFailures) {
-      log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
-    }
-  }
-
-  // CORE-09：--only-mail 未命中目标 → 明确非 0 + mail_not_found。
+  // CORE-09 / BLOCKING 3：先断言 --only-mail 命中，再发终态——避免渲染器短暂显示成功零计数。
   if (opts.onlyMail !== undefined && !onlyMailMatched) {
     log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
+    emitRunTerminal();
     return 1;
   }
+
+  // 结构化终态事件：行首 \x1eMFH_TERMINAL\x1e 锚定（见 log.emitTerminal）。
+  // processed = archived + pending（不含 skipped/failed）。
+  emitRunTerminal();
   // CORE-04：任一 retryable/fatal failure → 非 0；全成功才是 0。
   return failed > 0 ? 1 : 0;
 }
