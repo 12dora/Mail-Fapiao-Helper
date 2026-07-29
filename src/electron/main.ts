@@ -373,25 +373,30 @@ function isCanonicallyInside(candidate: string, root: string): boolean {
   return isPathSegmentInside(realCandidate, realRoot);
 }
 
-/**
- * 不得作为 open-path 允许根的危险目录（即便配置文件里写成这些值也拒绝）。
- * 家目录的子目录可以（用户常把发票放在 ~/Documents/...）；裸家目录本身不行。
- */
-function isDangerousOpenRoot(canonPath: string): boolean {
-  if (!canonPath) return true;
-  const normalized = path.normalize(canonPath);
-  const root = path.parse(normalized).root;
-  // 文件系统根（`/` 或 `C:\`）
-  if (!root || normalized === root || normalized === path.sep) return true;
+/** 规范化后的系统危险根（用于 equal + descendant 拒绝）。 */
+function dangerousSystemRoots(): string[] {
+  const roots: string[] = [];
+  const push = (raw: string | undefined): void => {
+    if (!raw) return;
+    try {
+      roots.push(path.normalize(fs.realpathSync(path.resolve(raw))));
+    } catch {
+      try {
+        roots.push(path.normalize(path.resolve(raw)));
+      } catch {
+        // skip unresolvable
+      }
+    }
+  };
 
   if (process.platform === 'win32') {
-    const lower = normalized.toLowerCase();
-    const winDir = path.resolve(process.env.SystemRoot || process.env.windir || 'C:\\Windows').toLowerCase();
-    const pf = path.resolve(process.env.ProgramFiles || 'C:\\Program Files').toLowerCase();
-    const pf86 = path.resolve(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)').toLowerCase();
-    if (lower === winDir || lower === pf || lower === pf86) return true;
+    push(process.env.SystemRoot || process.env.windir || 'C:\\Windows');
+    push(process.env.ProgramFiles || 'C:\\Program Files');
+    push(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)');
+    push(process.env.ProgramData || 'C:\\ProgramData');
+    push(process.env.SystemDrive ? `${process.env.SystemDrive}\\Windows` : 'C:\\Windows');
   } else {
-    const blocked = new Set([
+    for (const p of [
       '/etc',
       '/usr',
       '/bin',
@@ -399,10 +404,34 @@ function isDangerousOpenRoot(canonPath: string): boolean {
       '/System',
       '/Applications',
       '/Library',
-      // macOS 上 /etc 常是 /private/etc 的 symlink，canonical 后落在 private 下
       '/private/etc',
-    ]);
-    if (blocked.has(normalized)) return true;
+      '/private/var/root',
+      '/dev',
+      '/proc',
+      '/sys',
+      '/var/root',
+      '/boot',
+      '/root',
+    ]) {
+      push(p);
+    }
+  }
+  return roots;
+}
+
+/**
+ * 不得作为 open-path 允许根 / 配置保存路径的危险位置（含系统根及其子孙）。
+ * 家目录的子目录可以（用户常把发票放在 ~/Documents/...）；裸家目录本身不行。
+ */
+function isDangerousOpenRoot(canonPath: string): boolean {
+  if (!canonPath) return true;
+  const normalized = path.normalize(canonPath);
+  const fsRoot = path.parse(normalized).root;
+  // 文件系统根（`/` 或 `C:\`）
+  if (!fsRoot || normalized === fsRoot || normalized === path.sep) return true;
+
+  for (const blocked of dangerousSystemRoots()) {
+    if (isPathSegmentInside(normalized, blocked)) return true;
   }
 
   try {
@@ -419,9 +448,85 @@ function isDangerousOpenRoot(canonPath: string): boolean {
 }
 
 /**
+ * 配置路径是否「像用户文档位置」：相对路径、数据目录内、用户主目录下的子路径、
+ * 或非系统盘符/卷上的非根目录。系统目录及其子孙一律否。
+ */
+function isPlausibleUserDocumentLocation(canonPath: string): boolean {
+  if (!canonPath || isDangerousOpenRoot(canonPath)) return false;
+  const data = realDataDir();
+  if (data && isPathSegmentInside(canonPath, data)) return true;
+  try {
+    const home = fs.realpathSync(os.homedir());
+    // 允许家目录下的子路径，不允许裸家目录（isDangerousOpenRoot 已拦）
+    if (isPathSegmentInside(canonPath, home)) return true;
+  } catch {
+    // continue
+  }
+  // 外置盘 / 其他卷：至少比盘符根深一层，且已通过系统 deny-list
+  const fsRoot = path.parse(canonPath).root;
+  if (fsRoot && isPathSegmentInside(canonPath, fsRoot)) {
+    const rel = path.relative(fsRoot, canonPath);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && rel.split(path.sep).filter(Boolean).length >= 1) {
+      return true;
+    }
+  }
+  // UNC：\\server\share\... 至少到 share 下一级更安全，但仍允许 share 根作文档库
+  if (canonPath.startsWith('\\\\') || canonPath.startsWith('//')) {
+    const parts = canonPath.replace(/^[\\/]+/, '').split(/[\\/]/).filter(Boolean);
+    return parts.length >= 2;
+  }
+  return false;
+}
+
+/**
+ * 校验 renderer 拟写入配置的路径字段。失败返回中文错误；通过返回 undefined。
+ * 相对路径锚定 dataDir 后再做危险/可信位置检查。
+ */
+function validateConfiguredPathValue(raw: string, fieldPath: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  // 脱敏展示串不得回写（含 <…> 占位与省略号路径）
+  if (trimmed.includes('<') || trimmed.includes('>') || trimmed.startsWith('…') || trimmed.includes('\0')) {
+    return `${fieldPath}：路径无效或为展示占位，请填写真实保存位置。`;
+  }
+  const abs = path.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\') || trimmed.startsWith('//')
+    ? path.resolve(trimmed)
+    : path.resolve(dataDir, trimmed);
+  const canon = resolveCanonicalPath(abs);
+  if (!canon) {
+    return `${fieldPath}：无法确认路径位置，已拒绝保存。`;
+  }
+  if (isDangerousOpenRoot(canon) || !isPlausibleUserDocumentLocation(canon)) {
+    return `${fieldPath}：不能使用系统目录或不可信位置，请选择用户文档类文件夹。`;
+  }
+  return undefined;
+}
+
+/** 在落盘前校验 paths.* / output.csv / rename.organizedDir / ocr.resultsCsv。 */
+function validateSavePathFields(candidate: Record<string, unknown>): { path: string; message: string }[] {
+  const errors: { path: string; message: string }[] = [];
+  const check = (value: unknown, field: string): void => {
+    if (typeof value !== 'string' || value.trim().length === 0) return;
+    const msg = validateConfiguredPathValue(value, field);
+    if (msg) errors.push({ path: field, message: msg });
+  };
+  const paths = asObject(candidate.paths);
+  check(paths.samples, 'paths.samples');
+  check(paths.invoices, 'paths.invoices');
+  check(paths.pending, 'paths.pending');
+  const output = asObject(candidate.output);
+  check(output.csv, 'output.csv');
+  const rename = asObject(candidate.rename);
+  check(rename.organizedDir, 'rename.organizedDir');
+  const ocr = asObject(candidate.ocr);
+  check(ocr.resultsCsv, 'ocr.resultsCsv');
+  return errors;
+}
+
+/**
  * ELEC-06：open-path 允许根仅由主进程从磁盘配置自行计算，绝不读 IPC payload。
- * = canonical dataDir + 配置的 invoices/pending/samples + 输出 CSV 父目录。
- * 规范化失败的根跳过；危险根（系统目录 / 裸家目录）跳过。
+ * = canonical dataDir + 配置的 invoices/pending/samples + organizedDir + 输出 CSV 父目录。
+ * 规范化失败的根跳过；危险根（系统目录及其子孙 / 裸家目录）跳过。
  */
 function openPathAllowedRoots(): string[] {
   const roots: string[] = [];
@@ -430,7 +535,7 @@ function openPathAllowedRoots(): string[] {
     if (!raw) return;
     const canon = resolveCanonicalPath(raw);
     if (!canon) return;
-    if (isDangerousOpenRoot(canon)) return;
+    if (isDangerousOpenRoot(canon) || !isPlausibleUserDocumentLocation(canon)) return;
     const key = process.platform === 'win32' ? canon.toLowerCase() : canon;
     if (seen.has(key)) return;
     seen.add(key);
@@ -441,6 +546,11 @@ function openPathAllowedRoots(): string[] {
   add(invoicesDirPath());
   add(pendingDirPath());
   add(samplesDirPath());
+  try {
+    add(resolvedPath('rename', 'organizedDir', './invoices/organized'));
+  } catch {
+    // organized 路径解析失败则跳过
+  }
   // 输出台账 CSV 的父目录（用户可能把它放到归档目录之外）
   try {
     add(path.dirname(ledgerCsvPath()));
@@ -448,6 +558,37 @@ function openPathAllowedRoots(): string[] {
     // ledger 路径解析失败则跳过
   }
   return roots;
+}
+
+/** 目标是否落在当前 open-path 允许根内（fail closed）。 */
+function isInsideOpenPathAllowedRoots(canonPath: string): boolean {
+  if (!canonPath) return false;
+  for (const root of openPathAllowedRoots()) {
+    if (isPathSegmentInside(canonPath, root)) return true;
+  }
+  return false;
+}
+
+/** 主进程已知的符号位置 → 绝对路径（仅 main 解析，renderer 不得伪造）。 */
+type OpenLocationKey = 'invoices' | 'pending' | 'samples' | 'organized' | 'dataDir' | 'ledger';
+
+function resolveSymbolicLocation(location: string): string | undefined {
+  switch (location) {
+    case 'invoices':
+      return invoicesDirPath();
+    case 'pending':
+      return pendingDirPath();
+    case 'samples':
+      return samplesDirPath();
+    case 'organized':
+      return resolvedPath('rename', 'organizedDir', './invoices/organized');
+    case 'dataDir':
+      return dataDir;
+    case 'ledger':
+      return path.dirname(ledgerCsvPath());
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -548,6 +689,36 @@ function mergeDefined(target: Record<string, unknown>, patch: Record<string, unk
   }
 }
 
+/** 展示脱敏串（含 <占位> / …/ 截断）不得回写磁盘；与 secret 留空不修改同理。 */
+function looksLikeRedactedPathDisplay(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (v.includes('<') || v.includes('>') || v.includes('\0')) return true;
+  if (v.startsWith('…') || v.startsWith('...')) return true;
+  return false;
+}
+
+/**
+ * 从 save payload 去掉脱敏展示路径，避免 auto-save 把「已配置」串写回 config.json。
+ * 真正改路径时 renderer 必须提交未脱敏的新值（用户重新输入或走目录选择器）。
+ */
+function stripRedactedPathFields(patch: Record<string, unknown>): void {
+  const scrubObj = (block: unknown, keys: string[]): void => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return;
+    const obj = block as Record<string, unknown>;
+    for (const key of keys) {
+      const v = obj[key];
+      if (typeof v === 'string' && looksLikeRedactedPathDisplay(v)) {
+        delete obj[key];
+      }
+    }
+  };
+  scrubObj(patch.paths, ['samples', 'invoices', 'pending']);
+  scrubObj(patch.output, ['csv']);
+  scrubObj(patch.rename, ['organizedDir']);
+  scrubObj(patch.ocr, ['resultsCsv']);
+}
+
 function normalizeSavePayload(value: unknown): Record<string, unknown> {
   const payload = asObject(value) as SaveConfigPayload;
   const ocrCredentials = {
@@ -559,7 +730,7 @@ function normalizeSavePayload(value: unknown): Record<string, unknown> {
   if (typeof legacy.tencentRegion === 'string') ocrCredentials.tencentRegion = legacy.tencentRegion;
   const ocrProvider = typeof legacy.ocrVendor === 'string' ? legacy.ocrVendor : payload.ocr?.provider;
 
-  return {
+  const normalized: Record<string, unknown> = {
     imap: payload.imap,
     filter: payload.filter,
     paths: payload.paths,
@@ -574,6 +745,8 @@ function normalizeSavePayload(value: unknown): Record<string, unknown> {
     playwright: payload.playwright,
     network: payload.network,
   };
+  stripRedactedPathFields(normalized);
+  return normalized;
 }
 
 function stringField(value: unknown): string {
@@ -670,6 +843,12 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
     return { ok: false, configPath: redactPath(configPath), fieldErrors: validated.errors };
   }
 
+  // ELEC-06：配置路径在落盘前由主进程独立校验，拒绝系统目录/危险根及其子孙。
+  const pathFieldErrors = validateSavePathFields(candidate);
+  if (pathFieldErrors.length > 0) {
+    return { ok: false, configPath: redactPath(configPath), fieldErrors: pathFieldErrors };
+  }
+
   try {
     writeConfigAtomic(candidate);
   } catch (err) {
@@ -698,12 +877,11 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
 }
 
 /**
- * 屏蔽 secret 与内部诊断路径后再交给 renderer（ELEC-07）。
+ * 屏蔽 secret 与绝对路径后再交给 renderer（ELEC-07）。
  *
- * `paths.invoices/pending/samples` 与 `output.csv` 是用户可配置的「保存位置」：
- * 配置表单要能回显并重新保存，且 shell 的 openPath({ path }) 要用真实路径打开。
- * 打开时主进程仍只信任磁盘配置算出的 allow-list（ELEC-06），不会被 IPC 扩权。
- * OCR resultsCsv / organizedDir 等内部路径继续脱敏。
+ * 绝对 `paths.*` / `output.csv` 会泄漏 OS 用户名、项目目录与 UNC 主机；
+ * 打开目录走 `mfh:open-path` 的 `location` / opaque handle，renderer 不需要真路径。
+ * 相对路径保留（无用户名泄漏，配置表单可回显）；绝对路径脱敏为展示串。
  */
 function redactConfig(raw: Record<string, unknown>): Record<string, unknown> {
   const isSecretKey = (k: string): boolean => /secret|key|token|pass/i.test(k);
@@ -729,17 +907,16 @@ function redactConfig(raw: Record<string, unknown>): Record<string, unknown> {
     credentials: Object.fromEntries(Object.entries(creds).map(([k, v]) => [k, isSecretKey(k) ? '' : v])),
   };
   const pathsSrc = asObject(raw.paths);
-  // 用户保存位置：不脱敏，供配置表单回显/保存与 openPath({ path }) 使用。
   const paths = {
     ...pathsSrc,
-    samples: pathsSrc.samples,
-    invoices: pathsSrc.invoices,
-    pending: pathsSrc.pending,
+    samples: redactMaybePath(pathsSrc.samples),
+    invoices: redactMaybePath(pathsSrc.invoices),
+    pending: redactMaybePath(pathsSrc.pending),
   };
   const outputSrc = asObject(raw.output);
   const output = {
     ...outputSrc,
-    csv: outputSrc.csv,
+    csv: redactMaybePath(outputSrc.csv),
   };
   const renameSrc = asObject(raw.rename);
   const rename = {
@@ -985,9 +1162,36 @@ function emptyRunCounts(): RunTerminalCounts {
   return { archived: 0, pending: 0, skipped: 0, failed: 0, partial: 0, processed: 0 };
 }
 
-/** 从 stdout/stderr 解析 `Run complete: archived=…`（也兼容旧 processed=）。 */
+/**
+ * 去掉 CLI 可信日志信封后的逻辑行。信封本身由 logger 写入、不可由附件文件名伪造
+ * （CORE-13：不可信值不会出现在行首，换行已转义）。
+ */
+function stripCliLogEnvelope(line: string): string {
+  return line.replace(/^\[(info|warn|error|debug)\]\s+\S+\s+/, '');
+}
+
+/**
+ * 终端摘要契约：只认「逻辑行首」锚定的 `Run complete:` / `OCR complete:` / `Organize complete:`，
+ * 逐行扫描，取**最后**一条匹配（中间夹带同名子串的附件名不能伪造）。
+ */
+function lastAnchoredTerminalLine(output: string, marker: string): string | undefined {
+  let found: string | undefined;
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (!line) continue;
+    if (line.startsWith(marker)) {
+      found = line;
+      continue;
+    }
+    const body = stripCliLogEnvelope(line);
+    if (body.startsWith(marker)) found = body;
+  }
+  return found;
+}
+
+/** 从 stdout/stderr 解析行首锚定的 `Run complete: archived=…`（也兼容旧 processed=）。 */
 function parseRunCompleteCounts(output: string): RunTerminalCounts | undefined {
-  const line = output.split(/\r?\n/).find((l) => l.includes('Run complete:'));
+  const line = lastAnchoredTerminalLine(output, 'Run complete:');
   if (!line) return undefined;
   const archived = numField(line, 'archived');
   const pending = numField(line, 'pending');
@@ -1028,7 +1232,9 @@ function parseOcrCompleteCounts(output: string): {
   failed: number;
   updated: number;
 } | undefined {
-  const match = /OCR complete: scanned=(\d+), parsed=(\d+), skipped=(\d+), failed=(\d+), updated=(\d+)/.exec(output);
+  const line = lastAnchoredTerminalLine(output, 'OCR complete:');
+  if (!line) return undefined;
+  const match = /^OCR complete:\s*scanned=(\d+),\s*parsed=(\d+),\s*skipped=(\d+),\s*failed=(\d+),\s*updated=(\d+)/.exec(line);
   if (!match) return undefined;
   return {
     scanned: Number(match[1]),
@@ -1039,9 +1245,57 @@ function parseOcrCompleteCounts(output: string): {
   };
 }
 
+function parseOrganizeCompleteCounts(output: string): {
+  scanned: number;
+  copied: number;
+  skipped: number;
+  failed: number;
+} | undefined {
+  const line = lastAnchoredTerminalLine(output, 'Organize complete:');
+  if (!line) return undefined;
+  const match = /^Organize complete:\s*scanned=(\d+),\s*copied=(\d+),\s*skipped=(\d+),\s*failed=(\d+)/.exec(line);
+  if (!match) {
+    // 至少拿到 scanned= 时仍返回，其余字段默 0
+    const scanned = numField(line, 'scanned');
+    if (scanned === undefined) return undefined;
+    return {
+      scanned,
+      copied: numField(line, 'copied') ?? 0,
+      skipped: numField(line, 'skipped') ?? 0,
+      failed: numField(line, 'failed') ?? 0,
+    };
+  }
+  return {
+    scanned: Number(match[1]),
+    copied: Number(match[2]),
+    skipped: Number(match[3]),
+    failed: Number(match[4]),
+  };
+}
+
+/** 解析 fetch 的 `done: seen=…` 终态行（行首锚定，取最后一条）。 */
+function parseFetchDoneCounts(output: string): {
+  seen: number;
+  saved: number;
+  skippedKnown: number;
+  repaired: number;
+  dryRun: boolean;
+} | undefined {
+  const line = lastAnchoredTerminalLine(output, 'done:');
+  if (!line || !/\bseen=\d+/.test(line)) return undefined;
+  return {
+    seen: numField(line, 'seen') ?? 0,
+    saved: numField(line, 'saved') ?? 0,
+    skippedKnown: numField(line, 'skippedKnown') ?? 0,
+    repaired: numField(line, 'repaired') ?? 0,
+    dryRun: /\bdryRun=true\b/.test(line),
+  };
+}
+
 /**
  * 运行历史 / IPC 终态：success | partial | failed。
  * - 有成功侧也有失败 → partial
+ * - partial 计数 > 0（如 archived 子集仍有待确认）→ partial
  * - 仅失败 / 未启动 / 非 0 且无成功 → failed
  * - 仅成功（含 skipped）→ success
  */
@@ -1050,23 +1304,32 @@ function deriveRunStatus(opts: {
   started?: boolean;
   succeeded: number;
   failed: number;
+  /** archived 子集：有结果但仍不完整；>0 时不得标 green success。 */
+  partial?: number;
   mailNotFound?: boolean;
 }): RunHistoryEntry['status'] {
   if (opts.started === false) return 'failed';
   if (opts.mailNotFound) return 'failed';
   if (opts.failed > 0 && opts.succeeded > 0) return 'partial';
   if (opts.failed > 0) return 'failed';
-  if (opts.code !== 0 && opts.code !== null) return 'failed';
+  if ((opts.partial ?? 0) > 0) return 'partial';
+  if (opts.code !== 0 && opts.code !== null) {
+    // 非 0 退出但已有成功侧 → 部分完成，而非整次失败
+    if (opts.succeeded > 0) return 'partial';
+    return 'failed';
+  }
   return 'success';
 }
 
 function parseFetchLine(line: string, current: FetchProgressState, emit: ProgressSink): void {
-  if (line.includes('done: seen=')) {
-    current.seen = numField(line, 'seen') ?? current.seen;
-    current.saved = numField(line, 'saved') ?? current.saved;
-    current.skipped = numField(line, 'skippedKnown') ?? current.skipped;
-    current.repaired = numField(line, 'repaired') ?? current.repaired;
-    const dryRun = /\bdryRun=true\b/.test(line);
+  const body = stripCliLogEnvelope(line.trim());
+  // 行首锚定 `done:`，禁止附件名/主题里的同名子串伪造终态。
+  if (body.startsWith('done:') && /\bseen=\d+/.test(body)) {
+    current.seen = numField(body, 'seen') ?? current.seen;
+    current.saved = numField(body, 'saved') ?? current.saved;
+    current.skipped = numField(body, 'skippedKnown') ?? current.skipped;
+    current.repaired = numField(body, 'repaired') ?? current.repaired;
+    const dryRun = /\bdryRun=true\b/.test(body);
     const repairedNote = current.repaired > 0 ? `，修复 ${current.repaired} 封缓存缺失的邮件` : '';
     emit({
       percent: 100,
@@ -1101,9 +1364,12 @@ function parseFetchLine(line: string, current: FetchProgressState, emit: Progres
 }
 
 function parseOcrLine(line: string, current: OcrProgressState, emit: ProgressSink): void {
-  const text = line.trim();
+  const text = stripCliLogEnvelope(line.trim());
   if (!text) return;
-  const complete = /OCR complete: scanned=(\d+), parsed=(\d+), skipped=(\d+), failed=(\d+), updated=(\d+)/.exec(text);
+  // 行首锚定，禁止子串伪造
+  const complete = text.startsWith('OCR complete:')
+    ? /^OCR complete:\s*scanned=(\d+),\s*parsed=(\d+),\s*skipped=(\d+),\s*failed=(\d+),\s*updated=(\d+)/.exec(text)
+    : null;
   if (complete) {
     current.total = Number(complete[1]);
     current.parsed = Number(complete[2]);
@@ -1239,9 +1505,10 @@ function fileProgressPercent(current: FileProgressState): number | undefined {
 }
 
 function parseFileLine(line: string, current: FileProgressState, emit: ProgressSink): void {
-  const text = line.trim();
+  const text = stripCliLogEnvelope(line.trim());
   if (!text) return;
-  if (text.includes('Run complete:')) {
+  // 行首锚定 `Run complete:`（禁止附件文件名里的同名子串伪造终态）
+  if (text.startsWith('Run complete:')) {
     const counts = parseRunCompleteCounts(text);
     if (counts) {
       current.archived = counts.archived;
@@ -1260,6 +1527,7 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
       code: current.failed > 0 ? 1 : 0,
       succeeded: current.archived + current.pending + current.skipped,
       failed: current.failed,
+      partial: current.partial,
     });
     const partialNote = current.partial > 0 ? `，其中 ${current.partial} 封仍有待确认` : '';
     const pendingNote = current.pending > 0 ? `，待确认 ${current.pending} 封` : '';
@@ -1804,7 +2072,12 @@ function pipelineRunMessage(
     return `处理完成，本次处理 ${counts.archived + counts.pending} 封邮件${pendingNote}。`;
   }
   if (status === 'partial') {
-    return `已处理 ${counts.archived + counts.pending} 封邮件，其中 ${counts.failed} 封没有完成。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+    if (counts.failed > 0) {
+      return `已处理 ${counts.archived + counts.pending} 封邮件，其中 ${counts.failed} 封没有完成。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+    }
+    // partial 计数 > 0（有票落盘但仍有待确认子集）
+    const partialNote = counts.partial > 0 ? `，其中 ${counts.partial} 封仍有待确认` : '';
+    return `已处理 ${counts.archived + counts.pending} 封邮件${partialNote}。请到「待确认」继续处理。`;
   }
   if (onlyMail) {
     return '这封邮件没有处理完成。请稍后重试；如仍失败，请展开「查看技术详情」。';
@@ -1941,8 +2214,8 @@ type JournalPresence =
 function archiveRecoveryBlockedError(extra?: string): UiError {
   return {
     code: 'archive_recovery_blocked',
-    // COPY-10：可执行动作；并提供隔离恢复指引（OCR-05 rework）。
-    message: '上次保存发票时中断，当前无法继续修改。请先关闭可能占用发票清单的表格程序，然后重新打开应用。若仍无法继续，请在「设置 → 关于」查看数据位置，将其中 invoices 下的 .journal 文件夹改名为 .journal-quarantine 后再打开应用（改名前请勿删除）。',
+    // COPY-10：可执行动作；优先应用内隔离，而非让非技术用户改隐藏目录。
+    message: '上次保存发票时中断，当前无法继续修改。请先关闭可能占用发票清单的表格程序，然后重试。若仍无法继续，可在「设置」中查看归档恢复状态并确认隔离未解决的恢复记录（隔离前请勿删除文件）。',
     detail: extra
       ? sanitizeText(extra, { maxLength: 300 })
       : '归档事务恢复未完成或仍有未解决的 journal，写入已停止。',
@@ -2079,6 +2352,143 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
   return undefined;
 }
 
+/**
+ * 应用内归档 journal 状态（NON-BLOCKING 3）：供设置页展示，不泄漏绝对路径。
+ */
+function archiveJournalStatus(): Record<string, unknown> {
+  const key = path.resolve(invoicesDirPath());
+  const presence = inspectArchiveJournals(key);
+  const blocked = archiveRecoveryFailures.get(key);
+  if (presence.kind === 'unreadable') {
+    return {
+      ok: false,
+      code: 'archive_journal_unreadable',
+      status: 'unreadable',
+      message: '无法读取归档恢复记录（权限或 I/O 错误）。请检查磁盘权限后重试，勿当作「无残留」。',
+      detail: sanitizeText(presence.detail, { maxLength: 200 }),
+      residualCount: -1,
+      blocked: true,
+    };
+  }
+  if (presence.kind === 'absent') {
+    return {
+      ok: true,
+      code: 'archive_journal_clear',
+      status: 'clear',
+      message: blocked
+        ? '未发现残留恢复记录，但写入门禁仍可能因其他原因阻断。请重试操作。'
+        : '没有未解决的归档恢复记录。',
+      residualCount: 0,
+      blocked: Boolean(blocked),
+    };
+  }
+  // residual
+  const corrupt: string[] = [];
+  const parseable: string[] = [];
+  const dir = path.join(key, '.journal');
+  for (const name of presence.names) {
+    try {
+      JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      parseable.push(name);
+    } catch {
+      corrupt.push(name);
+    }
+  }
+  return {
+    ok: false,
+    code: 'archive_journal_residual',
+    status: 'residual',
+    message: `发现 ${presence.names.length} 条未解决的归档恢复记录（可解析 ${parseable.length}，损坏 ${corrupt.length}）。可重试自动恢复，或在确认后隔离这些记录以解除写入阻断。`,
+    residualCount: presence.names.length,
+    parseableCount: parseable.length,
+    corruptCount: corrupt.length,
+    blocked: true,
+    ...(blocked?.detail ? { detail: blocked.detail } : {}),
+  };
+}
+
+/**
+ * 用户确认后隔离残留 journal（损坏 + 可解析但无法自动清理的条目）。
+ * confirm 必须为 true；隔离到 `.journal-quarantine-<ts>`，不删除证据。
+ */
+function quarantineArchiveJournalsWithConfirm(confirm: boolean): Record<string, unknown> {
+  if (confirm !== true) {
+    return {
+      ok: false,
+      code: 'archive_journal_confirm_required',
+      message: '隔离归档恢复记录需要明确确认。请先查看状态后再确认操作。',
+    };
+  }
+  const key = path.resolve(invoicesDirPath());
+  const presence = inspectArchiveJournals(key);
+  if (presence.kind === 'unreadable') {
+    return {
+      ok: false,
+      code: 'archive_journal_unreadable',
+      message: '无法读取归档恢复记录，已拒绝隔离（权限错误不能当作无残留）。',
+      detail: sanitizeText(presence.detail, { maxLength: 200 }),
+    };
+  }
+  if (presence.kind === 'absent' || presence.names.length === 0) {
+    archiveRecoveryFailures.delete(key);
+    return {
+      ok: true,
+      code: 'archive_journal_clear',
+      message: '没有需要隔离的归档恢复记录。',
+      quarantined: 0,
+    };
+  }
+  // 先尝试自动恢复，再隔离仍残留的条目
+  try {
+    assertArchiveTransactionsRecovered(key);
+  } catch {
+    // 继续隔离路径
+  }
+  const again = inspectArchiveJournals(key);
+  if (again.kind === 'unreadable') {
+    return {
+      ok: false,
+      code: 'archive_journal_unreadable',
+      message: '恢复后仍无法读取归档记录，已拒绝隔离。',
+      detail: sanitizeText(again.detail, { maxLength: 200 }),
+    };
+  }
+  if (again.kind === 'absent' || again.names.length === 0) {
+    archiveRecoveryFailures.delete(key);
+    return {
+      ok: true,
+      code: 'archive_journal_recovered',
+      message: '自动恢复已清除残留记录，无需隔离。',
+      quarantined: 0,
+    };
+  }
+  const dir = path.join(key, '.journal');
+  const dest = path.join(key, `.journal-quarantine-${Date.now()}`);
+  try {
+    fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+    let moved = 0;
+    for (const name of again.names) {
+      fs.renameSync(path.join(dir, name), path.join(dest, name));
+      moved++;
+    }
+    archiveRecoveryFailures.delete(key);
+    return {
+      ok: true,
+      code: 'archive_journal_quarantined',
+      message: `已隔离 ${moved} 条归档恢复记录。写入门禁已解除；隔离副本仍保留在数据目录中，请勿删除直至确认发票清单无误。`,
+      quarantined: moved,
+      dest: redactPath(dest),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'archive_journal_quarantine_failed',
+      message: '隔离归档恢复记录失败，请确认磁盘可写后重试。',
+      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
+    };
+  }
+}
+
 interface SummaryPageOptions {
   inboxLimit?: number;
   inboxOffset?: number;
@@ -2102,20 +2512,23 @@ function asSummaryOptions(value: unknown): SummaryPageOptions | undefined {
 }
 
 /**
- * 给 renderer 的可打开路径：dataDir 内用相对路径；配置允许根（如外部归档目录）
- * 内也可用相对 dataDir 失败时的 opaque `ext:` 句柄（ELEC-06 / ELEC-07）。
- * open-path 会用主进程磁盘配置的 allow-list 做 containment，不信任 renderer 扩权。
+ * 给 renderer 的可打开引用：dataDir 内用相对路径；配置允许根内用 opaque `ext:` 句柄。
+ * 仅当路径当前落在允许根内才签发句柄——禁止 OCR 文件名 traversal 铸造任意 handle。
+ * 赎回时仍会按**当前**允许根再校验一次（配置变更后旧 handle 失效）。
  */
 function rendererOpenablePath(abs: string): string {
   if (!abs) return '';
   const canon = resolveCanonicalPath(abs);
   if (!canon) return '';
+  if (!isInsideOpenPathAllowedRoots(canon)) return '';
   const base = realDataDir();
   if (base && isPathSegmentInside(canon, base)) {
     const rel = path.relative(base, canon);
+    // 拒绝 `..` 逃逸形态的相对串
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return registerExternalFileHandle(canon);
     return rel.split(path.sep).join('/') || '.';
   }
-  // dataDir 外：即便落在用户配置的 invoices 等根下，也不把绝对路径交给 renderer。
+  // dataDir 外但在允许根内：opaque 句柄，永不把绝对路径交给 renderer。
   return registerExternalFileHandle(canon);
 }
 
@@ -2123,6 +2536,8 @@ function rendererOpenablePath(abs: string): string {
 const externalFileHandles = new Map<string, string>();
 
 function registerExternalFileHandle(canonicalPath: string): string {
+  // 签发时也必须在当前允许根内，否则拒绝铸造
+  if (!isInsideOpenPathAllowedRoots(canonicalPath)) return '';
   for (const [id, p] of externalFileHandles) {
     if (p === canonicalPath) return id;
   }
@@ -2138,7 +2553,16 @@ function registerExternalFileHandle(canonicalPath: string): string {
 
 function resolveExternalFileHandle(id: string): string | undefined {
   if (typeof id !== 'string' || !id.startsWith('ext:')) return undefined;
-  return externalFileHandles.get(id);
+  const registered = externalFileHandles.get(id);
+  if (!registered) return undefined;
+  const canon = resolveCanonicalPath(registered);
+  if (!canon) return undefined;
+  // 赎回时按当前允许根重验；配置改掉后旧句柄失效
+  if (!isInsideOpenPathAllowedRoots(canon)) {
+    externalFileHandles.delete(id);
+    return undefined;
+  }
+  return canon;
 }
 
 /**
@@ -3016,24 +3440,43 @@ handleTrusted('mfh:start-fetch', async (_event, payload: unknown) => {
     const args = fetchArgs(range);
     devBackend?.recordTestGlobal(mainWindow, '__mfhLastFetchArgs', args);
     const result = await runCli('fetch', args, { progress: true, jobId: gate.lease.jobId });
-    // ELEC-08：CLI 一旦返回，操作结果即最终；后续 enrich 失败不得伪装成「本地数据没有变化」。
+    // ELEC-08：以 done: 计数为准，裸 exit code 不能把部分成功报成全失败。
+    // dry-run 的「未保存」是预期行为，不得计为 failed。
+    const fetchCounts = parseFetchDoneCounts(`${result.stdout}\n${result.stderr}`);
+    const isDryRun = range.dryRun === true || fetchCounts?.dryRun === true;
+    const fetchSucceeded = fetchCounts
+      ? (isDryRun
+        ? Math.max(fetchCounts.seen, fetchCounts.saved + fetchCounts.skippedKnown + fetchCounts.repaired)
+        : fetchCounts.saved + fetchCounts.skippedKnown + fetchCounts.repaired)
+      : (result.code === 0 ? 1 : 0);
+    // 非 dry-run 下，seen 多于 saved+skipped 时可能表示中途异常；exit≠0 时至少记 1 失败。
+    const remainder = fetchCounts
+      ? Math.max(0, fetchCounts.seen - fetchCounts.saved - fetchCounts.skippedKnown)
+      : 0;
+    const fetchFailed = isDryRun
+      ? 0
+      : result.code !== 0
+        ? Math.max(remainder, fetchSucceeded > 0 ? 1 : 1)
+        : 0;
     const status = deriveRunStatus({
       code: result.code,
       started: result.started,
-      succeeded: result.code === 0 ? 1 : 0,
-      failed: result.code === 0 ? 0 : 1,
+      succeeded: fetchSucceeded > 0 || result.code === 0 ? Math.max(fetchSucceeded, result.code === 0 ? 1 : 0) : 0,
+      failed: fetchFailed,
     });
     const ok = status === 'success';
-    const message = ok
-      ? (range.dryRun ? '预览完成。' : '获取邮件完成。')
-      : '获取邮件失败，请检查邮箱设置后重试。';
+    const message = status === 'success'
+      ? (isDryRun ? '预览完成。' : '获取邮件完成。')
+      : status === 'partial'
+        ? '获取邮件部分完成：部分邮件已保存，请检查后重试失败项。'
+        : '获取邮件失败，请检查邮箱设置后重试。';
     const historyWarning = recordHistory(
       'fetch',
       range.dryRun ? '预览邮件' : '获取邮件',
       startedAt,
       result,
       status,
-      ok ? '已完成' : '运行失败',
+      status === 'success' ? '已完成' : status === 'partial' ? '部分完成' : '运行失败',
     );
     let batch: RunBatch | undefined;
     let enrichWarning: string | undefined;
@@ -3044,7 +3487,13 @@ handleTrusted('mfh:start-fetch', async (_event, payload: unknown) => {
         enrichWarning = '邮件已保存，但本次列表明细暂时无法展示。请到「邮件记录」查看。';
       }
     }
-    const report = reportFor('fetch', gate.lease.jobId, result, { ok: 'fetch_done', failed: 'fetch_failed' }, status);
+    const report = reportFor(
+      'fetch',
+      gate.lease.jobId,
+      result,
+      { ok: 'fetch_done', failed: 'fetch_failed', partial: 'fetch_partial' },
+      status,
+    );
     const summaryPart = tryAppSummary();
     const warning = [historyWarning, enrichWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
@@ -3134,6 +3583,7 @@ handleTrusted('mfh:run-pipeline', async (_event, payload: unknown) => {
       started: result.started,
       succeeded: counts.archived + counts.pending + counts.skipped,
       failed: counts.failed + (mailNotFound ? 1 : 0),
+      partial: counts.partial,
       mailNotFound,
     });
     const message = pipelineRunMessage(counts, status, Boolean(onlyHash), mailNotFound);
@@ -3309,7 +3759,7 @@ handleTrusted('mfh:run-ocr', async (_event, payload: unknown) => {
     const ocrCompletedCleanly = result.started
       && result.code === 0
       && !stopped
-      && /OCR complete:\s*scanned=\d+/.test(`${result.stdout}\n${result.stderr}`);
+      && Boolean(parseOcrCompleteCounts(`${result.stdout}\n${result.stderr}`));
 
     if (plan) {
       try {
@@ -3325,27 +3775,18 @@ handleTrusted('mfh:run-ocr', async (_event, payload: unknown) => {
       }
     }
 
-    // ELEC-12：历史状态看结构化 OCR 计数，不把 --allow-parse-failures 的 exit 0 当成全成功。
+    // ELEC-12：历史状态看结构化 OCR 计数；skipped 计入成功侧，避免
+    // parsed=0/skipped>0/failed>0 被误判为全失败。
     const ocrCounts = result.ocrCounts
       ?? parseOcrCompleteCounts(`${result.stdout}\n${result.stderr}`);
-    const ocrStatus = stopped
-      ? 'failed' as const
+    const statusWithParseFails: RunHistoryEntry['status'] = stopped
+      ? 'failed'
       : deriveRunStatus({
         code: result.code,
         started: result.started,
         succeeded: (ocrCounts?.parsed ?? 0) + (ocrCounts?.skipped ?? 0),
-        failed: (ocrCounts?.failed ?? 0) + (ocrCompletedCleanly ? 0 : (ocrCounts ? 0 : 1)),
+        failed: (ocrCounts?.failed ?? 0) + (ocrCompletedCleanly || ocrCounts ? 0 : 1),
       });
-    // 有解析失败时即使 exit 0 也标 partial/failed。
-    const statusWithParseFails: RunHistoryEntry['status'] = stopped
-      ? 'failed'
-      : ocrCounts && ocrCounts.failed > 0 && ocrCounts.parsed > 0
-        ? 'partial'
-        : ocrCounts && ocrCounts.failed > 0 && ocrCounts.parsed === 0
-          ? 'failed'
-          : ocrCompletedCleanly
-            ? 'success'
-            : ocrStatus;
     const historyWarning = recordHistory(
       'ocr',
       raw.force === true ? '开始识别文件' : '识别文件',
@@ -3440,11 +3881,17 @@ handleTrusted('mfh:organize', async (_event, payload: unknown) => {
     const cliArgs = ['--config', configPath];
     if (applyRename) cliArgs.push('--apply-rename');
     const result = await runCli('organize', cliArgs, { jobId: gate.lease.jobId });
+    const output = `${result.stdout}\n${result.stderr}`;
+    const orgCounts = parseOrganizeCompleteCounts(output);
     const status = deriveRunStatus({
       code: result.code,
       started: result.started,
-      succeeded: result.code === 0 ? 1 : 0,
-      failed: result.code === 0 ? 0 : 1,
+      succeeded: orgCounts
+        ? orgCounts.copied + orgCounts.skipped
+        : (result.code === 0 ? 1 : 0),
+      failed: orgCounts
+        ? orgCounts.failed
+        : (result.code === 0 ? 0 : 1),
     });
     const historyWarning = recordHistory(
       'organize',
@@ -3452,23 +3899,24 @@ handleTrusted('mfh:organize', async (_event, payload: unknown) => {
       startedAt,
       result,
       status,
+      status === 'success' ? '已完成' : status === 'partial' ? '部分完成' : '运行失败',
     );
-    const output = `${result.stdout}\n${result.stderr}`;
-    const scannedMatch = /Organize complete: scanned=(\d+)/.exec(output);
-    const scanned = scannedMatch ? Number(scannedMatch[1]) : NaN;
+    const scanned = orgCounts?.scanned;
     const baseLabel = applyRename ? '改名' : '整理';
-    const message = status !== 'success'
-      ? `${baseLabel}没有完成，请查看诊断信息了解详情。`
-      : Number.isFinite(scanned) && scanned === 0
-        ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
-        : Number.isFinite(scanned)
-          ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
-          : `${baseLabel}完成。`;
+    const message = status === 'partial'
+      ? `${baseLabel}部分完成：成功 ${orgCounts?.copied ?? 0}，跳过 ${orgCounts?.skipped ?? 0}，失败 ${orgCounts?.failed ?? 0}。`
+      : status !== 'success'
+        ? `${baseLabel}没有完成，请查看诊断信息了解详情。`
+        : scanned === 0
+          ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
+          : typeof scanned === 'number'
+            ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
+            : `${baseLabel}完成。`;
     const report = reportFor(
       'organize',
       gate.lease.jobId,
       result,
-      { ok: 'organize_done', failed: 'organize_failed' },
+      { ok: 'organize_done', failed: 'organize_failed', partial: 'organize_partial' },
       status,
     );
     const summaryPart = tryAppSummary();
@@ -3480,7 +3928,17 @@ handleTrusted('mfh:organize', async (_event, payload: unknown) => {
       ...report,
       jobId: gate.lease.jobId,
       message,
-      ...(Number.isFinite(scanned) ? { scanned } : {}),
+      ...(typeof scanned === 'number' ? { scanned } : {}),
+      ...(orgCounts
+        ? {
+          counts: {
+            scanned: orgCounts.scanned,
+            copied: orgCounts.copied,
+            skipped: orgCounts.skipped,
+            failed: orgCounts.failed,
+          },
+        }
+        : {}),
       ...(warning ? { warning } : {}),
       ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
       ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
@@ -3513,28 +3971,64 @@ handleTrusted('mfh:stop-ocr', () => {
 });
 
 /**
+ * 将 get-config 发出的脱敏展示串（或相对路径）映射回主进程已知的符号位置。
+ * 只匹配当前磁盘配置算出的根，攻击者无法用伪造展示串打开系统目录。
+ */
+function resolveDisplayOrRelativeToKnownRoot(display: string): string | undefined {
+  const trimmed = display.trim();
+  if (!trimmed) return undefined;
+  const known: string[] = [
+    invoicesDirPath(),
+    pendingDirPath(),
+    samplesDirPath(),
+    resolvedPath('rename', 'organizedDir', './invoices/organized'),
+    dataDir,
+  ];
+  try {
+    known.push(path.dirname(ledgerCsvPath()));
+  } catch {
+    // skip
+  }
+  const base = realDataDir();
+  for (const raw of known) {
+    const canon = resolveCanonicalPath(raw);
+    if (!canon || !isInsideOpenPathAllowedRoots(canon)) continue;
+    if (trimmed === redactPath(raw) || trimmed === redactPath(canon)) return canon;
+    if (base && isPathSegmentInside(canon, base)) {
+      const rel = path.relative(base, canon).split(path.sep).join('/');
+      if (trimmed === rel || trimmed === `./${rel}` || trimmed === rel.replace(/^\.\//, '')) return canon;
+    }
+    // 相对配置值（磁盘上的 paths.invoices 本身就是 ./invoices 时）
+    if (!path.isAbsolute(trimmed) && !trimmed.startsWith('…') && !trimmed.includes('<')) {
+      const resolved = resolveCanonicalPath(path.resolve(dataDir, trimmed));
+      if (resolved && isPathSegmentInside(resolved, canon) && isInsideOpenPathAllowedRoots(resolved)) {
+        return resolved;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * ELEC-06：解析 open-path 目标。
  *
- * 允许根由主进程从磁盘配置自行计算（dataDir + paths.invoices/pending/samples +
- * 输出 CSV 父目录 + 主进程签发的 opaque `ext:…` 句柄），**绝不**采信 IPC payload
- * 里的额外 root。两侧路径用同一套 resolveCanonicalPath 后再做路径段 containment。
- * 规范化失败一律拒绝（fail closed）。
+ * 优先：`location` 符号键（invoices/pending/samples/organized/…）由主进程映射；
+ * 其次：主进程签发的 opaque `ext:…` 句柄（赎回时重验当前允许根）；
+ * 最后：遗留 `{ path }`——仅当目标落在当前磁盘配置允许根内才放行
+ * （含 get-config 脱敏展示串→已知根的兼容映射）。
+ * 绝不采信 IPC 额外 root；规范化失败一律拒绝（fail closed）。
  */
 function resolveOpenTarget(target: string): { ok: true; path: string } | { ok: false; code: string; message: string } {
-  if (!target || target.includes('<') || target.includes('>') || target.includes('\0')) {
+  if (!target || target.includes('\0')) {
     return { ok: false, code: 'path_invalid', message: '路径无效。' };
   }
-  // 主进程签发的 opaque 外部句柄（renderer 不可伪造路径）
+  // 主进程签发的 opaque 外部句柄（赎回时 resolveExternalFileHandle 已重验允许根）
   if (target.startsWith('ext:')) {
     const external = resolveExternalFileHandle(target);
     if (!external) {
       return { ok: false, code: 'path_handle_unknown', message: '文件引用已失效，请刷新列表后重试。' };
     }
-    const canon = resolveCanonicalPath(external);
-    if (!canon) {
-      return { ok: false, code: 'path_canonicalization_failed', message: '无法确认文件位置，已拒绝打开。' };
-    }
-    return { ok: true, path: canon };
+    return { ok: true, path: external };
   }
 
   const allowed = openPathAllowedRoots();
@@ -3542,31 +4036,100 @@ function resolveOpenTarget(target: string): { ok: true; path: string } | { ok: f
     return { ok: false, code: 'path_canonicalization_failed', message: '无法确认数据目录，已拒绝打开。' };
   }
 
+  // 脱敏展示串 / 相对配置值：只映射到主进程已知根
+  if (looksLikeRedactedPathDisplay(target) || target.includes('<') || target.startsWith('…')) {
+    const mapped = resolveDisplayOrRelativeToKnownRoot(target);
+    if (mapped) return { ok: true, path: mapped };
+    return { ok: false, code: 'path_invalid', message: '路径无效。请使用位置标识打开目录。' };
+  }
+
   // 相对路径锚定到 dataDir（若 dataDir 规范化失败则用模块级 dataDir 词法路径）
   const base = realDataDir() ?? dataDir;
-  const abs = path.isAbsolute(target) ? path.resolve(target) : path.resolve(base, target);
+  const abs = path.isAbsolute(target) || /^[A-Za-z]:[\\/]/.test(target) || target.startsWith('\\\\') || target.startsWith('//')
+    ? path.resolve(target)
+    : path.resolve(base, target);
   const canon = resolveCanonicalPath(abs);
   if (!canon) {
     return { ok: false, code: 'path_canonicalization_failed', message: '无法确认文件位置，已拒绝打开。' };
   }
 
   // 目标与每一个允许根都已经过同一套 canonical 化；用路径段前缀比较。
-  for (const root of allowed) {
-    if (isPathSegmentInside(canon, root)) {
-      return { ok: true, path: canon };
-    }
+  if (isInsideOpenPathAllowedRoots(canon)) {
+    return { ok: true, path: canon };
   }
+
+  // 相对/展示兼容：例如配置里写 ./invoices 而 dataDir 与归档目录分家
+  const known = resolveDisplayOrRelativeToKnownRoot(target);
+  if (known) return { ok: true, path: known };
+
   return { ok: false, code: 'path_outside_data_dir', message: '路径不在允许的目录范围内。' };
 }
 
 handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
-  const target = typeof raw.path === 'string' ? raw.path : '.';
+  const reveal = raw.reveal === true;
+
+  // 优先符号位置（renderer 无需真路径）
+  if (typeof raw.location === 'string' && raw.location.trim()) {
+    const loc = raw.location.trim() as OpenLocationKey;
+    const mapped = resolveSymbolicLocation(loc);
+    if (!mapped) {
+      return {
+        ok: false,
+        code: 'path_location_unknown',
+        error: '未知的位置标识。',
+        message: '未知的位置标识。',
+      };
+    }
+    const canon = resolveCanonicalPath(mapped);
+    if (!canon || !isInsideOpenPathAllowedRoots(canon)) {
+      return {
+        ok: false,
+        code: 'path_outside_data_dir',
+        error: '该位置当前不在允许打开的范围内。',
+        message: '该位置当前不在允许打开的范围内。',
+      };
+    }
+    if (reveal) {
+      if (!fs.existsSync(canon)) {
+        return {
+          ok: false,
+          code: 'path_missing',
+          error: '目标位置不存在。',
+          message: '目标位置不存在。',
+        };
+      }
+      showItemInFolderForUser(canon);
+      return { ok: true, error: '', location: loc };
+    }
+    const error = await openPathForUser(canon);
+    return {
+      ok: !error,
+      error: error ? sanitizeText(error, { maxLength: 200 }) : '',
+      location: loc,
+      ...(error ? { code: 'path_open_failed', message: '无法打开该位置，请确认它仍然存在。' } : {}),
+    };
+  }
+
+  // 句柄或遗留 path（均经 resolveOpenTarget 严格校验）
+  const target = typeof raw.path === 'string' && raw.path.length > 0
+    ? raw.path
+    : typeof raw.handle === 'string' && raw.handle.length > 0
+      ? raw.handle
+      : '';
+  if (!target) {
+    return {
+      ok: false,
+      code: 'path_invalid',
+      error: '请提供 location、handle 或 path。',
+      message: '请提供 location、handle 或 path。',
+    };
+  }
   const resolved = resolveOpenTarget(target);
   if (!resolved.ok) {
     return { ok: false, code: resolved.code, error: resolved.message, message: resolved.message };
   }
-  if (raw.reveal === true) {
+  if (reveal) {
     if (!fs.existsSync(resolved.path)) {
       return {
         ok: false,
@@ -3732,19 +4295,25 @@ handleTrusted('mfh:pending-ignore', (_event, payload: unknown) => {
   try {
     const result = rewritePendingCsv((row) => !pendingRowMatchesHash(row, hash));
     if (result.removed === 0) {
+      const summaryPart = tryAppSummary();
       return {
         ok: false,
         code: 'pending_row_not_found',
         message: '没有找到对应的待确认邮件，可能已经处理过。',
-        summary: appSummary(),
+        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true, warning: summaryPart.warning } : {}),
       };
     }
+    // 行已原子移除：摘要 enrich 失败不得把已成功的忽略报成失败（ELEC-08）。
+    const summaryPart = tryAppSummary();
     return {
       ok: true,
       code: 'pending_ignored',
       message: '已从待确认队列中移除该邮件。',
       removed: result.removed,
-      summary: appSummary(),
+      ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+      ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
+      ...(summaryPart.warning ? { warning: summaryPart.warning } : {}),
     };
   } finally {
     gate.lease.release();
@@ -3777,12 +4346,23 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
           message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
         };
       }
-      showItemInFolderForUser(openedRel.path);
+      // openPath 失败：showItemInFolder 无返回值，不得谎称「已定位」。
+      const stillThere = fs.existsSync(openedRel.path);
+      if (stillThere) {
+        try {
+          showItemInFolderForUser(openedRel.path);
+        } catch {
+          // best-effort
+        }
+      }
       return {
-        ok: true,
-        opened: 'mail' as const,
-        code: 'pending_mail_revealed',
-        message: '已在文件管理器中定位原始邮件。请打开后到开票平台重新下载发票，再回来选择文件归档。',
+        ok: false,
+        opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
+        code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
+        message: stillThere
+          ? '无法用默认应用打开原始邮件；已尝试在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
+          : '无法打开原始邮件，且文件似乎已不存在。',
+        error: sanitizeText(error, { maxLength: 200 }),
       };
     }
     const error = await openPathForUser(opened.path);
@@ -3794,12 +4374,22 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
         message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
       };
     }
-    showItemInFolderForUser(opened.path);
+    const stillThere = fs.existsSync(opened.path);
+    if (stillThere) {
+      try {
+        showItemInFolderForUser(opened.path);
+      } catch {
+        // best-effort
+      }
+    }
     return {
-      ok: true,
-      opened: 'mail' as const,
-      code: 'pending_mail_revealed',
-      message: '已在文件管理器中定位原始邮件。请打开后到开票平台重新下载发票，再回来选择文件归档。',
+      ok: false,
+      opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
+      code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
+      message: stillThere
+        ? '无法用默认应用打开原始邮件；已尝试在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
+        : '无法打开原始邮件，且文件似乎已不存在。',
+      error: sanitizeText(error, { maxLength: 200 }),
     };
   }
   // 回退：打开邮件缓存目录。与 open-path 共用 resolveOpenTarget（含用户配置的
@@ -4233,6 +4823,18 @@ async function performDeveloperReset(event: ElectronAPI.IpcMainInvokeEvent): Pro
 }
 
 handleTrusted('mfh:developer-reset', async (event) => performDeveloperReset(event));
+
+/** 查看归档 journal 残留状态（不写盘）。 */
+handleTrusted('mfh:archive-journal-status', () => archiveJournalStatus());
+
+/**
+ * 用户确认后隔离无法自动清理的归档 journal。
+ * payload: { confirm: true }
+ */
+handleTrusted('mfh:archive-journal-quarantine', (_event, payload: unknown) => {
+  const raw = asObject(payload);
+  return quarantineArchiveJournalsWithConfirm(raw.confirm === true);
+});
 
 // ---------------------------------------------------------------------------
 // 应用生命周期

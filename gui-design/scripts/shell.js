@@ -2280,9 +2280,10 @@
         if (name === 'load-more') { await loadMoreRows(action.dataset.loadKind || 'inbox', action); return; }
         if (name === 'copy-diagnostics') { await copyPendingDiagnostics(action.dataset.hash || ''); return; }
         if (name === 'export-pending-tech') { exportPendingTechTable(); return; }
-        if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
-        if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
-        if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
+        // ELEC-06：目录打开只传符号 location，绝不把 get-config 的路径展示串交给 open-path。
+        if (name === 'open-invoices-folder') { await openConfiguredPath('invoices'); return; }
+        if (name === 'open-pending-folder') { await openConfiguredPath('pending'); return; }
+        if (name === 'open-samples-folder') { await openConfiguredPath('samples'); return; }
         if (name === 'open-row-file') { await openRowFile(action); return; }
         if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
         if (name === 'rename-organize') {
@@ -2606,11 +2607,14 @@
         }
     }
 
-    async function openConfiguredPath(key, fallback) {
-        const cfg = window.FPH.configPayload?.config || {};
-        const value = key.split('.').reduce((cur, part) => cur?.[part], cfg) || fallback;
+    /**
+     * Open a configured directory by symbolic location key only.
+     * Main maps location → real path; renderer never sends absolute paths.
+     * @param {'invoices'|'pending'|'samples'|'organized'|'dataDir'|'ledger'} location
+     */
+    async function openConfiguredPath(location) {
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
-        const result = await window.mfhBridge.openPath({ path: value });
+        const result = await window.mfhBridge.openPath({ location });
         showToast(
             result?.ok ? '已打开文件夹' : '打开失败',
             result?.ok ? '已在系统文件管理器中打开。' : '无法打开这个文件夹，请确认它仍然存在。',
@@ -2619,6 +2623,11 @@
         );
     }
 
+    /**
+     * Open a library row file. `data-file-path` holds the summary-issued handle
+     * or dataDir-relative path (never a raw absolute OS path).
+     * Prefer `{ handle }` for opaque `ext:…` refs; otherwise pass as `path`.
+     */
     async function openRowFile(action) {
         const value = action.dataset.filePath || '';
         if (!value) {
@@ -2626,7 +2635,10 @@
             return;
         }
         if (!window.mfhBridge?.openPath) { bridgeUnavailable(); return; }
-        const result = await window.mfhBridge.openPath({ path: value, reveal: true });
+        const payload = value.startsWith('ext:')
+            ? { handle: value, reveal: true }
+            : { path: value, reveal: true };
+        const result = await window.mfhBridge.openPath(payload);
         showToast(
             result?.ok ? '已打开文件位置' : '打开失败',
             result?.ok ? '已定位到对应文件。' : '无法定位这个文件，它可能已经被移动或删除。',

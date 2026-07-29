@@ -142,9 +142,9 @@ function hardenCsvMode(file: string): void {
 
 /**
  * 原子写入 CSV 内容（BOM + 全文），fsync 文件与父目录，POSIX 下 mode 0600。
- * 供 schema 创建与 legacy 升级共用，保证 OCR-03 的 durability。
+ * 供 schema 创建、legacy 升级与行级修复共用，保证 OCR-03 的 durability。
  */
-function writeCsvAtomic(csvPath: string, body: string): void {
+export function writeCsvAtomic(csvPath: string, body: string): void {
   const dir = path.dirname(csvPath);
   fs.mkdirSync(dir, { recursive: true, mode: isWindows ? undefined : 0o700 });
   const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -158,6 +158,24 @@ function writeCsvAtomic(csvPath: string, body: string): void {
   fs.renameSync(tmp, csvPath);
   hardenCsvMode(csvPath);
   fsyncDir(dir);
+}
+
+/**
+ * 按 expectedHeader 列序原子重写整表（含 BOM）。用于 schema 已对齐但仍需补列值
+ * （如 blank mailHash / contentHash 回填）的幂等修复。
+ */
+export function rewriteCsvRows(
+  csvPath: string,
+  expectedHeader: string,
+  rows: Record<string, string>[],
+): void {
+  const headerLine = normalizeHeaderLine(expectedHeader);
+  const cols = parseCsvLine(headerLine);
+  const lines = [headerLine];
+  for (const row of rows) {
+    lines.push(cols.map((k) => csvCell(row[k] ?? '')).join(','));
+  }
+  writeCsvAtomic(csvPath, `\uFEFF${lines.join('\n')}\n`);
 }
 
 export interface EnsureCsvSchemaOptions {

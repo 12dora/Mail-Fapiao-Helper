@@ -76,7 +76,9 @@ function ipv4Blocked(ip: string): boolean {
   if (a === 127) return true;                   // loopback
   if (a === 169 && b === 254) return true;      // link-local
   if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12 private
+  if (a === 192 && b === 0) return true;        // 192.0.0.0/24 IETF Protocol Assignments
   if (a === 192 && b === 168) return true;      // 192.168/16 private
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
   if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
   if (a >= 224) return true;                     // multicast + reserved
   return false;
@@ -134,11 +136,41 @@ export function isBlockedIp(ip: string): boolean {
       return ipv4Blocked(bytes.slice(12).join('.'));                                  // ::a.b.c.d (IPv4-compatible)
     }
     if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true;                 // fe80::/10 link-local
+    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0xc0) return true;                 // fec0::/10 site-local (deprecated)
     if ((bytes[0]! & 0xfe) === 0xfc) return true;                                      // fc00::/7 unique-local
     if (bytes[0] === 0xff) return true;                                                // ff00::/8 multicast
     return false;
   }
   return true; // not a recognizable IP -> treat as blocked
+}
+
+/** True if an IP is IPv4 127/8 or IPv6 ::1 (incl. v4-mapped/compat loopback). */
+export function isLoopbackIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map(Number);
+    return parts.length === 4 && parts[0] === 127;
+  }
+  if (net.isIPv6(ip)) {
+    const bytes = ipv6ToBytes(ip);
+    if (!bytes) return false;
+    if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return true; // ::1
+    const first10Zero = bytes.slice(0, 10).every((b) => b === 0);
+    if (first10Zero && bytes[10] === 0xff && bytes[11] === 0xff) {
+      return bytes[12] === 127; // ::ffff:127.x.x.x
+    }
+    if (bytes.slice(0, 12).every((b) => b === 0)) {
+      return bytes[12] === 127; // ::127.x.x.x
+    }
+  }
+  return false;
+}
+
+/** Hostname is localhost or a loopback IP literal. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  if (h === 'localhost') return true;
+  if (net.isIP(h)) return isLoopbackIp(h);
+  return false;
 }
 
 /** 一次 SSRF 校验得到的 URL + 已验证的公网 IP 列表（用于 DNS pin）。 */
@@ -194,6 +226,55 @@ export async function resolvePublicUrl(urlStr: string): Promise<PublicUrlResolut
 export async function assertPublicUrl(urlStr: string): Promise<URL> {
   const resolved = await resolvePublicUrl(urlStr);
   return resolved.url;
+}
+
+/**
+ * OCR / 本机服务 URL 校验：允许回环（bundled efapiao）或公网，拒绝其它内网/保留段。
+ * - `localhost` / `127.0.0.1` / `::1`：DNS 结果必须全部是 loopback
+ * - 其它 hostname：与 `resolvePublicUrl` 相同（全部公网）
+ * - 其它私网 IP 字面量：拒绝（防把发票字节与 API Key 打到链路本地/CGNAT 等）
+ */
+export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolution> {
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    throw new Error(`blocked_url:invalid:${urlStr}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`blocked_url:scheme:${url.protocol}`);
+  }
+  const host = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+  if (net.isIP(host)) {
+    if (isLoopbackIp(host)) return { url, addresses: [host] };
+    if (isBlockedIp(host)) throw new Error(`blocked_url:private_ip:${host}`);
+    return { url, addresses: [host] };
+  }
+  let addrs: { address: string; family: number }[];
+  try {
+    addrs = await dnsLookup(host, { all: true });
+  } catch {
+    throw new Error(`blocked_url:dns:${host}`);
+  }
+  if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
+
+  if (isLoopbackHost(host)) {
+    const loopbackAddrs: string[] = [];
+    for (const a of addrs) {
+      if (!isLoopbackIp(a.address)) {
+        throw new Error(`blocked_url:localhost_non_loopback:${host}->${a.address}`);
+      }
+      loopbackAddrs.push(a.address);
+    }
+    return { url, addresses: loopbackAddrs };
+  }
+
+  const publicAddrs: string[] = [];
+  for (const a of addrs) {
+    if (isBlockedIp(a.address)) throw new Error(`blocked_url:private_ip:${host}->${a.address}`);
+    publicAddrs.push(a.address);
+  }
+  return { url, addresses: publicAddrs };
 }
 
 /**
@@ -268,6 +349,10 @@ const SENSITIVE_REQUEST_HEADERS = new Set([
   'proxy-authorization',
   'cookie',
   'cookie2',
+  // OCR / 站点 API Key；跨源不得带到 redirect 目标。
+  'x-api-key',
+  // 部分站点 handler 把签名发票 URL 放进 Referer，跨源会泄露。
+  'referer',
 ]);
 
 /** 方法改写为 GET 后必须丢弃的实体头。 */
@@ -466,10 +551,10 @@ function pinnedRequest(
       const status = incoming.statusCode ?? 0;
       const responseHeaders = incomingToHeaders(incoming);
 
-      // Redirect：header 阶段即返回，销毁/排空 body，避免超大 redirect body 占满内存。
+      // Redirect：header 阶段即返回并**销毁** socket，禁止 resume 排空——恶意
+      // Location 后仍可无限推 body，resume 会在下一跳进行时占满带宽/事件循环。
       if (isRedirectStatus(status)) {
-        incoming.resume();
-        incoming.on('error', () => { /* drain */ });
+        incoming.destroy();
         const nullBody = status === 204 || status === 205 || status === 304;
         const response = new Response(nullBody ? null : new Uint8Array(0), {
           status,
@@ -566,23 +651,28 @@ function pinnedRequest(
 export interface SafeFetchInit extends RequestInit {
   /** 覆盖默认最大跳数（含起始请求共 N+1 次连接）。 */
   maxRedirects?: number;
+  /**
+   * 响应 body 接收上限（字节）。在 pinned 接收阶段强制，避免
+   * `makeRetryingFetch` 先按 MAX_DOC_BYTES 整包缓冲后再由调用方限流。
+   */
+  maxBodyBytes?: number;
 }
 
+type ResolveUrlFn = (urlStr: string) => Promise<PublicUrlResolution>;
+
 /**
- * 受控 HTTP transport（OCR-01 / SSRF 主防线）：
- * 1. 关闭自动 redirect，逐跳解析 Location；
- * 2. 每一跳在**发出请求前**做 scheme/host/IP 校验；
- * 3. 连接时把已验证 IP pin 到 `http(s).request` 的 lookup，并用 `agent:false`
- *    禁止 keep-alive 池绕过 pin；connect 后复核 remoteAddress；
- * 4. TLS SNI 与 Host 仍使用原始 hostname；
- * 5. 跨源/降级 redirect 剥离敏感头；方法改写后丢弃实体头；
- * 6. 最终（及非 redirect）body 在接收阶段强制字节上限。
- *
- * 调用方应优先用本函数替代裸 `fetch` + `assertPublicResponse`。
- * 兼容 `fetch` 签名，便于接到现有 retrying wrapper。
+ * 受控 HTTP transport 内核：逐跳校验 + DNS pin + body 上限。
+ * `resolveUrl` 决定公网-only（safeFetch）还是服务端点（safeServiceFetch）。
  */
-export async function safeFetch(input: string | URL | Request, init?: SafeFetchInit): Promise<Response> {
+async function controlledFetch(
+  input: string | URL | Request,
+  init: SafeFetchInit | undefined,
+  resolveUrl: ResolveUrlFn,
+): Promise<Response> {
   const maxRedirects = init?.maxRedirects ?? MAX_REDIRECTS;
+  const bodyCapBytes = typeof init?.maxBodyBytes === 'number' && init.maxBodyBytes > 0
+    ? init.maxBodyBytes
+    : MAX_DOC_BYTES;
   let urlStr: string;
   if (typeof input === 'string') {
     urlStr = input;
@@ -592,9 +682,10 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
     urlStr = input.url;
   }
 
-  // 从 init 去掉我们接管的 redirect 相关字段，避免调用方 `redirect:'follow'` 绕过。
+  // 从 init 去掉我们接管的字段，避免调用方 `redirect:'follow'` 绕过。
   const {
     maxRedirects: _ignoredMax,
+    maxBodyBytes: _ignoredCap,
     redirect: _ignoredRedirect,
     ...restInit
   } = init ?? {};
@@ -606,12 +697,17 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
   let body: RequestInit['body'] | undefined = restInit.body;
   // 可变请求头：跨跳时可能剥离敏感字段 / 实体字段。
   let headerRecord: Record<string, string> | undefined;
+  // 整链共用同一 abort signal，deadline 覆盖全部 redirect hop。
+  const signal = restInit.signal;
 
   while (true) {
+    if (signal?.aborted) {
+      throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    }
     if (hop > maxRedirects) {
       throw new Error(`blocked_url:too_many_redirects:${maxRedirects}:${currentUrl}`);
     }
-    const resolved = await resolvePublicUrl(currentUrl);
+    const resolved = await resolveUrl(currentUrl);
     const hostHeader = resolved.url.host; // 含非默认端口
     if (!headerRecord) {
       headerRecord = headersToRecord(restInit.headers, hostHeader);
@@ -629,7 +725,8 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
       method,
       headerRecord,
       bodyBuf,
-      restInit.signal,
+      signal,
+      bodyCapBytes,
     );
 
     if (!isRedirectStatus(response.status)) {
@@ -637,7 +734,7 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
     }
 
     const location = response.headers.get('location');
-    // redirect body 已在 pinnedRequest 中 resume/销毁，这里仍做 cancel 兼容。
+    // redirect body 已在 pinnedRequest 中 destroy，这里仍做 cancel 兼容。
     await response.body?.cancel().catch(() => {});
     if (!location) {
       throw new Error(`blocked_url:redirect_without_location:${response.status}:${resolved.url.href}`);
@@ -659,6 +756,32 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
     currentUrl = nextUrl;
     hop++;
   }
+}
+
+/**
+ * 受控 HTTP transport（OCR-01 / SSRF 主防线）：
+ * 1. 关闭自动 redirect，逐跳解析 Location；
+ * 2. 每一跳在**发出请求前**做 scheme/host/IP 校验（仅公网）；
+ * 3. 连接时把已验证 IP pin 到 `http(s).request` 的 lookup，并用 `agent:false`
+ *    禁止 keep-alive 池绕过 pin；connect 后复核 remoteAddress；
+ * 4. TLS SNI 与 Host 仍使用原始 hostname；
+ * 5. 跨源/降级 redirect 剥离敏感头；方法改写后丢弃实体头；
+ * 6. 最终（及非 redirect）body 在接收阶段强制字节上限。
+ *
+ * 调用方应优先用本函数替代裸 `fetch` + `assertPublicResponse`。
+ * 兼容 `fetch` 签名，便于接到现有 retrying wrapper。
+ */
+export async function safeFetch(input: string | URL | Request, init?: SafeFetchInit): Promise<Response> {
+  return controlledFetch(input, init, resolvePublicUrl);
+}
+
+/**
+ * OCR 服务专用 transport：在 `safeFetch` 同等防护上，额外允许**显式回环**地址
+ *（bundled efapiao 的 `http://127.0.0.1:port`），并拒绝其它私网/链路本地目标。
+ * 跨源 redirect 会丢掉 `X-API-Key` / `Authorization` / `Referer` 等敏感头。
+ */
+export async function safeServiceFetch(input: string | URL | Request, init?: SafeFetchInit): Promise<Response> {
+  return controlledFetch(input, init, resolveServiceUrl);
 }
 
 /**

@@ -14,8 +14,9 @@ import { createHash, type BinaryLike } from 'node:crypto';
  *
  * **非对称读写（CORE-03）**：
  * - **写** state：只记 `primary` 一条（`addProcessed` / `addFetched`），集合基数 = 邮件数；
- * - **读** state：用 `aliases` 做 `hasProcessedAny` / `hasFetchedAny`，旧 12 位条目仍能命中，
- *   升级用户不会重处理、也不会把别名批量回写进 state。
+ * - **读** state：用 `evidence` 做 `hasProcessedAny` / `hasFetchedAny`（见下），禁止把
+ *   Message-Id 衍生的 12 位 legacy 当作「另一封邮件已处理」的证据；
+ * - `aliases` 仅用于 `--only-mail` 等「认领本邮件」的匹配，不得充当 processed 证据。
  * 台账须显式写 `mailHash`（primary），禁止仅凭 Message-Id 判定「已处理」。
  */
 
@@ -63,7 +64,7 @@ function hasBytes(raw: BinaryLike): boolean {
   return true;
 }
 
-/** 一封邮件在运行期的全部已知身份（primary + 升级别名）。 */
+/** 一封邮件在运行期的全部已知身份（primary + 升级别名 + 证据键）。 */
 export interface MailIdentity {
   /**
    * 新写入使用的规范身份：有 raw 时为 32 位内容绑定 hash；
@@ -72,9 +73,21 @@ export interface MailIdentity {
   primary: string;
   /**
    * primary、legacy 12 位、缓存文件名等全部别名。
-   * 仅用于**读侧**匹配（state / --only-mail / 并发去重），禁止整组写入 state。
+   * **仅**用于 `--only-mail` 等「认领本邮件」匹配；禁止整组写入 state，
+   * 也禁止当作「另一封邮件已处理」的证据（CORE-03 / BLOCKING 10）。
    */
   aliases: readonly string[];
+  /**
+   * 足以证明「这一封邮件」已被处理/抓取的键集合。
+   *
+   * - 始终含 `primary`；
+   * - 含与 primary 不同的合法 `fileHash`（缓存文件名即 fetch 时身份）；
+   * - **仅当** primary 或 fileHash 本身就是 legacy 时才含 Message-Id 衍生的 12 位
+   *   （说明本邮件的运营身份就是升级前的那条记录）；
+   * - 内容绑定的 32 位身份 **绝不** 把「仅由 Message-Id 推出的 legacy」当作证据，
+   *   否则两封共享 Message-Id 的不同邮件会互相折叠。
+   */
+  evidence: readonly string[];
   /** 始终可重算的历史 12 位键（无 raw）。 */
   legacy: string;
 }
@@ -100,8 +113,8 @@ export interface ResolveMailIdentityInput {
  * 2. 否则有 raw → 32 位内容绑定 hash；
  * 3. 否则 legacy 12 位。
  *
- * 有 raw 时始终把 32 位 computed 与 legacy 12 位收进 aliases，
- * 以便 `--only-mail` / state 在两种宽度下都能命中。
+ * `aliases` 始终收纳 legacy / fileHash / computed，便于 `--only-mail` 命中。
+ * `evidence` 更严格：Message-Id 衍生 legacy 不能单独充当 processed 证据。
  */
 export function resolveMailIdentity(input: ResolveMailIdentityInput): MailIdentity {
   const mid = input.messageId && input.messageId.length > 0 ? input.messageId : undefined;
@@ -123,7 +136,22 @@ export function resolveMailIdentity(input: ResolveMailIdentityInput): MailIdenti
   // 缓存文件名优先：避免「fetch 用 Message-Id+raw、run 解析失败后只用 raw」分叉成两把键。
   const primary = fileHash ?? computed ?? legacy;
 
-  return { primary, aliases: Object.freeze([...aliases]), legacy };
+  // processed / fetched / in-flight / INDEX 去重：只认「这封邮件自己的」键。
+  const evidence = new Set<string>();
+  evidence.add(primary);
+  if (fileHash) evidence.add(fileHash);
+  // legacy 仅在它就是本邮件运营身份时才算证据（fileHash 或 primary 即 legacy）。
+  // 内容绑定 32 位 primary 且缓存名也不是 legacy 时，不得用 Message-Id 折叠另一封邮件。
+  if (primary === legacy || fileHash === legacy) {
+    evidence.add(legacy);
+  }
+
+  return {
+    primary,
+    aliases: Object.freeze([...aliases]),
+    evidence: Object.freeze([...evidence]),
+    legacy,
+  };
 }
 
 /** `--only-mail` / pending 重试：接受 12 或 32 位，匹配任意别名。 */
@@ -137,10 +165,13 @@ export function identityMatches(onlyMail: string, identity: MailIdentity): boole
   return false;
 }
 
-/** state 命中：任意别名在集合中即视为已处理/已抓取。 */
+/**
+ * state / 并发集命中：默认用 `evidence`（安全），避免 Message-Id legacy 折叠不同邮件。
+ * 若调用方显式传入 aliases 集合则按传入集合匹配。
+ */
 export function identityInSet(identity: MailIdentity, set: { has(h: string): boolean }): boolean {
   if (set.has(identity.primary)) return true;
-  for (const a of identity.aliases) {
+  for (const a of identity.evidence) {
     if (set.has(a)) return true;
   }
   return false;

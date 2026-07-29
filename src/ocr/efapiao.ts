@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
+import { safeServiceFetch } from '../util/net.js';
 import type { InvoiceFields, OcrProvider, OcrResult } from './types.js';
 
 interface EfapiaoPayload {
@@ -220,9 +221,11 @@ function toEfapiaoPayload(value: unknown): EfapiaoPayload {
 
 async function healthOk(cfg: Config): Promise<boolean> {
   try {
-    const res = await fetch(`${serviceBaseUrl(cfg)}/v1/health`, {
+    // 经 safeServiceFetch：允许本机回环，拒绝其它私网；禁止裸 fetch 被指到攻击者主机。
+    const res = await safeServiceFetch(`${serviceBaseUrl(cfg)}/v1/health`, {
       method: 'GET',
       signal: timeoutSignal(1000),
+      maxBodyBytes: 64 * 1024,
     });
     return res.ok;
   } catch {
@@ -557,7 +560,7 @@ async function runService(
   form.set('hint_type', hintFor(meta.format));
   form.set('ocr_mode', ocrModeFor(cfg));
 
-  const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse`, {
+  const res = await safeServiceFetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse`, {
     method: 'POST',
     headers: serviceHeaders(cfg),
     body: form,
@@ -592,7 +595,7 @@ async function runServiceBatch(
   form.set('hint_type', 'auto');
   form.set('ocr_mode', ocrModeFor(cfg));
 
-  const res = await fetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse-batch`, {
+  const res = await safeServiceFetch(`${serviceBaseUrl(cfg)}/v1/invoices/parse-batch`, {
     method: 'POST',
     headers: serviceHeaders(cfg),
     body: form,

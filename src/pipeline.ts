@@ -5,8 +5,13 @@ import type { Browser } from 'playwright';
 import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import type { State } from './state.js';
-import { contentHash as contentHashOf, msgIdHash as msgIdHashFn, resolveMailIdentity } from './util/hash.js';
-import { csvCell, ensureCsvSchema, parseCsv } from './util/csv.js';
+import {
+  contentHash as contentHashOf,
+  isMailHash,
+  msgIdHash as msgIdHashFn,
+  resolveMailIdentity,
+} from './util/hash.js';
+import { csvCell, ensureCsvSchema, parseCsv, readCsvRows, rewriteCsvRows } from './util/csv.js';
 import { testFaultEnabled } from './util/testFaults.js';
 import {
   attemptDeadlineSignal,
@@ -63,7 +68,8 @@ type FetchInit = Parameters<typeof fetch>[1];
  * - `retryable_failure`：可重试失败（含 pending 写失败）；不得伪装成 manual
  * - `fatal_failure`：致命失败，由调用方中止整次 run
  *
- * 只有前三类算 handled。`partial` 仅在 `archived` 上表示「有票已落盘，但仍有待确认」。
+ * 只有前三类算 handled。`partial` 表示「有票已落盘，但仍有待确认」——可挂在
+ * `archived` 或 `retryable_failure`（pending 写失败）上；后者调用方也须计 archived。
  */
 export type ProcessMailOutcome =
   | 'archived'
@@ -80,7 +86,10 @@ export interface ProcessMailResult {
   subject: string;
   outcome: ProcessMailOutcome;
   reason?: string;
-  /** 仅 archived：归档了部分文档，同一封邮件仍有候选失败并写入了待确认。 */
+  /**
+   * 有票已落盘但仍不完整：可挂在 `archived`（pending 也写上了）或
+   * `retryable_failure`（pending 写失败）上。调用方对后者也必须计入 archived。
+   */
   partial?: boolean;
 }
 
@@ -156,12 +165,20 @@ function withCsvRetry(fn: () => void): void {
 /**
  * 一次性追加整批 CSV 行。CORE-05：先 ensure schema（空文件写表头）；
  * OCR-03 / WIRE-02：走 durable 原语（write + fsync，新建时 fsync 父目录）。
+ *
+ * `schema` 必须带上与 ensure*Schema 相同的 upgradeRow，禁止「只升表头、不补列值」
+ * ——否则旧 pending 行会永久 blank mailHash，重试时 append 出重复行（BLOCKING 12）。
  */
-function appendCsvBlock(csvPath: string, header: string, lines: string[], legacy?: string[]): void {
+function appendCsvBlock(
+  csvPath: string,
+  header: string,
+  lines: string[],
+  schema?: { upgradeFrom?: string[]; upgradeRow?: (row: Record<string, string>) => Record<string, string> },
+): void {
   if (lines.length === 0) return;
   ensureDir(path.dirname(csvPath));
   withCsvRetry(() => {
-    ensureCsvSchema(csvPath, header, legacy ? { upgradeFrom: legacy } : undefined);
+    ensureCsvSchema(csvPath, header, schema ?? {});
     appendCsvBlockDurable(csvPath, header, lines);
   });
   hardenFile(csvPath);
@@ -244,10 +261,32 @@ interface ArchivedIndex {
 }
 
 /**
+ * 从已归档文件回填 contentHash（六列表头升级后列为空时）。
+ * 只接受 invoices 目录下的 basename，拒绝路径穿越。
+ */
+function hashArchivedFile(invoicesDir: string, filename: string): string {
+  // 只认 basename，杜绝台账 filename 路径穿越。
+  const leaf = path.basename(filename);
+  if (!leaf || leaf === '.' || leaf === '..') return '';
+  try {
+    const resolved = path.resolve(invoicesDir, leaf);
+    const root = path.resolve(invoicesDir);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) return '';
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return '';
+    return contentHashOf(fs.readFileSync(resolved));
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 读取 invoices.csv，建立 `(messageId, source, contentHash)` 维度的已归档索引。
  * `--force` / `--only-mail` 重跑靠它复用既有文件，而不是新建 `-1/-2` 碰撞副本（APP-03）。
+ *
+ * 六列 legacy 升级后 contentHash 可能为空：此时对磁盘上的归档文件现算 hash，
+ * 保证升级用户 force-rerun 不会装出碰撞后缀副本（BLOCKING 14）。
  */
-function readArchivedIndex(csvPath: string, messageId: string): ArchivedIndex {
+function readArchivedIndex(csvPath: string, messageId: string, invoicesDir: string): ArchivedIndex {
   const byKey = new Map<string, string>();
   const byContentHash = new Map<string, string>();
   if (!fs.existsSync(csvPath)) return { byKey, byContentHash };
@@ -264,7 +303,10 @@ function readArchivedIndex(csvPath: string, messageId: string): ArchivedIndex {
     const rowMessageId = cols[iMessageId] ?? '';
     const filename = cols[iFilename] ?? '';
     const source = cols[iSource] ?? '';
-    const hash = cols[iHash] ?? '';
+    let hash = (cols[iHash] ?? '').trim();
+    if (hash.length === 0 && filename.length > 0) {
+      hash = hashArchivedFile(invoicesDir, filename);
+    }
     if (hash.length === 0) continue;
     byKey.set(`${rowMessageId}\0${source}\0${hash}`, filename);
     if (rowMessageId === messageId && filename.length > 0) {
@@ -330,7 +372,7 @@ function fillPendingMailHash(row: Record<string, string>): Record<string, string
   if (row.mailHash && row.mailHash.length > 0) return row;
   const messageId = row.messageId ?? '';
   // 超大邮件路径曾把 hash 写在 messageId 位。
-  if (/^[0-9a-f]{12}$|^[0-9a-f]{32}$/i.test(messageId)) {
+  if (isMailHash(messageId)) {
     return { ...row, mailHash: messageId.toLowerCase() };
   }
   const legacy = msgIdHashFn(
@@ -342,19 +384,75 @@ function fillPendingMailHash(row: Record<string, string>): Record<string, string
   return { ...row, mailHash: legacy };
 }
 
-function fillInvoiceMailHash(row: Record<string, string>): Record<string, string> {
-  if (row.mailHash && row.mailHash.length > 0) return row;
-  const messageId = row.messageId ?? '';
-  if (/^[0-9a-f]{12}$|^[0-9a-f]{32}$/i.test(messageId)) {
-    return { ...row, mailHash: messageId.toLowerCase(), contentHash: row.contentHash ?? '' };
+/**
+ * 升级/修复 invoices 行：补 mailHash；contentHash 为空时对归档文件现算回填
+ * （BLOCKING 14：六列 legacy 不得留下空 contentHash 导致 force-rerun 装副本）。
+ */
+function fillInvoiceRow(row: Record<string, string>, invoicesDir: string): Record<string, string> {
+  let contentHash = (row.contentHash ?? '').trim();
+  const filename = row.filename ?? '';
+  if (!contentHash && filename.length > 0) {
+    contentHash = hashArchivedFile(invoicesDir, filename);
   }
-  const legacy = msgIdHashFn(
-    messageId.length > 0 ? messageId : undefined,
-    row.from ?? '',
-    row.date ?? '',
-    row.subject ?? '',
-  );
-  return { ...row, mailHash: legacy, contentHash: row.contentHash ?? '' };
+  let mailHash = (row.mailHash ?? '').trim();
+  if (!mailHash) {
+    const messageId = row.messageId ?? '';
+    if (isMailHash(messageId)) {
+      mailHash = messageId.toLowerCase();
+    } else {
+      mailHash = msgIdHashFn(
+        messageId.length > 0 ? messageId : undefined,
+        row.from ?? '',
+        row.date ?? '',
+        row.subject ?? '',
+      );
+    }
+  }
+  return { ...row, mailHash, contentHash };
+}
+
+/** 当前 schema 下 blank mailHash 行补齐（append 升级漏填时的语义幂等修复）。 */
+function repairBlankPendingMailHashes(csvPath: string): void {
+  if (!fs.existsSync(csvPath)) return;
+  try {
+    if (fs.statSync(csvPath).size === 0) return;
+  } catch {
+    return;
+  }
+  const rows = readCsvRows(csvPath);
+  if (rows.length === 0) return;
+  let dirty = false;
+  const fixed = rows.map((row) => {
+    if ((row.mailHash ?? '').trim().length > 0) return row;
+    dirty = true;
+    return fillPendingMailHash(row);
+  });
+  if (!dirty) return;
+  withCsvRetry(() => rewriteCsvRows(csvPath, PENDING_CSV_HEADER, fixed));
+  hardenFile(csvPath);
+}
+
+/** 当前 schema 下 blank contentHash/mailHash 回填（已升表头但列值为空的升级残骸）。 */
+function repairInvoiceLedgerRows(csvPath: string, invoicesDir: string): void {
+  if (!fs.existsSync(csvPath)) return;
+  try {
+    if (fs.statSync(csvPath).size === 0) return;
+  } catch {
+    return;
+  }
+  const rows = readCsvRows(csvPath);
+  if (rows.length === 0) return;
+  let dirty = false;
+  const fixed = rows.map((row) => {
+    const needHash = !(row.contentHash ?? '').trim();
+    const needMail = !(row.mailHash ?? '').trim();
+    if (!needHash && !needMail) return row;
+    dirty = true;
+    return fillInvoiceRow(row, invoicesDir);
+  });
+  if (!dirty) return;
+  withCsvRetry(() => rewriteCsvRows(csvPath, INVOICE_CSV_HEADER, fixed));
+  hardenFile(csvPath);
 }
 
 function ensurePendingSchema(csvPath: string): void {
@@ -362,13 +460,16 @@ function ensurePendingSchema(csvPath: string): void {
     upgradeFrom: PENDING_CSV_LEGACY,
     upgradeRow: fillPendingMailHash,
   });
+  // 若此前经无 upgradeRow 的路径「只升了表头」，此处把 blank mailHash 补上。
+  repairBlankPendingMailHashes(csvPath);
 }
 
-function ensureInvoiceSchema(csvPath: string): void {
+function ensureInvoiceSchema(csvPath: string, invoicesDir: string): void {
   ensureCsvSchema(csvPath, INVOICE_CSV_HEADER, {
     upgradeFrom: INVOICE_CSV_LEGACY,
-    upgradeRow: fillInvoiceMailHash,
+    upgradeRow: (row) => fillInvoiceRow(row, invoicesDir),
   });
+  repairInvoiceLedgerRows(csvPath, invoicesDir);
 }
 
 function ensureOcrSchema(csvPath: string): void {
@@ -384,9 +485,14 @@ function appendPendingCsv(
   reason: string,
   mailHash: string,
 ): void {
+  // 先 ensure+repair，再按 mailHash 去重，保证重试旧 pending 不会 append 重复行。
+  ensurePendingSchema(csvPath);
   if (pendingCsvContainsHash(csvPath, mailHash)) return;
   const line = [mailHash, mail.messageId, mail.date, mail.from, mail.subject, reason].map(csvCell).join(',') + '\n';
-  appendCsvBlock(csvPath, PENDING_CSV_HEADER, [line], PENDING_CSV_LEGACY);
+  appendCsvBlock(csvPath, PENDING_CSV_HEADER, [line], {
+    upgradeFrom: PENDING_CSV_LEGACY,
+    upgradeRow: fillPendingMailHash,
+  });
 }
 
 /**
@@ -778,8 +884,8 @@ export async function processMail(
   const subject = mail.subject || '';
   const baseResult = { hash, messageId, date, from, subject };
 
-  // 别名任一命中即跳过（升级后 32 位 primary 对齐旧 12 位 state）。
-  if (!opts.force && identity.aliases.some((a) => state.processedHashes.includes(a))) {
+  // 仅用 evidence 判定已处理：Message-Id legacy 不得折叠另一封内容不同的邮件（CORE-03）。
+  if (!opts.force && identity.evidence.some((a) => state.processedHashes.includes(a))) {
     log.debug(`Skip already processed ${hash}`);
     return { ...baseResult, outcome: 'skipped', reason: 'already_processed' };
   }
@@ -858,12 +964,13 @@ export async function processMail(
     assertWritableDir(cfg.paths.invoices);
     assertAppendableCsv(csvPath);
     assertAppendableCsv(ocrPendingCsvPath);
-    // CORE-05：空/缺失 CSV 先落好表头；旧 schema 幂等升级补 mailHash。
-    ensureInvoiceSchema(csvPath);
+    // CORE-05：空/缺失 CSV 先落好表头；旧 schema 幂等升级补 mailHash + contentHash。
+    ensureInvoiceSchema(csvPath, cfg.paths.invoices);
     ensureOcrSchema(ocrPendingCsvPath);
 
     // 2) 幂等协调：`(messageId, source, contentHash)` 已归档且文件仍在则直接复用。
-    const archived = readArchivedIndex(csvPath, messageId);
+    //    六列 legacy / blank contentHash 时对磁盘文件现算 hash（BLOCKING 14）。
+    const archived = readArchivedIndex(csvPath, messageId, cfg.paths.invoices);
     const ocrKeys = readOcrKeys(ocrPendingCsvPath);
 
     // 3) 在唯一事务目录暂存完整批次。
@@ -950,11 +1057,17 @@ export async function processMail(
 
     try {
       // OCR-03 / WIRE-02：fsync 之后才能标 ledger-committed。
-      appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines, INVOICE_CSV_LEGACY);
+      appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines, {
+        upgradeFrom: INVOICE_CSV_LEGACY,
+        upgradeRow: (row) => fillInvoiceRow(row, cfg.paths.invoices),
+      });
       if (testFaultEnabled('MFH_TEST_FAIL_AFTER_INVOICE_CSV')) {
         throw new Error('forced_after_invoice_csv_failure');
       }
-      appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines, OCR_CSV_LEGACY);
+      appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines, {
+        upgradeFrom: OCR_CSV_LEGACY,
+        upgradeRow: (row) => ({ ...row, contentHash: row.contentHash ?? '' }),
+      });
       // 两个 CSV 均已 durable：即使这之后被强杀，恢复也只会清理 journal 本身。
       tx.markStage('ledger-committed');
     } catch (err) {
@@ -975,6 +1088,7 @@ export async function processMail(
   }
 
   // 部分成功：已归档的票必须保留，同时留下可见的待确认记录，不得当作完整成功。
+  // partial 可挂在 archived 或 retryable_failure 上：后者表示票已落盘但 pending 未写上。
   if (extraction.issues.length > 0) {
     const reason = `partial_extract:${summarizeIssues(extraction.issues)}`;
     log.warn(`Partial extraction for ${hash}: ${reason}`);
@@ -982,6 +1096,7 @@ export async function processMail(
     const durable = persistPending(mail, cfg, hash, safe, log, opts.raw);
     if (!durable) {
       // 文件已落盘，但待确认写失败：仍须非 0 退出并允许重试（幂等跳过已归档件）。
+      // partial:true → 调用方须把 archived 计入终态（BLOCKING 2）。
       return {
         ...baseResult,
         outcome: 'retryable_failure',

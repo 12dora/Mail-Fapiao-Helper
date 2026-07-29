@@ -275,7 +275,10 @@ export class StateStore {
     return this.fetched.has(hash);
   }
 
-  /** CORE-03：primary / legacy 任一命中即视为已处理。 */
+  /**
+   * CORE-03：调用方应传入 `identity.evidence`（非完整 aliases）。
+   * Message-Id 衍生的 legacy 不得单独充当「另一封邮件已处理」的证据。
+   */
   hasProcessedAny(hashes: readonly string[]): boolean {
     for (const h of hashes) {
       if (h.length > 0 && this.processed.has(h)) return true;
@@ -283,7 +286,10 @@ export class StateStore {
     return false;
   }
 
-  /** CORE-03：primary / legacy 任一命中即视为已抓取。 */
+  /**
+   * CORE-03：调用方应传入 `identity.evidence`（或本邮件确有 legacy 缓存时的扩展集）。
+   * 禁止把完整 aliases 当作 fetched 证据去折叠共享 Message-Id 的不同邮件。
+   */
   hasFetchedAny(hashes: readonly string[]): boolean {
     for (const h of hashes) {
       if (h.length > 0 && this.fetched.has(h)) return true;

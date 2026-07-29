@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { csvCell, parseCsv } from '../util/csv.js';
+import { csvCell, ensureCsvSchema, readCsvRows } from '../util/csv.js';
 import { contentHash } from '../util/hash.js';
 import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, beginArchiveTransaction } from '../download/archiveJournal.js';
 import { sanitizeText } from './sanitize.js';
@@ -61,10 +61,23 @@ const MAX_BATCH_FILES = 32;
 /** 单批累计字节上限（ELEC-10）：约 256 MB。 */
 const MAX_BATCH_BYTES = 256 * 1024 * 1024;
 
-const LEDGER_HEADER = ['messageId', 'date', 'from', 'subject', 'filename', 'source', 'contentHash'];
-const QUEUE_HEADER = [
-  'hash', 'messageId', 'date', 'from', 'subject', 'filename',
-  'source', 'format', 'documentType', 'status', 'reason', 'contentHash',
+/**
+ * 与 pipeline 台账 schema 对齐（CORE-03：8 列含 mailHash）。
+ * pipeline 未 export ensureInvoiceSchema / INVOICE_CSV_HEADER；此处消费 util/csv 的
+ * ensureCsvSchema，表头字符串必须与 pipeline 保持一致。
+ */
+const INVOICE_CSV_HEADER = 'messageId,date,from,subject,filename,source,contentHash,mailHash\n';
+const INVOICE_CSV_LEGACY = [
+  'messageId,date,from,subject,filename,source,contentHash',
+  'messageId,date,from,subject,filename,source',
+];
+const OCR_CSV_HEADER = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash\n';
+const OCR_CSV_LEGACY = [
+  // pipeline 正式旧表
+  'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+  // 历史 / 测试夹具变体（缺 messageId / source / contentHash）
+  'hash,date,from,subject,filename,source,format,documentType,status,reason',
+  'hash,date,from,subject,filename,format,documentType,status,reason',
 ];
 /** 组合键分隔符：用转义序列书写，源码里不会出现真实的 0x00 字节。 */
 const SEP = '\u0000';
@@ -151,21 +164,25 @@ function detectFormat(data: Buffer): DetectResult {
 // CSV 追加（与自动归档一致：只 append，回滚靠 journal 截断回 baseLength）
 // ---------------------------------------------------------------------------
 
-function ensureCsvHeader(file: string, header: string[]): void {
-  if (fs.existsSync(file) && fs.statSync(file).size > 0) return;
+function ensureInvoiceLedgerSchema(file: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  // UTF-8 BOM 与 CLI 写出的台账保持一致，Excel 才能正确显示中文。
-  fs.writeFileSync(file, `\uFEFF${header.map(csvCell).join(',')}\n`, { encoding: 'utf8', mode: 0o600 });
+  ensureCsvSchema(file, INVOICE_CSV_HEADER, {
+    upgradeFrom: INVOICE_CSV_LEGACY,
+    // 旧 7 列升级时 mailHash 留空；本批新行会写显式 mailHash。
+    upgradeRow: (row) => ({ ...row, mailHash: row.mailHash ?? '' }),
+  });
+}
+
+function ensureOcrPendingSchema(file: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureCsvSchema(file, OCR_CSV_HEADER, {
+    upgradeFrom: OCR_CSV_LEGACY,
+    upgradeRow: (row) => ({ ...row, contentHash: row.contentHash ?? '' }),
+  });
 }
 
 function csvLine(values: string[]): string {
   return `${values.map(csvCell).join(',')}\n`;
-}
-
-function bodyRows(file: string): string[][] {
-  if (!fs.existsSync(file)) return [];
-  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
-  return parseCsv(text).slice(1);
 }
 
 /**
@@ -327,12 +344,17 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
 
   assertArchiveTransactionsRecovered(input.invoicesDir);
 
-  // 2) 读取台账与队列现状，做去重与「半提交修复」判定。
+  // 2) 读取台账与队列现状，做去重与「半提交修复」判定（按列名，兼容 7/8 列表头）。
   const ledgerFilenameByKey = new Map<string, string>();
-  for (const row of bodyRows(input.ledgerCsv)) {
-    ledgerFilenameByKey.set(`${row[0] ?? ''}${SEP}${row[6] ?? ''}`, row[4] ?? '');
+  for (const row of readCsvRows(input.ledgerCsv)) {
+    const mid = row.messageId ?? '';
+    const ch = row.contentHash ?? '';
+    const filename = row.filename ?? '';
+    if (ch) ledgerFilenameByKey.set(`${mid}${SEP}${ch}`, filename);
   }
-  const queueSeen = new Set(bodyRows(input.ocrPendingCsv).map((row) => `${row[0] ?? ''}${SEP}${row[11] ?? ''}`));
+  const queueSeen = new Set(
+    readCsvRows(input.ocrPendingCsv).map((row) => `${row.hash ?? ''}${SEP}${row.contentHash ?? ''}`),
+  );
 
   const pending = input.pendingRow ?? {};
   const messageId = pending.messageId ?? '';
@@ -388,8 +410,8 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   try {
     fs.mkdirSync(input.invoicesDir, { recursive: true });
     plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
-    ensureCsvHeader(input.ledgerCsv, LEDGER_HEADER);
-    ensureCsvHeader(input.ocrPendingCsv, QUEUE_HEADER);
+    ensureInvoiceLedgerSchema(input.ledgerCsv);
+    ensureOcrPendingSchema(input.ocrPendingCsv);
     ledgerBase = fs.statSync(input.ledgerCsv).size;
     queueBase = fs.statSync(input.ocrPendingCsv).size;
 
@@ -453,9 +475,9 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       throw new Error('forced_after_manual_queue_csv_failure');
     }
 
-    // 6) 追加台账（只为本次真正新装的文件）。
+    // 6) 追加台账（只为本次真正新装的文件；第 8 列 mailHash 与 pipeline 一致）。
     const ledgerLines = toInstall.map((item, i) => csvLine([
-      messageId, date, from, subject, plannedNames[i] ?? '', path.basename(item.source), item.hash,
+      messageId, date, from, subject, plannedNames[i] ?? '', path.basename(item.source), item.hash, input.hash,
     ]));
     if (ledgerLines.length > 0) fs.appendFileSync(input.ledgerCsv, ledgerLines.join(''), 'utf8');
     tx.markStage('ledger-committed');

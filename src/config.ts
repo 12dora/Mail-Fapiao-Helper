@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
+import net from 'node:net';
 import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
+import { isBlockedIp, isLoopbackHost, isLoopbackIp } from './util/net.js';
 
 /**
  * 配置 schema 版本（APP-08）。
@@ -187,6 +189,8 @@ const FIELD_LABELS: Record<string, string> = {
   'output.csv': '发票清单文件',
   'ocr.enabled': '启用识别',
   'ocr.provider': '识别服务',
+  'ocr.serviceUrl': '识别服务地址',
+  'ocr.serviceHost': '识别服务监听地址',
   'ocr.batchSize': '同时识别数量',
   'ocr.resultsCsv': '识别结果清单文件',
   'ocr.credentials.secretId': '云端 SecretId',
@@ -692,6 +696,39 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
   if (config.filter.since && config.filter.until && !boundsAreOrdered(config.filter.since, config.filter.until)) {
     c.add('filter.until', '「结束日期」不能早于「开始日期」。');
   }
+
+  // OCR 服务边界：本机托管只允许回环监听；外部 serviceUrl 允许回环或公网字面量，
+  // 拒绝其它私网/链路本地 IP（hostname 在请求时由 safeServiceFetch 再解析校验）。
+  if (!isLoopbackHost(config.ocr.serviceHost)) {
+    c.add(
+      'ocr.serviceHost',
+      '「识别服务监听地址」仅允许本机回环（127.0.0.1、::1 或 localhost），不能绑定到其它网卡或内网地址。',
+    );
+  }
+  if (config.ocr.serviceUrl) {
+    let serviceParsed: URL | undefined;
+    try {
+      serviceParsed = new URL(config.ocr.serviceUrl);
+    } catch {
+      c.add('ocr.serviceUrl', '「识别服务地址」不是合法的 URL。');
+    }
+    if (serviceParsed) {
+      if (serviceParsed.protocol !== 'http:' && serviceParsed.protocol !== 'https:') {
+        c.add('ocr.serviceUrl', '「识别服务地址」只支持 http 或 https。');
+      }
+      const host = serviceParsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
+      if (net.isIP(host)) {
+        if (!isLoopbackIp(host) && isBlockedIp(host)) {
+          c.add(
+            'ocr.serviceUrl',
+            '「识别服务地址」不能指向内网、链路本地或其它保留地址；请使用本机回环或公网服务。',
+          );
+        }
+      }
+      // 非 IP 的 hostname（含 localhost）：运行时 resolveServiceUrl 再校验 DNS 结果。
+    }
+  }
+
   // 注意：不再对 `llm.enabled=true` 报错。该字段已从 schema 中删除，旧文件里残留的
   // 值只会被迁移丢弃——报错会把一个升级前完全合法的配置文件变成阻断项。
 
