@@ -55,20 +55,26 @@
 
 ## 三、首次打开
 
-### 正式发布物一律经过签名与公证
+### 两种发布通道（请先认准再下载）
 
-[Releases](../../releases) 页面上的安装包由发布流水线签名：macOS 使用 Apple Developer ID 证书并完成 **公证（notarization）+ staple**，Windows 使用 **Authenticode + RFC3161 时间戳**。流水线在打包后会逐个产物跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate` 与 Authenticode 校验，**任一项不过就不会发布**。所以正常情况下双击即可安装，不会遇到 Gatekeeper / SmartScreen 拦截。
+GitHub [Releases](../../releases) 上可能同时存在：
 
-发布说明里会列出源码 commit 和逐平台签名状态，可自行核对。
+| 通道 | 如何识别 | 签名 | 适用场景 |
+|---|---|---|---|
+| **稳定 Release** | GitHub 标记为 Latest；tag 形如 `v0.1.0`（无后缀）；**不是** prerelease | macOS Developer ID + 公证；Windows Authenticode + 时间戳 | 日常使用、公司电脑 |
+| **未签名 prerelease** | GitHub 标记为 **Pre-release**；tag 含 `-unsigned.N`；资产名含 `-unsigned` | **未签名、未公证** | 仅开发/内测；公司电脑不建议安装 |
+| **开发构建 artifact** | 不在 Releases；只在 Actions workflow 产物里（约 14 天） | 未签名 | 本地联调 |
 
-> **未签名的开发构建不会出现在 Releases 页面。** CI 的「Development build (unsigned)」workflow 产出的未签名包只以 workflow artifact 形式存在（保留 14 天），文件名带 `-unsigned` 后缀，仅供开发测试。该 workflow 没有写权限，无法创建 Release。
+**默认请只下载稳定 Latest。** 稳定通道流水线在打包后会逐个产物跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate` 与 Authenticode 校验，**任一项不过就不会发布**。发布说明会列出源码 commit 与签名状态。
 
-### 如果你拿到的是未签名包（开发构建，或本项目早期版本）
+> **当前说明：** 若仓库尚无已发布的稳定 Latest（例如签名 secrets 未配置），则暂时没有“正式签名安装包”可下——请从源码构建，或明确接受未签名 prerelease 的风险。不要把 Pre-release 里的 `-unsigned` 包当成已公证的正式版。
+
+### 如果你拿到的是未签名包（prerelease、开发构建，或本项目早期版本）
 
 未签名包意味着**系统无法替你验证来源和完整性**，Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
 
 - 请只从本仓库下载，并核对 commit；不要从转发的网盘、群文件安装。
-- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——用 Releases 里的正式版，或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
+- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——用稳定 Release（若已发布），或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
 - macOS：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），弹窗里再点 **打开**。系统记住这一次授权后即可正常使用。
 - Windows：SmartScreen 提示时，先确认文件来源，再点 **更多信息 → 仍要运行**。
 
@@ -260,12 +266,12 @@ npm run verify:artifacts -- --platform mac --channel development
 
 产物写入 `release/`（已 gitignore）。
 
-打包经由 [scripts/build-release.mjs](scripts/build-release.mjs)，它区分两个**发布通道**：
+打包经由 [scripts/build-release.mjs](scripts/build-release.mjs)，它区分两个**构建通道**（再由不同 workflow 决定是否进 Releases）：
 
 | 通道 | 用在哪 | 签名要求 | 产物去向 |
 |---|---|---|---|
-| `development`（默认） | 本地 `npm run dist:*`、`dev-build.yml` | 不签名；macOS 只做 ad-hoc 签名以便 arm64 能启动；文件名强制加 `-unsigned` | 只作为 workflow artifact，**永远不会**变成 Release |
-| `stable` | `release.yml` | **强制**签名 + 公证（macOS）+ 时间戳（Windows），缺任一项在打包前就失败 | 正式 GitHub Release |
+| `development`（默认） | 本地 `npm run dist:*`、`dev-build.yml`、`unsigned-prerelease.yml` | 不签名；macOS 只做 ad-hoc 签名以便 arm64 能启动；文件名强制加 `-unsigned` | `dev-build`：仅 workflow artifact（约 14 天）。`unsigned-prerelease`：可发布为 **GitHub Pre-release**（明确未签名） |
+| `stable` | `release.yml`（仅 `vMAJOR.MINOR.PATCH` tag） | **强制**签名 + 公证（macOS）+ 时间戳（Windows），缺任一项在打包前就失败 | 正式 GitHub Release（`prerelease: false`） |
 
 `npm run verify:artifacts` 除了拒绝异平台可执行文件、异平台 OCR 引擎、测试代码和 dev fake backend，还会按通道校验信任级别：
 
@@ -276,20 +282,28 @@ macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitle
 
 ### 持续集成
 
-- [.github/workflows/ci.yml](.github/workflows/ci.yml) — 每个 PR 和 push 到 main：在 macOS + Windows 上跑 `npm audit --omit=dev` 与 `npm test`；Chromium 浏览器 E2E 作为单独的可选 job。
-- [.github/workflows/dev-build.yml](.github/workflows/dev-build.yml) — 手动触发的**未签名开发构建**。`permissions: contents: read`，没有写权限，产物只上传为 workflow artifact（保留 14 天）。
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — 每个 PR 和 push 到 main：在 macOS + Windows 上跑 `npm audit --omit=dev` 与 `npm run test:core`；Chromium 浏览器 E2E 为独立 job。
+- 分支保护：CI  alone 不能阻止失败合并——需在 GitHub 配置 required checks，见 [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md)（需 owner 操作）。
+- [.github/workflows/dev-build.yml](.github/workflows/dev-build.yml) — 手动触发的**未签名开发构建**。`permissions: contents: read`，产物只上传为 workflow artifact（保留 14 天）。
+- [.github/workflows/unsigned-prerelease.yml](.github/workflows/unsigned-prerelease.yml) — tag `vX.Y.Z-unsigned.N` 的**明确未签名 Pre-release**。
 - [.github/workflows/release.yml](.github/workflows/release.yml) — **正式签名发布**，见下。
 
 ### 发布到 GitHub Release
 
-推一个 `v*` tag 即触发 [.github/workflows/release.yml](.github/workflows/release.yml)。也可以用 `workflow_dispatch` 手动指定 tag。流水线先做校验，任一项不过就中止：
+#### 稳定通道
 
-1. **签名 secrets 必须齐全**——缺证书或公证凭据时在最便宜的 `resolve` job 直接失败，并提示改用 dev-build workflow。正式 Release 不存在「降级为未签名」这条路径；
+推一个 **纯** `vMAJOR.MINOR.PATCH` tag（无 `-beta` / `-unsigned` 等后缀）即触发 [.github/workflows/release.yml](.github/workflows/release.yml)。也可以用 `workflow_dispatch` 手动指定同类 tag。流水线先做校验，任一项不过就中止：
+
+1. **签名 secrets 必须齐全**——缺证书或公证凭据时在最便宜的 `resolve` job 直接失败，并提示改用 dev-build / unsigned-prerelease。正式 Release 不存在「降级为未签名」这条路径；
 2. tag 必须**已经存在**于远端，并解析成唯一的 commit SHA；
-3. tag 的 semver 必须与该 commit 上 `package.json` 的 `version` 一致；
+3. tag 必须是稳定 semver（`v1.2.3`），且与该 commit 上 `package.json` 的 `version` 一致（version 亦不得含 prerelease 后缀）；
 4. 该 tag 不能已经有已发布的 Release（避免悄悄替换用户已下载的二进制）；
 5. 所有 matrix job 用 `actions/checkout` 显式 checkout 同一个 commit SHA，构建完成后再次确认 tag 没有被移动；
-6. 打包后逐产物做严格签名校验；发布说明生成器再次确认所有 build-info 都是 `channel=stable` 且已签名已公证，否则拒绝发布。
+6. 打包前跑 `test:core` + `test:browser`；打包后逐产物做严格签名校验；发布说明生成器再次确认所有 build-info 都是 `channel=stable` 且已签名已公证，否则拒绝发布。
+
+#### 未签名 prerelease 通道
+
+使用 [.github/workflows/unsigned-prerelease.yml](.github/workflows/unsigned-prerelease.yml) 与 tag 形如 `v0.0.5-unsigned.1`。发布为 `prerelease: true`，资产名含 `-unsigned`，**没有**开发者签名背书。
 
 解析出的 commit SHA 会写进发布说明，和每个平台的签名状态一起展示（见 [scripts/compose-release-notes.mjs](scripts/compose-release-notes.mjs)）。
 
@@ -304,10 +318,12 @@ macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitle
 
 ### 其他文档
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 模块边界、状态机、幂等性、并发模型
-- [docs/DESIGN.md](docs/DESIGN.md) — 产品视角的目标、四类邮件处理对照、配置说明
-- [docs/PROGRESS.md](docs/PROGRESS.md) — 各阶段实现进度
-- [gui-design/README.md](gui-design/README.md) — 桌面界面静态预览方式
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 当前模块边界、事务、锁、schema v3
+- [docs/DESIGN.md](docs/DESIGN.md) — 产品目标、四类邮件对照、配置指引
+- [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) — main 必过检查（需 owner 配置）
+- [docs/SECURITY_HISTORY_CLEANUP.md](docs/SECURITY_HISTORY_CLEANUP.md) — 历史隐私净化步骤（**未执行**，需人工批准）
+- [gui-design/README.md](gui-design/README.md) — 桌面界面静态预览；截图可用 `npm run screenshots`（需先本地静态服务器）
+- 过程性/历史文档已移至 `docs/archive/` 与 `docs/audit-2026-07-29/`，不作为现行规约
 
 ---
 
