@@ -171,8 +171,8 @@
 - [x] `src/index.ts` / `src/pipeline.ts`: `ctx.browser()` 懒启动,CLI 退出统一关闭
 - [x] `mfh run --only-mail <msgIdHash>`: 支持对已处理样本定向回归
 - [x] 代表样本验证:
-  - `samples/by-type/nuonuo/nuonuo-01.eml` → `26312000001898721121.pdf`
-  - `samples/by-type/nuonuo/nuonuo-02.eml` → `26312000001833364216.pdf`
+  - `samples/by-type/nuonuo/nuonuo-01.eml` → `00000000000000000000.pdf`
+  - `samples/by-type/nuonuo/nuonuo-02.eml` → `00000000000000000000.pdf`
 
 ## Phase 5 验证记录  [2026-05-20]
 
@@ -182,7 +182,7 @@
 - `node dist/index.js run --help` → exit 0,列出 `--only-mail`
 - `node dist/index.js run --config /tmp/mfh-nuonuo-config.json --state /tmp/mfh-nuonuo-state.json --only-mail 53a93fd33bea`
   - Matched extractor: `thirdParty`
-  - 输出 `/tmp/mfh-nuonuo-invoices/26312000001898721121.pdf`
+  - 输出 `/tmp/mfh-nuonuo-invoices/00000000000000000000.pdf`
   - `invoices.csv` 写入 1 行
 
 ## Phase 5 — 第三方站点处理器: 淘宝 / 京东 / 客如云  [完成 2026-05-20]
@@ -224,17 +224,17 @@
 - `npm run build` → 0 errors
 - `node dist/index.js --help` → exit 0
 - `node dist/index.js run --help` → exit 0,列出 `--only-mail`
-- 代表样本验证:
-  - 百望云 `175ea52ebc88` → `dzfp_26317000000960428781_浙江捷发科技股份有限公司_20260411213227.pdf`
-  - 百望云 `78797027a322` → `dzfp_26332000003640263706_浙江捷发科技股份有限公司_20260501192129.pdf`
-  - 平安产险 `35ab84975a48` → `26337000000454161517.pdf` (去重后 1 PDF)
-  - 平安产险 `891b3e1bc8e8` → `26337000000454161518.pdf` (去重后 1 PDF)
-  - 税控预览 `f3c5191f7657` → `26932000000654893236.pdf`
-  - 诺诺网 `53a93fd33bea` → `26312000001898721121.pdf`
+- 代表样本验证（已脱敏，原票号/商户已替换为虚构值）:
+  - 百望云 `sample-hash-bw-01` → `dzfp_00000000000000000001_示例科技股份有限公司_20260411213227.pdf`
+  - 百望云 `sample-hash-bw-02` → `dzfp_00000000000000000002_示例科技股份有限公司_20260501192129.pdf`
+  - 平安产险 `sample-hash-pa-01` → `00000000000000000003.pdf` (去重后 1 PDF)
+  - 平安产险 `sample-hash-pa-02` → `00000000000000000004.pdf` (去重后 1 PDF)
+  - 税控预览 `sample-hash-tax-01` → `00000000000000000005.pdf`
+  - 诺诺网 `sample-hash-nn-01` → `00000000000000000006.pdf`
 - 全量样本回归: `node dist/index.js run --config /tmp/mfh-final-pass-config.json --state /tmp/mfh-final-pass-state.json`
   - `Run complete: processed=105, skipped=0`
   - 输出 PDF: 166 个
-  - Pending: 6 封,均为兴业/建行信用卡账单或 12306 支付/改签通知,无可样本驱动开发的发票第三方站点
+  - Pending: 6 封,均为示例银行信用卡账单或 12306 支付/改签通知,无可样本驱动开发的发票第三方站点
 
 ## Phase 5.1 — 非发票邮件排除  [完成 2026-05-20]
 
@@ -407,7 +407,7 @@
   - OCR: scanned=1086,parsed=784,skipped=301,failed=1,updated=785;实际送 OCR 785 行,成功 784,仅 1 个 PDF `rule_unhandled`
   - Pending: 12 封;`directLink:no_pdf_links` 3,`directLink:download_failed` 7,`thirdParty:huawei_travel_query_failed:130071003` 1,`no_supported_documents_in_attachments` 1
 - [x] OFD 行程单验证: 3 个飞猪 `电子行程单.ofd` 通过 efapiao `text_layer` 识别,返回 `invoiceType=air_itinerary`,承运人、金额、日期、票号字段满足当前整理需求
-- [x] 上游 efapiao 待反馈: 剩余 1 个真实 PDF `26317000000010839783.pdf` 返回 `rule_unhandled`,可作为新增规则样本;当前本地未配置 OCR vendor,所有成功均为 `text_layer`
+- [x] 上游 efapiao 待反馈: 剩余 1 个真实 PDF `00000000000000000000.pdf` 返回 `rule_unhandled`,可作为新增规则样本;当前本地未配置 OCR vendor,所有成功均为 `text_layer`
 
 ## Phase 6.9 — Pending/OCR GUI 数据契约  [完成 2026-05-21]
 
@@ -417,5 +417,5 @@
 - [x] `src/ocr/summary.ts`: 汇总 `recognized / failed / ignored / pending`,并按文档类型、支撑材料原因、失败原因输出示例
 - [x] `mfh ocr summary --json`: 为 GUI 提供 OCR 结果视图数据;文本输出可直接用于排障
 - [x] 一年缓存 OCR 汇总验证: total=1086,recognized=784,failed=1,ignored=301,pending=0;失败原因仅 `rule_unhandled`
-- [x] `docs/EFAPIAO_UPSTREAM_FEEDBACK.md`: 记录小米之家 `26317000000010839783.pdf` 上游 fixture/规则补齐建议,不提交真实 PDF
+- [x] `docs/EFAPIAO_UPSTREAM_FEEDBACK.md`: 记录小米之家 `00000000000000000000.pdf` 上游 fixture/规则补齐建议,不提交真实 PDF
 - [x] `gui-design/pages/dashboard.html` / `library.html` / `pending.html`: 静态 GUI 更新为当前真实状态,覆盖 recognized/failed/ignored、支撑材料分类、失败原因、手动重跑 OCR、手动改分类、整理输出、刷新链接与手动归档入口

@@ -17,6 +17,22 @@ pending/
 pending.csv
 .mfh-cache/
 
+# local scratch / agent state
+tmp/
+.claude/settings.local.json
+
+# sensitive atomic-write / corruption sidecars
+# (config.json.tmp-*, config.json.corrupt-*.json, state.json.<pid>.<rand>.tmp, …)
+# Do NOT use config*.json — that would hide the tracked config.example.json.
+config.json.tmp-*
+config.json.corrupt-*.json
+state*.json.*.tmp
+state*.json.corrupt-*.bak
+
+# generated release-note workspace
+release-artifacts/
+release-notes.md
+
 # OS / IDE
 .DS_Store
 .vscode/

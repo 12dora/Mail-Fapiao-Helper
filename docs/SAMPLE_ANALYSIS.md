@@ -33,25 +33,33 @@
 
 ### Representative Examples
 
-1. **票通** (`kefu@service.vpiaotong.com`)
-   - Subject: 您收到一张来自上海汇语餐饮管理有限公司的电子发票【发票金额：147.00】
-   - Links in body: 2
+1. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例餐饮管理（上海）有限公司】开具的发票【发票号码：00000000000000000000】
+   - Has attachment: False, Links: 8
 
-2. **通行费发票通知** (`service@invoice.txffp.com`)
-   - Subject: 通行费电子发票
-   - Links in body: 0
+2. **阿里发票平台** (`noreply@example-taobao-invoice.test`)
+   - Subject: 【阿里发票平台】电子发票附件查收
+   - Has attachment: False, Links: 7
 
-3. **票通** (`kefu@service.vpiaotong.com`)
-   - Subject: 您收到一张来自上海易成美盈餐饮服务有限公司的电子发票【发票金额：1359.00】
-   - Links in body: 2
+3. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例合胖餐饮有限公司】开具的发票【发票号码：00000000000000000000】
+   - Has attachment: False, Links: 8
 
-4. **美团电票平台** (`it_fapiao@meituan.com`)
-   - Subject: 【电子发票】上海茶田餐饮管理有限公司（发票金额：8.10元）
-   - Links in body: 1
+4. **示例咖啡 invoice center** (`Invoice@example-coffee.test`)
+   - Subject: 【电子发票】您已收到示例咖啡电子发票
+   - Has attachment: False, Links: 10
 
-5. **沃尔玛** (`auth@shove.xforceplus.com`)
-   - Subject: 【沃尔玛】电子发票
-   - Links in body: 0
+5. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例红子鸡美食总汇有限公司】开具的发票【发票号码：00000000000000000000】
+   - Has attachment: False, Links: 8
+
+6. **示例银行信用卡中心** (`creditcard@example-bank.test`)
+   - Subject: 示例银行信用卡2026年03月电子账单
+   - Has attachment: False, Links: 69
+
+7. **(no name)** (`12306@example-rails.test`)
+   - Subject: 网上购票系统-用户支付通知
+
 
 ## Category 2: Direct Link Pattern
 
@@ -85,51 +93,51 @@
 
 | Sender | Domain | Count |
 |--------|--------|-------|
-| 诺诺网 | `invoice@info.nuonuo.com` | 12 |
+| 诺诺网 | `invoice@example-nuonuo.test` | 12 |
 | (no name) | `customer.service@plkchina.com` | 10 |
-| 兴业银行信用卡中心 | `creditcard@message.cib.com.cn` | 2 |
-| (no name) | `12306@rails.com.cn` | 2 |
-| (no name) | `eipp@notice.mallcoo.info` | 2 |
-| (no name) | `service@vip.ccb.com` | 2 |
-| 系统服务 | `yun2@vip.baiwang.com` | 2 |
-| 京东JD.com | `customer_service@jd.com` | 2 |
-| 阿里发票平台 | `noreply@notice.invoice-mail.taobao.com` | 1 |
-| Timscoffeehouse invoice center | `Invoice@store.timschina.com` | 1 |
-| 单单计票税云平台 | `invoice1@mail.360ddj.com` | 1 |
-| (no name) | `service@fapiao.com.cn` | 1 |
-| (no name) | `E-invoice04@dominos.com.cn` | 1 |
+| 示例银行信用卡中心 | `creditcard@example-bank.test` | 2 |
+| (no name) | `12306@example-rails.test` | 2 |
+| (no name) | `eipp@example-mall.test` | 2 |
+| (no name) | `service@example-ccb.test` | 2 |
+| 系统服务 | `yun2@example-baiwang.test` | 2 |
+| 京东JD.com | `customer_service@example-jd.test` | 2 |
+| 阿里发票平台 | `noreply@example-taobao-invoice.test` | 1 |
+| 示例咖啡 invoice center | `Invoice@example-coffee.test` | 1 |
+| 单单计票税云平台 | `invoice1@example-ddj.test` | 1 |
+| (no name) | `service@example-fapiao.test` | 1 |
+| (no name) | `E-invoice04@example-dominos.test` | 1 |
 
 ### Representative Examples
 
-1. **诺诺网** (`invoice@info.nuonuo.com`)
-   - Subject: 您收到一张【很久以前餐饮管理（上海）有限公司】开具的发票【发票号码：26312000001726118566】
+1. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例餐饮管理（上海）有限公司】开具的发票【发票号码：00000000000000000000】
    - Has attachment: False, Links: 8
 
-2. **阿里发票平台** (`noreply@notice.invoice-mail.taobao.com`)
+2. **阿里发票平台** (`noreply@example-taobao-invoice.test`)
    - Subject: 【阿里发票平台】电子发票附件查收
    - Has attachment: False, Links: 7
 
-3. **诺诺网** (`invoice@info.nuonuo.com`)
-   - Subject: 您收到一张【上海合胖餐饮有限公司】开具的发票【发票号码：26312000001833364216】
+3. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例合胖餐饮有限公司】开具的发票【发票号码：00000000000000000000】
    - Has attachment: False, Links: 8
 
-4. **Timscoffeehouse invoice center** (`Invoice@store.timschina.com`)
-   - Subject: 【电子发票】您已收到Tim Hortons电子发票
+4. **示例咖啡 invoice center** (`Invoice@example-coffee.test`)
+   - Subject: 【电子发票】您已收到示例咖啡电子发票
    - Has attachment: False, Links: 10
 
-5. **诺诺网** (`invoice@info.nuonuo.com`)
-   - Subject: 您收到一张【上海红子鸡美食总汇有限公司】开具的发票【发票号码：26312000001898721121】
+5. **诺诺网** (`invoice@example-nuonuo.test`)
+   - Subject: 您收到一张【示例红子鸡美食总汇有限公司】开具的发票【发票号码：00000000000000000000】
    - Has attachment: False, Links: 8
 
-6. **兴业银行信用卡中心** (`creditcard@message.cib.com.cn`)
-   - Subject: 兴业银行信用卡2026年03月电子账单
+6. **示例银行信用卡中心** (`creditcard@example-bank.test`)
+   - Subject: 示例银行信用卡2026年03月电子账单
    - Has attachment: False, Links: 69
 
-7. **(no name)** (`12306@rails.com.cn`)
+7. **(no name)** (`12306@example-rails.test`)
    - Subject: 网上购票系统-用户支付通知
    - Has attachment: False, Links: 7
 
-8. **(no name)** (`eipp@notice.mallcoo.info`)
+8. **(no name)** (`eipp@example-mall.test`)
    - Subject: 前滩太古里电子发票
    - Has attachment: False, Links: 1
 
@@ -170,7 +178,7 @@ These emails have neither attachments nor links, requiring manual inspection:
 
 - `service@invoice.txffp.com` (通行费发票通知) - 14 emails, toll road invoices
 - `kefu@service.vpiaotong.com` (票通) - 13 emails, restaurant invoices
-- `invoice@info.nuonuo.com` (诺诺网) - 12 emails, third-party platform
+- `invoice@example-nuonuo.test` (诺诺网) - 12 emails, third-party platform
 - `customer.service@plkchina.com` (POPEYES) - 10 emails, third-party platform
 - `it_fapiao@meituan.com` (美团电票平台) - 6 emails, restaurant invoices
 

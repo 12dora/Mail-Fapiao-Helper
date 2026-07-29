@@ -6,6 +6,9 @@
  * 里的合法链接会带着句末标点被请求并失败（APP-10A）。这里统一为：
  * 解码 HTML entity -> 在已知行文分隔符处截断 -> 剥离结尾标点与不配对的成对括号
  * -> 用 `new URL()` 重新解析验证，解析不通过或非 http(s) 的 token 直接丢弃。
+ *
+ * EXT-10：完整支持十进制/十六进制数字实体及命名实体的大小写形式，避免
+ * `?a=1&#38;token=abc` 被 `new URL()` 把 `#` 当成 fragment 起点而截断查询参数。
  */
 
 /** 会出现在正文里、但绝不会出现在 URL 中的行文分隔符：命中即从此处截断。 */
@@ -24,14 +27,36 @@ const BRACKET_PAIRS: Record<string, string> = {
   '》': '《',
 };
 
+/** 常见命名实体（小写键；解码时对命名做 case-insensitive 匹配）。 */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  // URL 上下文里把 &nbsp; 去掉而不是保留空格（与历史行为一致）。
+  nbsp: '',
+};
+
+/**
+ * 解码 HTML 实体：命名（大小写不敏感）+ 十进制 `&#38;` + 十六进制 `&#x26;`。
+ * 未知实体原样保留，避免误伤合法文本。
+ */
 export function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, '')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);?/gi, (match, body: string) => {
+    if (body[0] === '#') {
+      const hex = body[1] === 'x' || body[1] === 'X';
+      const num = hex ? Number.parseInt(body.slice(2), 16) : Number.parseInt(body.slice(1), 10);
+      if (!Number.isFinite(num) || num < 0 || num > 0x10ffff) return match;
+      try {
+        return String.fromCodePoint(num);
+      } catch {
+        return match;
+      }
+    }
+    const mapped = NAMED_ENTITIES[body.toLowerCase()];
+    return mapped !== undefined ? mapped : match;
+  });
 }
 
 function countChar(value: string, ch: string): number {
