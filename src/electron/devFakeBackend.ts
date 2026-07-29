@@ -157,7 +157,7 @@ function fakePipeline(ctx: FakeBackendContext, args: string[]): FakeCliResult {
     code: 0,
     stdout: [
       ...handled.map((mail, i) => `Processed ${fakeMailHash(mail)}: ${documents[i] ?? 1} documents`),
-      `Run complete: processed=${handled.length}, partial=0, skipped=0, failed=0`,
+      `Run complete: processed=${handled.length}, partial=0, skipped=0, failed=0, archived=${handled.length}, pending=0`,
       '',
     ].join('\n'),
     stderr: '',

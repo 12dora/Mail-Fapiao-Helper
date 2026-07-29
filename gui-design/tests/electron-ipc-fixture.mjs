@@ -311,7 +311,7 @@ async function main() {
     /* ---------- Stage 2 (fake CLI): pipeline ------------------------------- */
     await page.getByRole('button', { name: '获取发票文件' }).click();
     await expectToast(page, '获取完成');
-    await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
+    await expectText(page, '处理完成：成功 2 封，跳过 0 封。');
     await dismissToasts(page);
     await page.getByRole('button', { name: '打开归档目录' }).first().click();
     await expectToast(page, '已打开文件夹');
@@ -340,7 +340,7 @@ async function main() {
     /* ---------- Stage 3 (fake CLI): OCR ------------------------------------ */
     await page.getByRole('button', { name: '开始识别' }).click();
     await expectToast(page, '识别完成');
-    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个。');
     await dismissToasts(page);
     const ocrProgress = await activeMain(page, '[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (ocrProgress !== '100%') fail(`识别后进度应为 100%，实际为 ${ocrProgress}`);
@@ -477,7 +477,7 @@ async function main() {
     page.once('dialog', (dialog) => dialog.accept());
     await activeMain(page, '[data-action="ocr-toggle"]').click();
     await expectToast(page, '识别完成');
-    await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
+    await expectText(page, '识别完成：成功 2 个，跳过 1 个。');
     await dismissToasts(page);
     await page.getByRole('button', { name: '一键改名' }).first().click();
     await expectToast(page, '改名完成');
@@ -503,8 +503,15 @@ async function main() {
     await page.locator('.toast').first().waitFor({ state: 'visible', timeout: 8000 });
     await dismissToasts(page);
     const noGuiPendingOpen = await page.evaluate((hash) => window.mfhBridge.pendingRefreshLink({ hash }), pendingHash);
-    if (!noGuiPendingOpen?.ok || !/^pending_mail_(opened|revealed|missing_local_copy)$/.test(noGuiPendingOpen.code || '')) {
+    /* COPY-05: the result must say what was actually opened — `mail`, `folder` or
+       `none` — instead of unconditionally claiming the original mail was opened. */
+    if (!noGuiPendingOpen?.ok
+      || !/^(mail|folder|none)$/.test(noGuiPendingOpen.opened || '')
+      || !/^pending_mail_(opened|revealed|folder_opened|missing_local_copy)$/.test(noGuiPendingOpen.code || '')) {
       fail(`no-GUI pending refresh/open path should return deterministic success: ${JSON.stringify(noGuiPendingOpen)}`);
+    }
+    if (noGuiPendingOpen.opened === 'mail' && !/^pending_mail_(opened|revealed)$/.test(noGuiPendingOpen.code)) {
+      fail(`opened=mail 必须搭配 opened/revealed code：${JSON.stringify(noGuiPendingOpen)}`);
     }
     const ledgerBeforeManualRollback = existsSync(config.output.csv) ? await readFile(config.output.csv, 'utf8') : undefined;
     const ocrPendingPath = join(config.paths.invoices, 'ocr', 'ocr-pending.csv');
@@ -568,21 +575,27 @@ async function main() {
     }
     await dismissToasts(page);
 
-    // TEST-09 continued: bridge Promise.reject must surface as「运行失败」, not an unhandled rejection.
+    /* TEST-09 continued: a FAILED pipeline run must surface as a role=alert toast
+       carrying the pipeline failure title.
+       NOTE: this deliberately does not stub `window.mfhBridge.runPipeline`. With
+       `contextIsolation: true` the contextBridge object is immutable, so assigning
+       to it silently no-ops and the real handler runs anyway — an earlier version of
+       this test did exactly that and passed only because an unrelated real failure
+       happened to raise a toast. The failure asserted here is genuine: the CSV
+       truncate fault injected above leaves a residual archive journal, and OCR-05's
+       fail-closed recovery correctly refuses further writes until it is resolved. */
     await goTo(page, '开始处理', /dashboard\.html/);
-    await page.evaluate(() => {
-      window.__mfhOrigRunPipeline = window.mfhBridge.runPipeline;
-      window.mfhBridge.runPipeline = () => Promise.reject(new Error('forced_ipc_reject_for_toast'));
-    });
     await page.getByRole('button', { name: /获取发票文件|开始获取|处理缓存/ }).first().click().catch(async () => {
-      // Fallback: data-action if the visible label differs.
       await activeMain(page, '[data-action="run-pipeline"]').click();
     });
-    const rejectToast = page.locator('.toast[role="alert"]').filter({ hasText: '运行失败' }).first();
-    await rejectToast.waitFor({ state: 'visible', timeout: 8000 });
-    await page.evaluate(() => {
-      if (window.__mfhOrigRunPipeline) window.mfhBridge.runPipeline = window.__mfhOrigRunPipeline;
-    });
+    const failToast = page.locator('.toast[role="alert"]').filter({ hasText: '处理未完成' }).first();
+    await failToast.waitFor({ state: 'visible', timeout: 8000 });
+    /* 簇 C / ELEC-08: a failure whose commit state is unknown must NOT claim the
+       local data is unchanged — that claim is only permitted on started:false. */
+    const failText = (await failToast.innerText()).replace(/\s+/g, ' ');
+    if (failText.includes('本地数据没有变化')) {
+      fail(`未确认提交状态的失败不得断言「本地数据没有变化」：${failText}`);
+    }
     await dismissToasts(page);
     await goTo(page, /待确认/, /pending\.html/);
     await page.getByRole('button', { name: '打开待确认文件夹' }).first().click();

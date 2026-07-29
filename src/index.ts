@@ -1025,17 +1025,65 @@ async function cmdRun(argv: string[]): Promise<number> {
   log.info('Starting run...');
 
   const rawDir = cfg.paths.samples;
-  let processed = 0;
+  const pendingDir = resolve(cfg.paths.pending);
+  // 簇 C 终态计数：与 ProcessMailOutcome 一一对应（structured terminal event）。
+  let archived = 0;
+  let pending = 0;
   let skipped = 0;
   let failed = 0;
-  // 部分成功的邮件（APP-01：有 artifact 但也有失败候选源）单独计数，避免被
-  // processed 掩盖成「完全成功」。
+  /** 有票已归档但仍有待确认的邮件数（archived 的子集）。 */
   let partial = 0;
+  /** CORE-09：--only-mail 是否命中过目标（含 pending/<hash>.eml）。 */
+  let onlyMailMatched = false;
   const networkFailures: ProcessMailResult[] = [];
   const inFlight = new Set<string>();
   // CORE-02：致命错误时 abort 所有 worker，并在归档临界区前再次检查。
   const fatalAbort = new AbortController();
   let fatalError: unknown;
+
+  const markOnlyMailIfMatch = (identity: ReturnType<typeof resolveMailIdentity>, fileHash?: string): boolean => {
+    if (opts.onlyMail === undefined) return true;
+    const target = opts.onlyMail.trim().toLowerCase();
+    if (identityMatches(opts.onlyMail, identity)) {
+      onlyMailMatched = true;
+      return true;
+    }
+    // 文件名本身就是用户指定的 hash（pending 重试常见）。
+    if (fileHash && isMailHash(fileHash) && fileHash.toLowerCase() === target) {
+      onlyMailMatched = true;
+      return true;
+    }
+    return false;
+  };
+
+  const recordOutcome = (result: ProcessMailResult): void => {
+    if (result.reason === 'aborted') return;
+    if (
+      (result.outcome === 'pending_durable' || result.partial === true)
+      && result.reason?.includes('network_retry_failed')
+    ) {
+      networkFailures.push(result);
+    }
+    switch (result.outcome) {
+      case 'archived':
+        archived++;
+        if (result.partial === true) partial++;
+        break;
+      case 'pending_durable':
+        pending++;
+        break;
+      case 'skipped':
+        skipped++;
+        break;
+      case 'retryable_failure':
+      case 'fatal_failure':
+        failed++;
+        break;
+      default:
+        failed++;
+        break;
+    }
+  };
 
   const handleEml = async (emlPath: string): Promise<void> => {
     if (fatalAbort.signal.aborted) return;
@@ -1061,7 +1109,7 @@ async function cmdRun(argv: string[]): Promise<number> {
           raw: isMailHash(fileHash) ? undefined : raw,
         });
         const hash = identity.primary;
-        if (opts.onlyMail !== undefined && !identityMatches(opts.onlyMail, identity)) return;
+        if (!markOnlyMailIfMatch(identity, fileHash)) return;
         const reason = 'mail_too_large_to_parse';
         log.warn(`mail too large, routing to pending: ${hash} (${msg})`);
         try {
@@ -1078,7 +1126,7 @@ async function cmdRun(argv: string[]): Promise<number> {
           });
           store.addProcessed(hash);
           store.checkpoint();
-          processed++;
+          pending++;
           log.info(`pending ${hash} reason=${reason}`);
         } catch (writeErr) {
           // item 9：StateWriteError 必须传播到 abort，不能被吞掉。
@@ -1108,11 +1156,9 @@ async function cmdRun(argv: string[]): Promise<number> {
       fileHash: isMailHash(fileHash) ? fileHash : undefined,
     });
     const hash = identity.primary;
-    // invoices 行的 messageId 展示字段：真实 Message-Id，否则 primary hash。
-    const messageId = mail.messageId || hash;
 
-    // CORE-03f：--only-mail 接受 12/32 位，匹配任意别名。
-    if (opts.onlyMail !== undefined && !identityMatches(opts.onlyMail, identity)) {
+    // CORE-03f / CORE-09：--only-mail 接受 12/32 位，匹配任意别名；未命中则跳过。
+    if (!markOnlyMailIfMatch(identity, fileHash)) {
       return;
     }
 
@@ -1127,7 +1173,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     });
     if (excludeReason) {
       log.info(`Excluded ${hash}: ${excludeReason}`);
-      processed++;
+      // 明确排除的邮件视作 handled（skipped 语义：无需用户再处理）。
+      skipped++;
       store.addProcessed(hash);
       store.checkpoint();
       return;
@@ -1163,20 +1210,8 @@ async function cmdRun(argv: string[]): Promise<number> {
         signal: fatalAbort.signal,
         fileHash: isMailHash(fileHash) ? fileHash : undefined,
       });
-      if (result.reason === 'aborted') return;
       for (const item of taskState.processedHashes) store.addProcessed(item);
-      // 部分成功（APP-01）同样携带 reason，且已写入待确认记录；网络失败统计必须
-      // 一并覆盖，否则「一封邮件里一半链接超时」不会出现在 run 末尾的汇总里。
-      if ((result.outcome === 'manual' || result.partial === true) && result.reason?.includes('network_retry_failed')) {
-        networkFailures.push(result);
-      }
-      if (result.partial === true) partial++;
-      // pending 写失败不得算作成功处理。
-      if (result.reason?.includes('pending_write_failed')) {
-        failed++;
-      } else {
-        processed++;
-      }
+      recordOutcome(result);
     } finally {
       inFlight.delete(hash);
       for (const a of identity.aliases) inFlight.delete(a);
@@ -1184,7 +1219,24 @@ async function cmdRun(argv: string[]): Promise<number> {
   };
 
   try {
-    const emlPaths = await collectEmlPaths(rawDir);
+    // CORE-09：--only-mail 优先使用 pending/<hash>.eml（待确认页重试的权威副本）。
+    let emlPaths: string[];
+    if (opts.onlyMail !== undefined && isMailHash(opts.onlyMail)) {
+      const target = opts.onlyMail.trim().toLowerCase();
+      const pendingEml = join(pendingDir, `${target}.eml`);
+      if (fileExistsNonEmpty(pendingEml)) {
+        emlPaths = [pendingEml];
+        onlyMailMatched = true;
+      } else {
+        // 再扫 samples；文件名直接等于 target 时也算命中。
+        const all = await collectEmlPaths(rawDir);
+        const byName = all.filter((p) => basename(p, '.eml').toLowerCase() === target);
+        emlPaths = byName.length > 0 ? byName : all;
+      }
+    } else {
+      emlPaths = await collectEmlPaths(rawDir);
+    }
+
     let next = 0;
     const workerCount = Math.min(opts.concurrency, Math.max(emlPaths.length, 1));
     log.info(`Queued ${emlPaths.length} cached emails with concurrency=${workerCount}`);
@@ -1233,14 +1285,27 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   }
 
-  log.info(`Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`);
+  // 结构化终态事件：Electron 只消费这些计数，不依赖裸 exit code 推断部分成功。
+  // 字段顺序兼容旧解析器（processed/partial/skipped/failed 仍在前段）；
+  // archived/pending 为新契约字段。processed = archived + pending（不含 skipped/failed）。
+  const processed = archived + pending;
+  log.info(
+    `Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`
+    + `, archived=${archived}, pending=${pending}`,
+  );
   if (networkFailures.length > 0) {
     log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
     for (const failure of networkFailures) {
       log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
     }
   }
-  // item 10：存在可重试失败时非 0 退出。
+
+  // CORE-09：--only-mail 未命中目标 → 明确非 0 + mail_not_found。
+  if (opts.onlyMail !== undefined && !onlyMailMatched) {
+    log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
+    return 1;
+  }
+  // CORE-04：任一 retryable/fatal failure → 非 0；全成功才是 0。
   return failed > 0 ? 1 : 0;
 }
 
