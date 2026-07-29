@@ -1,7 +1,6 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, filenameFromUrl } from './common.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
+import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, filenameFromUrl } from './common.js';
 
 const keruyunHandler: SiteHandler = {
   name: 'keruyun',
@@ -15,18 +14,19 @@ const keruyunHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const cleanUrl = decodeHtmlEntities(url);
     const { data, contentType } = await fetchBuffer(cleanUrl, ctx);
-    if (!contentType.includes('application/pdf') && data.subarray(0, 4).toString('latin1') !== '%PDF') {
-      throw new Error(`keruyun_no_pdf:${contentType || 'unknown'}`);
-    }
+    assertDocumentResponse({ data, contentType, label: 'keruyun', allow: ['pdf'] });
 
-    return [{
-      data,
-      source: cleanUrl,
-      suggestedName: filenameFromUrl(cleanUrl, 'keruyun-invoice.pdf'),
-    }];
+    return {
+      artifacts: [{
+        data,
+        source: cleanUrl,
+        suggestedName: filenameFromUrl(cleanUrl, 'keruyun-invoice.pdf'),
+        format: 'pdf',
+      }],
+    };
   },
 };
 

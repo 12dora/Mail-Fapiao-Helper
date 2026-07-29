@@ -2,41 +2,9 @@ import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
+import { extractMailUrls } from './mailLinks.js';
 import { handlers } from '../sites/registry.js';
-import type { SiteHandler } from '../sites/types.js';
-import { normalizeExtractedUrls } from '../util/url.js';
-
-function extractLinksFromHtml(html: string): string[] {
-  const links: string[] = [];
-  const hrefRegex = /href=["']([^"']+)["']/gi;
-  let match: RegExpExecArray | null;
-  while ((match = hrefRegex.exec(html)) !== null) {
-    if (match[1]) links.push(match[1]);
-  }
-  return links;
-}
-
-function extractLinksFromText(text: string): string[] {
-  const links: string[] = [];
-  const urlRegex = /https?:\/\/[^\s<>"'{}|\\^`\[\]]+/gi;
-  let match: RegExpExecArray | null;
-  while ((match = urlRegex.exec(text)) !== null) {
-    if (match[0]) links.push(match[0]);
-  }
-  return links;
-}
-
-function extractLinks(mail: ParsedMail): string[] {
-  const links: string[] = [];
-  if (typeof mail.html === 'string') {
-    links.push(...extractLinksFromHtml(mail.html));
-    links.push(...extractLinksFromText(mail.html));
-  }
-  if (typeof mail.text === 'string') links.push(...extractLinksFromText(mail.text));
-  // 与 directLink 共用 URL normalizer：此前只解码两个 HTML entity 并 trim，正文里
-  // `...token=abc。` 这类链接会带着句末标点被请求并失败（APP-10A）。
-  return normalizeExtractedUrls(links);
-}
+import type { SiteHandleResult, SiteHandler } from '../sites/types.js';
 
 function pdfContentKey(pdf: PdfArtifact): string {
   return createHash('sha1').update(pdf.data).digest('hex');
@@ -63,12 +31,17 @@ function isRetryableSiteError(err: unknown): boolean {
     || lower.includes('fetch failed');
 }
 
-async function handleWithRetry(handler: SiteHandler, page: Page, link: string, ctx: Ctx): Promise<PdfArtifact[]> {
+async function handleWithRetry(
+  handler: SiteHandler,
+  link: string,
+  ctx: Ctx,
+  page: Page | undefined,
+): Promise<SiteHandleResult> {
   const attempts = ctx.cfg.network.retries + 1;
   let lastError = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      return await handler.handle(page, link, ctx);
+      return await handler.handle(link, ctx, page);
     } catch (err) {
       const msg = errorMessage(err);
       if (!isRetryableSiteError(err)) {
@@ -91,22 +64,39 @@ const thirdPartyExtractor: Extractor = {
   name: 'thirdParty',
 
   canHandle(mail: ParsedMail): boolean {
-    return extractLinks(mail).some((link) => handlers.some((handler) => handler.match(link)));
+    return extractMailUrls(mail).some((link) => handlers.some((handler) => handler.match(link)));
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
-    const page = await ctx.browser().then((browser) => browser.newPage());
+    const links = extractMailUrls(mail);
+    const matched = links
+      .map((link) => {
+        const handler = handlers.find((h) => h.match(link));
+        return handler ? { link, handler } : null;
+      })
+      .filter((item): item is { link: string; handler: SiteHandler } => item !== null);
+
+    if (matched.length === 0) {
+      return { kind: 'not_applicable', reason: 'thirdParty:no_matched_links' };
+    }
+
+    // EXT-09：仅当某个命中的 handler 声明 requiresBrowser 时才启动浏览器/创建 page。
+    const needsBrowser = matched.some((item) => item.handler.requiresBrowser === true);
+    let page: Page | undefined;
+    if (needsBrowser) {
+      page = await ctx.browser().then((browser) => browser.newPage());
+    }
+
     try {
       const pdfs: PdfArtifact[] = [];
       const seenPdfs = new Set<string>();
       const issues: ExtractIssue[] = [];
-      for (const link of extractLinks(mail)) {
-        const handler = handlers.find((h) => h.match(link));
-        if (!handler) continue;
+
+      for (const { link, handler } of matched) {
         // 逐链接隔离：一个过期/损坏的站点链接不再丢掉已取得和后续的好链接（APP-01）。
-        let handled: PdfArtifact[];
+        let handled: SiteHandleResult;
         try {
-          handled = await handleWithRetry(handler, page, link, ctx);
+          handled = await handleWithRetry(handler, link, ctx, page);
         } catch (err) {
           const msg = errorMessage(err);
           issues.push({
@@ -116,7 +106,25 @@ const thirdPartyExtractor: Extractor = {
           ctx.log.warn(`Site handler ${handler.name} failed for ${link}: ${msg}`);
           continue;
         }
-        for (const pdf of handled) {
+
+        if (handled.issues && handled.issues.length > 0) {
+          for (const issue of handled.issues) {
+            issues.push({
+              reason: issue.reason.startsWith('thirdParty:')
+                ? issue.reason
+                : `thirdParty:${handler.name}:${issue.reason}`,
+              retryable: issue.retryable,
+            });
+          }
+        }
+
+        // EXT-03：匹配链接若既无 artifact 也无 issue，强制补一条，禁止静默空成功。
+        if (handled.artifacts.length === 0 && (!handled.issues || handled.issues.length === 0)) {
+          issues.push({ reason: `thirdParty:${handler.name}:empty_result:${link}` });
+          ctx.log.warn(`Site handler ${handler.name} returned empty result for ${link}`);
+        }
+
+        for (const pdf of handled.artifacts) {
           const key = pdfContentKey(pdf);
           if (seenPdfs.has(key)) continue;
           seenPdfs.add(key);
@@ -133,7 +141,7 @@ const thirdPartyExtractor: Extractor = {
 
       return { kind: 'pdf', pdfs, issues };
     } finally {
-      await page.close();
+      if (page) await page.close();
     }
   },
 };

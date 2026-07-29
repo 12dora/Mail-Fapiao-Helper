@@ -1,6 +1,5 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
 import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
 import { assertDocumentResponse } from './common.js';
 
@@ -134,16 +133,25 @@ const nuonuoHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const entryUrl = invoiceEntryUrl(url);
-    if (!entryUrl) return [];
+    // EXT-03：匹配但无法解析入口时返回 issue，禁止空数组静默成功。
+    if (!entryUrl) {
+      return {
+        artifacts: [],
+        issues: [{ reason: `entry_url_unresolved:${url}` }],
+      };
+    }
 
     const resolvedUrl = entryUrl.includes('/scan-invoice/printQrcode')
       ? entryUrl
       : await resolveShortLink(entryUrl, ctx);
     const paramList = extractParamList(resolvedUrl);
     if (!paramList) {
-      return [];
+      return {
+        artifacts: [],
+        issues: [{ reason: `paramList_missing:${resolvedUrl}` }],
+      };
     }
 
     const detail = await fetchDetail(resolvedUrl, paramList, ctx);
@@ -159,11 +167,14 @@ const nuonuoHandler: SiteHandler = {
 
     const data = await downloadPdf(pdfUrl, ctx);
     const shortCode = new URL(url).pathname.split('/').filter(Boolean).pop() ?? 'nuonuo';
-    return [{
-      data,
-      source: pdfUrl,
-      suggestedName: makeSuggestedName(simple?.fphm, shortCode),
-    }];
+    return {
+      artifacts: [{
+        data,
+        source: pdfUrl,
+        suggestedName: makeSuggestedName(simple?.fphm, shortCode),
+        format: 'pdf',
+      }],
+    };
   },
 };
 

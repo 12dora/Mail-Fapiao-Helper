@@ -1,7 +1,6 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
+import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 interface HuaweiTravelResponse {
   resultCode?: string;
@@ -74,19 +73,20 @@ const huaweiTravelHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const cleanUrl = decodeHtmlEntities(url);
     const pdf = await queryPdfToken(cleanUrl, ctx);
     const downloadUrl = `https://m-itravel.hwht.com/restapi/mobile-bff/service/file/download?filename=${encodeURIComponent(pdf.token)}`;
     const { data, contentType, contentDisposition } = await fetchBuffer(downloadUrl, ctx, cleanUrl);
-    if (!contentType.includes('pdf') && data.subarray(0, 4).toString('latin1') !== '%PDF') {
-      throw new Error(`huawei_travel_no_pdf:${contentType || 'unknown'}`);
-    }
-    return [{
-      data,
-      source: downloadUrl,
-      suggestedName: filenameFromDisposition(contentDisposition, `${pdf.invoiceNo}.pdf`),
-    }];
+    assertDocumentResponse({ data, contentType, label: 'huawei_travel', allow: ['pdf'] });
+    return {
+      artifacts: [{
+        data,
+        source: downloadUrl,
+        suggestedName: filenameFromDisposition(contentDisposition, `${pdf.invoiceNo}.pdf`),
+        format: 'pdf',
+      }],
+    };
   },
 };
 

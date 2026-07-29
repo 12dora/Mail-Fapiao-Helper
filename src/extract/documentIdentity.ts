@@ -9,6 +9,9 @@ import { looksLikeOfdItineraryText } from './classify.js';
  * 直链流程却只判断“邮件里存在任意 PDF”，然后删掉所有非行程单 OFD，
  * 于是发票 A 的 PDF 会让不相关的发票 B 的 OFD 无提示消失（APP-02）。
  * 两条流程现在共用本模块。
+ *
+ * EXT-01：通用文件名（invoice / 发票 / download 等）不能当作强身份；
+ * 没有可验证发票号时，宁可同时保留 PDF 与 OFD，交给 OCR 后再合并。
  */
 
 function basename(value: string): string {
@@ -22,6 +25,37 @@ function basename(value: string): string {
   return path.basename(value);
 }
 
+/**
+ * 规范化后不能单独触发 PDF/OFD 去重的通用 stem。
+ * 这些名字在邮件附件/下载链接里极常见，不同发票经常撞名。
+ */
+const GENERIC_DOCUMENT_STEMS = new Set([
+  'invoice',
+  'invoices',
+  'download',
+  'file',
+  'document',
+  'attachment',
+  'unnamed',
+  'unnamedpdf',
+  'unnamedofd',
+  'pdf',
+  'ofd',
+  '发票',
+  '电子发票',
+  '增值税电子普通发票',
+  '增值税电子专用发票',
+  '电子普通发票',
+  '电子专用发票',
+  '普通发票',
+  '专用发票',
+  '行程单',
+  '航空运输电子客票行程单',
+  '下载',
+  '附件',
+  '文件',
+]);
+
 export function normalizedDocumentKey(artifact: PdfArtifact): string {
   let name = basename(artifact.suggestedName || artifact.source).toLowerCase();
   name = name
@@ -32,6 +66,15 @@ export function normalizedDocumentKey(artifact: PdfArtifact): string {
     .replace(/\.(pdf|ofd)$/gi, '')
     .replace(/[\s_()（）【】\[\]-]+/g, '')
     .trim();
+}
+
+/** 规范化 stem 是否属于“不能单独当身份”的通用名。 */
+export function isGenericDocumentStem(stem: string): boolean {
+  if (!stem) return true;
+  if (GENERIC_DOCUMENT_STEMS.has(stem)) return true;
+  // 纯数字短 stem（如 001、1）也没有身份意义。
+  if (/^\d{1,4}$/.test(stem)) return true;
+  return false;
 }
 
 export function invoiceNoKey(artifact: PdfArtifact): string {
@@ -45,7 +88,10 @@ export function looksLikeOfdItinerary(artifact: PdfArtifact): boolean {
   return looksLikeOfdItineraryText(text);
 }
 
-/** 只有发票号相同、或规范化文件名相同，才认为是同一份文档。 */
+/**
+ * 只有可验证的发票号相同，或“非通用”规范化文件名相同，才认为是同一份文档。
+ * 通用名撞名时返回 false，避免误删另一张票的 OFD（EXT-01）。
+ */
 export function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
   const aNo = invoiceNoKey(a);
   const bNo = invoiceNoKey(b);
@@ -53,7 +99,9 @@ export function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
 
   const aKey = normalizedDocumentKey(a);
   const bKey = normalizedDocumentKey(b);
-  return aKey.length > 0 && aKey === bKey;
+  if (!aKey || !bKey || aKey !== bKey) return false;
+  if (isGenericDocumentStem(aKey)) return false;
+  return true;
 }
 
 /**
@@ -80,8 +128,8 @@ export function preferPdfOverDuplicateOfd(
       continue;
     }
 
-    // 仅当同一封邮件里的某个 PDF 可证明是同一份文档（20 位发票号一致，或规范化
-    // 文件名一致）才丢弃 OFD。只因为“存在某个不相关的 PDF”就丢弃会丢真发票。
+    // 仅当同一封邮件里的某个 PDF 可证明是同一份文档（20 位发票号一致，或非通用
+    // 规范化文件名一致）才丢弃 OFD。只因为“存在某个不相关的 PDF”就丢弃会丢真发票。
     const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf));
     if (duplicatePdf) {
       log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source}`);

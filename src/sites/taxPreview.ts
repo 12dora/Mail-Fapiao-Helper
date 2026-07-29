@@ -1,7 +1,6 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
-import { decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
+import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function idFromUrl(url: string): string {
   const id = new URL(url).searchParams.get('id');
@@ -29,23 +28,24 @@ const taxPreviewHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const cleanUrl = decodeHtmlEntities(url);
     const id = idFromUrl(cleanUrl);
     const parsed = new URL(cleanUrl);
     const downloadUrl = `${parsed.origin}/ZZSKP/skfw/fpView/toDownloadQdPdf.htm?id=${encodeURIComponent(id)}`;
     const { data, contentType } = await fetchBuffer(downloadUrl, ctx, cleanUrl);
 
-    if (!contentType.includes('pdf') && data.subarray(0, 4).toString('latin1') !== '%PDF') {
-      throw new Error(`taxPreview_no_pdf:${contentType || 'unknown'}`);
-    }
+    assertDocumentResponse({ data, contentType, label: 'taxPreview', allow: ['pdf'] });
 
     const head = await ctx.http(downloadUrl, { method: 'HEAD' }).catch(() => null);
-    return [{
-      data,
-      source: downloadUrl,
-      suggestedName: filenameFromDisposition(head?.headers.get('content-disposition') ?? null, `${id}.pdf`),
-    }];
+    return {
+      artifacts: [{
+        data,
+        source: downloadUrl,
+        suggestedName: filenameFromDisposition(head?.headers.get('content-disposition') ?? null, `${id}.pdf`),
+        format: 'pdf',
+      }],
+    };
   },
 };
 

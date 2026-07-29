@@ -1,6 +1,6 @@
 import AdmZip from 'adm-zip';
 import type { Ctx, DocumentFormat, PdfArtifact } from '../extract/types.js';
-import { assertPublicUrl, assertPublicResponse, readCappedBuffer, MAX_DOC_BYTES } from '../util/net.js';
+import { assertPublicUrl, readCappedBuffer, MAX_DOC_BYTES } from '../util/net.js';
 import { decodeHtmlEntities } from '../util/url.js';
 
 /** ZIP 解压防护上限（APP-09）：条目数、单条解压大小、总解压大小、压缩比。 */
@@ -94,17 +94,16 @@ export function assertDocumentResponse(opts: {
 }
 
 export async function fetchBuffer(url: string, ctx: Ctx, referer?: string): Promise<{ data: Buffer; contentType: string; contentDisposition: string }> {
-  // SSRF guard: reject non-http(s) and private/loopback targets before fetching,
-  // then re-validate the final URL after any redirects.
+  // WIRE-01：ctx.http 已是 safeFetch（逐跳校验 + DNS pin）。前置 assertPublicUrl
+  // 仍作快速失败；不再依赖事后 assertPublicResponse（redirect 已在发出前拦截）。
   await assertPublicUrl(url);
-  const response = await assertPublicResponse(await ctx.http(url, {
-    redirect: 'follow',
+  const response = await ctx.http(url, {
     headers: {
       Accept: 'application/pdf,application/zip,application/octet-stream,*/*',
       'User-Agent': 'Mozilla/5.0 Mail-Fapiao-Helper',
       ...(referer ? { Referer: referer } : {}),
     },
-  }));
+  });
 
   if (!response.ok) {
     throw new Error(`http_${response.status}`);
@@ -207,6 +206,21 @@ export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
       continue;
     }
     total += content.length;
+
+    // EXT-08：后缀与 magic 不一致时跳过并记入 skipped，避免把 JSON 错误页当 PDF。
+    const kind = detectDocumentKind(content);
+    if (format === 'pdf' && kind !== 'pdf') {
+      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_pdf:got_${kind}`);
+      continue;
+    }
+    if (format === 'ofd' && kind !== 'archive') {
+      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_ofd:got_${kind}`);
+      continue;
+    }
+    if (format === 'image' && kind !== 'image') {
+      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_image:got_${kind}`);
+      continue;
+    }
 
     const leaf = entryName.split('/').pop() || entryName;
     const suggestedName = safeFilename(leaf, format === 'pdf' ? 'invoice.pdf' : `invoice.${format === 'ofd' ? 'ofd' : 'png'}`);
