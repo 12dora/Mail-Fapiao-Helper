@@ -13,7 +13,16 @@ import fs, { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { assertFreshBuild, fail, killProcessTree, repoRoot, runSuite, withTempDir } from './_shared.mjs';
+
+/* Helper scripts written to a temp dir import compiled modules by absolute path.
+   A bare Windows path (`D:\...`) is not a legal ESM specifier — Node's loader
+   rejects it with ERR_UNSUPPORTED_ESM_URL_SCHEME ("Received protocol 'd:'").
+   Always go through a file:// URL. */
+function distImportSpecifier(relativeDistPath) {
+  return JSON.stringify(pathToFileURL(join(repoRoot, relativeDistPath)).href);
+}
 
 const execFileAsync = promisify(execFile);
 const TEST_FAULT_TOKEN = 'mail-fapiao-helper-test-faults';
@@ -1250,7 +1259,7 @@ async function testDataDirLockCrossProcessMutualExclusion() {
     const holderPath = join(tmp, 'holder.mjs');
     await writeFile(holderPath, `
 import { writeFileSync } from 'node:fs';
-import { acquireDataDirLock } from ${JSON.stringify(join(repoRoot, 'dist/util/dataDirLock.js'))};
+import { acquireDataDirLock } from ${distImportSpecifier('dist/util/dataDirLock.js')};
 const result = acquireDataDirLock(${JSON.stringify(tmp)}, 'pipeline', 'holder-job');
 if (!result.ok) {
   console.error('holder failed', result);
@@ -1414,8 +1423,8 @@ async function testJournalHardKillStageRecovery() {
       await writeFile(workerPath, `
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { stageDocuments } from ${JSON.stringify(join(repoRoot, 'dist/download/downloader.js'))};
-import { beginArchiveTransaction, appendCsvBlockDurable } from ${JSON.stringify(join(repoRoot, 'dist/download/archiveJournal.js'))};
+import { stageDocuments } from ${distImportSpecifier('dist/download/downloader.js')};
+import { beginArchiveTransaction, appendCsvBlockDurable } from ${distImportSpecifier('dist/download/archiveJournal.js')};
 
 const invoicesDir = ${JSON.stringify(cfg.paths.invoices)};
 const ledgerCsv = ${JSON.stringify(cfg.output.csv)};
@@ -1494,7 +1503,7 @@ if (holdStage === 'prepared') {
       // New process recovers via the same entry the CLI uses at startup.
       const recoverPath = join(tmp, 'recover.mjs');
       await writeFile(recoverPath, `
-import { recoverArchiveTransactions } from ${JSON.stringify(join(repoRoot, 'dist/download/archiveJournal.js'))};
+import { recoverArchiveTransactions } from ${distImportSpecifier('dist/download/archiveJournal.js')};
 const r = recoverArchiveTransactions(${JSON.stringify(cfg.paths.invoices)});
 console.log(JSON.stringify(r));
 `);
