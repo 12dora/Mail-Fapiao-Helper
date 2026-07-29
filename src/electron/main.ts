@@ -39,7 +39,7 @@ import {
   journalRecordInvalidReason,
   recoverArchiveTransactions,
 } from '../download/archiveJournal.js';
-import { dataDirLockPath } from '../util/dataDirLock.js';
+import { dataDirLockPath, isSameProcessAlive } from '../util/dataDirLock.js';
 
 interface DateRangePayload {
   from?: string;
@@ -621,9 +621,28 @@ function assertSafeToDeleteInsideDataDir(target: string): string | undefined {
   return resolveCanonicalPath(target);
 }
 
-async function openPathForUser(target: string): Promise<string> {
+/**
+ * B2 / ELEC-06：桌面「真正打开」的唯一出口。
+ * 只能由 openOrRevealByPolicy 在 disposition 已判定为 open 后调用；
+ * 接收不透明策略令牌，调用方无法用原始路径字符串绕过。
+ * `shell.openPath` 在本文件中只应出现于此一处。
+ */
+const OPEN_PATH_POLICY_TOKEN: unique symbol = Symbol('OPEN_PATH_POLICY_APPROVED');
+interface PolicyApprovedOpenPath {
+  readonly [OPEN_PATH_POLICY_TOKEN]: true;
+  readonly path: string;
+}
+
+function mintPolicyApprovedOpenPath(target: string): PolicyApprovedOpenPath {
+  return { [OPEN_PATH_POLICY_TOKEN]: true as const, path: target };
+}
+
+async function shellOpenPathApproved(approved: PolicyApprovedOpenPath): Promise<string> {
+  if (!approved || approved[OPEN_PATH_POLICY_TOKEN] !== true || typeof approved.path !== 'string') {
+    return '打开路径未通过安全策略校验。';
+  }
   if (e2eNoGuiMode()) return '';
-  return shell.openPath(target);
+  return shell.openPath(approved.path);
 }
 
 function showItemInFolderForUser(target: string): void {
@@ -839,7 +858,8 @@ async function openOrRevealByPolicy(
         : '已在文件夹中显示该位置（目录需通过应用内位置标识打开）。',
     };
   }
-  const error = await openPathForUser(target);
+  // 唯一 shell.openPath 调用路径：仅在策略判定 action=open 后铸造令牌再打开。
+  const error = await shellOpenPathApproved(mintPolicyApprovedOpenPath(target));
   return {
     ok: !error,
     error: error ? sanitizeText(error, { maxLength: 200 }) : '',
@@ -2527,60 +2547,21 @@ function inspectArchiveJournals(invoicesDir: string): JournalPresence {
 }
 
 /**
- * 仅隔离**确认无法 JSON 解析**的 journal 条目（malformed）。
- * 形态非法（invalid_shape）虽同样不可驱动回滚，但走下方原生确认对话框 /
- * 设置页 `archiveJournalQuarantine({confirm:true})`，不在此静默搬迁。
- * 整目录搬迁会丢掉仍可用于回滚的证据，故只挪损坏文件（OCR-05 rework）。
+ * 判断单条 journal 是否仍由「存活进程」持有（含 startId，避免 PID 复用）。
+ * 存活则不得隔离：进程崩溃前重写 journal 的证据不可丢。
+ * 解析/形态失败视为非存活持有，可走确认隔离。
  */
-function quarantineCorruptArchiveJournals(invoicesDir: string): {
-  quarantined: number;
-  remaining: number;
-  dest?: string;
-  detail?: string;
-} {
-  const dir = path.join(invoicesDir, '.journal');
-  let names: string[];
+function archiveJournalHeldByLiveProcess(journalFilePath: string): boolean {
   try {
-    names = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { quarantined: 0, remaining: 0 };
-    }
-    return {
-      quarantined: 0,
-      remaining: -1,
-      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
-    };
-  }
-  const corrupt: string[] = [];
-  for (const name of names) {
-    try {
-      JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-    } catch {
-      // JSON 解析失败 = malformed；形态非法留给确认隔离路径
-      corrupt.push(name);
-    }
-  }
-  if (corrupt.length === 0) {
-    return { quarantined: 0, remaining: names.length };
-  }
-  const dest = path.join(invoicesDir, `.journal-quarantine-${Date.now()}`);
-  try {
-    fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
-    for (const name of corrupt) {
-      fs.renameSync(path.join(dir, name), path.join(dest, name));
-    }
-    return {
-      quarantined: corrupt.length,
-      remaining: names.length - corrupt.length,
-      dest: redactPath(dest),
-    };
-  } catch (err) {
-    return {
-      quarantined: 0,
-      remaining: names.length,
-      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
-    };
+    const raw = JSON.parse(fs.readFileSync(journalFilePath, 'utf8')) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+    const rec = raw as Record<string, unknown>;
+    const pid = typeof rec.pid === 'number' && Number.isInteger(rec.pid) ? rec.pid : NaN;
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    const processStartId = typeof rec.processStartId === 'string' ? rec.processStartId : undefined;
+    return isSameProcessAlive(pid, processStartId);
+  } catch {
+    return false;
   }
 }
 
@@ -2637,7 +2618,8 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
     assertArchiveTransactionsRecovered(key);
   } catch (err) {
     const reason = archiveRecoveryFailureReason(err);
-    // B6：形态/解析失败不得在此死锁——进入与 residual 相同的隔离恢复路径。
+    // B6：形态/解析失败不得在此死锁——进入与 residual 相同的*确认*隔离恢复路径。
+    // 禁止静默搬迁 journal；未确认前保持 fail-closed。
     if (isJournalShapeFailureReason(reason)) {
       shapeFailureOnEntry = true;
     } else {
@@ -2667,60 +2649,66 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
   }
 
   if (presence.kind === 'residual' || shapeFailureOnEntry) {
-    // 先隔离确认损坏 / 形态非法的条目，再重试恢复。
-    const q = quarantineCorruptArchiveJournals(key);
-    if (q.remaining < 0) {
-      const error = archiveRecoveryBlockedError(q.detail);
+    // B6a：绝不在未经用户确认时搬迁 journal。
+    // 形态失败 / 残留均只导向确认 affordance（原生对话框或设置页），保持 fail-closed。
+    const residual = presence.kind === 'residual'
+      ? presence
+      : inspectArchiveJournals(key);
+    if (residual.kind === 'unreadable') {
+      const error = archiveRecoveryBlockedError(`无法读取归档恢复记录：${residual.detail}`);
       archiveRecoveryFailures.set(key, error);
       return error;
     }
-    // 若隔离了全部损坏/非法条目且无剩余，再 assert 一次即可放行。
-    try {
-      assertArchiveTransactionsRecovered(key);
-    } catch (err) {
-      const reason = archiveRecoveryFailureReason(err);
-      // 形态失败或其它仍阻断：不要在此直接 return，继续 residual 弹窗路径。
-      if (!isJournalShapeFailureReason(reason)) {
-        // 非形态错误（live pid / csv truncate 等）：仍尝试 residual 检查与确认隔离
-        // （用户可显式隔离以解除阻断；不自动删除）。
+    if (residual.kind === 'absent') {
+      // 形态失败标记但目录已空：仍 fail closed（见上方 shapeFailureOnEntry && absent）。
+      if (shapeFailureOnEntry) {
+        const error = archiveRecoveryBlockedError(
+          '归档恢复记录形态异常，但未找到残留文件。请在「设置」中查看归档恢复状态后重试。',
+        );
+        archiveRecoveryFailures.set(key, error);
+        return error;
       }
-    }
-    const again = inspectArchiveJournals(key);
-    if (again.kind === 'unreadable') {
-      const error = archiveRecoveryBlockedError(`无法读取归档恢复记录：${again.detail}`);
-      archiveRecoveryFailures.set(key, error);
-      return error;
-    }
-    if (again.kind === 'absent') {
       archiveRecoveryFailures.delete(key);
       return undefined;
     }
-    if (again.kind === 'residual') {
-      // S7：主进程原生确认隔离。形态失败与「可解析未清理」都走这里。
-      // e2e 无 GUI 模式不弹窗，保持 archive_recovery_blocked 契约供测试断言。
-      const dialogTitle = shapeFailureOnEntry ? '归档恢复记录无效' : '归档恢复未完成';
-      const dialogMessage = shapeFailureOnEntry
-        ? `发现 ${again.names.length} 条无法自动处理的归档恢复记录`
-        : `发现 ${again.names.length} 条未解决的归档恢复记录`;
-      const dialogDetail = shapeFailureOnEntry
-        ? '恢复记录格式不正确或已损坏，无法自动回滚。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可稍后在「设置」中查看状态并确认隔离。'
-        : '自动恢复无法清理这些记录。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可在「设置」中查看归档恢复状态并确认隔离。';
-      if (offerArchiveJournalQuarantineDialog({
-        title: dialogTitle,
-        message: dialogMessage,
-        detail: dialogDetail,
-      })) {
+    // residual.kind === 'residual'
+    // S7：主进程原生确认隔离。形态失败与「可解析未清理」都走这里。
+    // e2e 无 GUI 模式不弹窗，保持 archive_recovery_blocked 契约供测试断言。
+    const dialogTitle = shapeFailureOnEntry ? '归档恢复记录无效' : '归档恢复未完成';
+    const dialogMessage = shapeFailureOnEntry
+      ? `发现 ${residual.names.length} 条无法自动处理的归档恢复记录`
+      : `发现 ${residual.names.length} 条未解决的归档恢复记录`;
+    const dialogDetail = shapeFailureOnEntry
+      ? '恢复记录格式不正确或已损坏，无法自动回滚。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可稍后在「设置」中查看状态并确认隔离。'
+      : '自动恢复无法清理这些记录。隔离后可继续写入；证据会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。也可在「设置」中查看归档恢复状态并确认隔离。';
+    if (offerArchiveJournalQuarantineDialog({
+      title: dialogTitle,
+      message: dialogMessage,
+      detail: dialogDetail,
+    })) {
+      // 确认隔离成功后再次检查：若仍有存活进程 journal 被跳过，不得放行。
+      const after = inspectArchiveJournals(key);
+      if (after.kind === 'absent') {
         archiveRecoveryFailures.delete(key);
         return undefined;
       }
-      // 仍有残留：阻断写入，指引人工隔离（不自动丢证据）。
+      if (after.kind === 'unreadable') {
+        const error = archiveRecoveryBlockedError(`无法读取归档恢复记录：${after.detail}`);
+        archiveRecoveryFailures.set(key, error);
+        return error;
+      }
       const error = archiveRecoveryBlockedError(
-        `仍有 ${again.names.length} 条未解决的归档恢复记录`
-        + (q.dest ? `；已隔离 ${q.quarantined} 条损坏记录到 ${q.dest}` : ''),
+        `仍有 ${after.names.length} 条未解决的归档恢复记录（可能属于正在运行的进程，已拒绝隔离）。`,
       );
       archiveRecoveryFailures.set(key, error);
       return error;
     }
+    // 用户未确认：阻断写入，指引人工隔离（绝不自动搬迁证据）。
+    const error = archiveRecoveryBlockedError(
+      `仍有 ${residual.names.length} 条未解决的归档恢复记录`,
+    );
+    archiveRecoveryFailures.set(key, error);
+    return error;
   }
   archiveRecoveryFailures.delete(key);
   return undefined;
@@ -2789,7 +2777,9 @@ function archiveJournalStatus(): Record<string, unknown> {
 
 /**
  * 用户确认后隔离残留 journal（损坏 + 可解析但无法自动清理的条目）。
- * confirm 必须为 true；隔离到 `.journal-quarantine-<ts>`，不删除证据。
+ * confirm 必须为 true；隔离到 `.journal-quarantine-<ts>`，**移动**不删除证据。
+ * B6b：逐条检查存活进程；仍被活进程持有的 journal 绝不搬迁，并如实回报。
+ * 调用方（IPC）须已持有操作租约；对话框路径在父操作租约内调用。
  */
 function quarantineArchiveJournalsWithConfirm(confirm: boolean): Record<string, unknown> {
   if (confirm !== true) {
@@ -2818,11 +2808,11 @@ function quarantineArchiveJournalsWithConfirm(confirm: boolean): Record<string, 
       quarantined: 0,
     };
   }
-  // 先尝试自动恢复，再隔离仍残留的条目
+  // 先尝试自动恢复，再隔离仍残留的条目（不得因 live_pid 抛错后无差别搬迁全部）。
   try {
     assertArchiveTransactionsRecovered(key);
   } catch {
-    // 继续隔离路径
+    // 继续隔离路径；下方按条检查存活
   }
   const again = inspectArchiveJournals(key);
   if (again.kind === 'unreadable') {
@@ -2843,21 +2833,57 @@ function quarantineArchiveJournalsWithConfirm(confirm: boolean): Record<string, 
     };
   }
   const dir = path.join(key, '.journal');
+  const movable: string[] = [];
+  const skippedLive: string[] = [];
+  for (const name of again.names) {
+    const journalPath = path.join(dir, name);
+    if (archiveJournalHeldByLiveProcess(journalPath)) {
+      skippedLive.push(name);
+    } else {
+      movable.push(name);
+    }
+  }
+  if (movable.length === 0) {
+    // 全部仍被活进程持有：拒绝搬迁，门禁保持阻断。
+    return {
+      ok: false,
+      code: 'archive_journal_live_process',
+      message: `有 ${skippedLive.length} 条归档恢复记录仍属于正在运行的进程，已拒绝隔离。请等待当前归档/处理任务结束后再试。`,
+      quarantined: 0,
+      skippedLive: skippedLive.length,
+    };
+  }
   const dest = path.join(key, `.journal-quarantine-${Date.now()}`);
   try {
     fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
     let moved = 0;
-    for (const name of again.names) {
+    for (const name of movable) {
       fs.renameSync(path.join(dir, name), path.join(dest, name));
       moved++;
     }
-    archiveRecoveryFailures.delete(key);
+    if (skippedLive.length === 0) {
+      archiveRecoveryFailures.delete(key);
+      return {
+        ok: true,
+        code: 'archive_journal_quarantined',
+        message: `已隔离 ${moved} 条归档恢复记录。写入门禁已解除；隔离副本仍保留在数据目录中，请勿删除直至确认发票清单无误。`,
+        quarantined: moved,
+        dest: redactPath(dest),
+      };
+    }
+    // 部分隔离：活进程条目仍在，不得解除门禁。
+    const error = archiveRecoveryBlockedError(
+      `已隔离 ${moved} 条记录，但仍有 ${skippedLive.length} 条属于正在运行的进程，写入仍阻断。`,
+    );
+    archiveRecoveryFailures.set(key, error);
     return {
-      ok: true,
-      code: 'archive_journal_quarantined',
-      message: `已隔离 ${moved} 条归档恢复记录。写入门禁已解除；隔离副本仍保留在数据目录中，请勿删除直至确认发票清单无误。`,
+      ok: false,
+      code: 'archive_journal_partial_live_process',
+      message: `已隔离 ${moved} 条归档恢复记录，但有 ${skippedLive.length} 条仍属于正在运行的进程，已跳过且写入门禁未解除。请等待当前任务结束后再试。`,
       quarantined: moved,
+      skippedLive: skippedLive.length,
       dest: redactPath(dest),
+      blocked: true,
     };
   } catch (err) {
     return {
@@ -4696,47 +4722,14 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。' };
   const row = findPendingRow(hash);
   const emlPath = pendingEmlPathForHash(hash);
-  // ELEC-06：与 open-path 相同 containment；禁止直接 shell.openPath 绕过校验。
-  if (emlPath && fs.existsSync(emlPath)) {
-    const opened = resolveOpenTarget(emlPath);
-    if (!opened.ok) {
-      // 尝试 dataDir 相对路径
-      const base = realDataDir();
-      const rel = base ? path.relative(base, emlPath) : emlPath;
-      const openedRel = resolveOpenTarget(rel);
-      if (!openedRel.ok) {
-        return { ok: false, code: openedRel.code, message: openedRel.message };
-      }
-      const error = await openPathForUser(openedRel.path);
-      if (!error) {
-        return {
-          ok: true,
-          opened: 'mail' as const,
-          code: 'pending_mail_opened',
-          message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
-        };
-      }
-      // openPath 失败：showItemInFolder 无返回值，不得谎称「已定位」。
-      const stillThere = fs.existsSync(openedRel.path);
-      if (stillThere) {
-        try {
-          showItemInFolderForUser(openedRel.path);
-        } catch {
-          // best-effort
-        }
-      }
-      return {
-        ok: false,
-        opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
-        code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
-        message: stillThere
-          ? '无法用默认应用打开原始邮件；已尝试在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
-          : '无法打开原始邮件，且文件似乎已不存在。',
-        error: sanitizeText(error, { maxLength: 200 }),
-      };
-    }
-    const error = await openPathForUser(opened.path);
-    if (!error) {
+
+  /**
+   * B2：所有桌面打开必须经 openOrRevealByPolicy（containment 之后的类型/目录/bundle 策略）。
+   * 禁止在此直接 shell.openPath / 任何原始路径打开助手。
+   */
+  const openResolvedMail = async (targetPath: string) => {
+    const result = await openOrRevealByPolicy(targetPath, { allowDirectoryOpen: false });
+    if (result.ok && !result.revealed) {
       return {
         ok: true,
         opened: 'mail' as const,
@@ -4744,10 +4737,29 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
         message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
       };
     }
-    const stillThere = fs.existsSync(opened.path);
+    if (result.ok && result.revealed) {
+      return {
+        ok: true,
+        opened: 'mail' as const,
+        code: 'pending_mail_revealed',
+        message: '已在文件夹中显示原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+      };
+    }
+    // 策略拒绝（可执行/bundle 等）：不得回退到无策略 open。
+    if (result.code === 'path_bundle_refused' || result.code === 'path_executable_refused' || result.code === 'path_not_openable') {
+      return {
+        ok: false,
+        opened: 'none' as const,
+        code: result.code,
+        message: result.message ?? result.error ?? '出于安全考虑，无法打开该目标。',
+        error: result.error,
+      };
+    }
+    // open 失败：best-effort reveal（showItemInFolder 不会启动 .app）
+    const stillThere = fs.existsSync(targetPath);
     if (stillThere) {
       try {
-        showItemInFolderForUser(opened.path);
+        showItemInFolderForUser(targetPath);
       } catch {
         // best-effort
       }
@@ -4759,11 +4771,27 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
       message: stillThere
         ? '无法用默认应用打开原始邮件；已尝试在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
         : '无法打开原始邮件，且文件似乎已不存在。',
-      error: sanitizeText(error, { maxLength: 200 }),
+      error: result.error ? sanitizeText(result.error, { maxLength: 200 }) : undefined,
     };
+  };
+
+  // ELEC-06：先 resolveOpenTarget containment，再 openOrRevealByPolicy。
+  if (emlPath && fs.existsSync(emlPath)) {
+    const opened = resolveOpenTarget(emlPath);
+    if (!opened.ok) {
+      // 尝试 dataDir 相对路径
+      const base = realDataDir();
+      const rel = base ? path.relative(base, emlPath) : emlPath;
+      const openedRel = resolveOpenTarget(rel);
+      if (!openedRel.ok) {
+        return { ok: false, code: openedRel.code, message: openedRel.message };
+      }
+      return openResolvedMail(openedRel.path);
+    }
+    return openResolvedMail(opened.path);
   }
-  // 回退：打开邮件缓存目录。与 open-path 共用 resolveOpenTarget（含用户配置的
-  // samples 根，不要求必须在 dataDir 内），禁止直接 shell.openPath 绕过。
+  // 回退：打开邮件缓存目录。与 open-path 的 samples 符号位置一致：
+  // resolveOpenTarget + openOrRevealByPolicy(allowDirectoryOpen)，bundle 会被拒绝。
   const fallback = resolveOpenTarget(samplesDirPath());
   if (!fallback.ok) {
     return {
@@ -4775,14 +4803,18 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
         : '没有找到这封邮件。',
     };
   }
-  const error = await openPathForUser(fallback.path);
-  if (error) {
+  const folderResult = await openOrRevealByPolicy(fallback.path, { allowDirectoryOpen: true });
+  if (!folderResult.ok) {
     return {
       ok: false,
       opened: 'none' as const,
-      code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
-      message: row ? '没有找到这封邮件的本地副本。' : '没有找到这封邮件。',
-      error: sanitizeText(error, { maxLength: 200 }),
+      code: folderResult.code === 'path_bundle_refused' || folderResult.code === 'path_executable_refused'
+        ? folderResult.code
+        : (row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found'),
+      message: folderResult.code === 'path_bundle_refused' || folderResult.code === 'path_executable_refused'
+        ? (folderResult.message ?? folderResult.error ?? '出于安全考虑，无法打开该位置。')
+        : (row ? '没有找到这封邮件的本地副本。' : '没有找到这封邮件。'),
+      ...(folderResult.error ? { error: sanitizeText(folderResult.error, { maxLength: 200 }) } : {}),
     };
   }
   // COPY-05：打开的是文件夹，不是原始邮件本身。
@@ -5200,10 +5232,22 @@ handleTrusted('mfh:archive-journal-status', () => archiveJournalStatus());
 /**
  * 用户确认后隔离无法自动清理的归档 journal。
  * payload: { confirm: true }
+ * B6b：与其它写路径一样占操作租约；活进程 journal 在实现内按条拒绝搬迁。
  */
 handleTrusted('mfh:archive-journal-quarantine', (_event, payload: unknown) => {
   const raw = asObject(payload);
-  return quarantineArchiveJournalsWithConfirm(raw.confirm === true);
+  // 确认参数先校验，避免无意义占锁。
+  if (raw.confirm !== true) {
+    return quarantineArchiveJournalsWithConfirm(false);
+  }
+  // ELEC-02：隔离会 rename journal，必须与 pipeline/ocr/organize 互斥。
+  const gate = acquireOperation('pipeline');
+  if (!gate.ok) return gate.response;
+  try {
+    return quarantineArchiveJournalsWithConfirm(true);
+  } finally {
+    gate.lease.release();
+  }
 });
 
 // ---------------------------------------------------------------------------
