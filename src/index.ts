@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { basename, dirname, join, resolve } from 'node:path';
 import { chromium, type Browser } from 'playwright';
 import { loadConfig, type Config } from './config.js';
 import { fetchMails, missingImapCredentials, parseMailWithGuards, type RawMail } from './mail/fetcher.js';
@@ -24,16 +25,21 @@ import {
   type DataOpKind,
 } from './util/dataDirLock.js';
 import { boundsAreOrdered, isValidDateBound } from './util/dateRange.js';
-import { msgIdHash } from './util/hash.js';
+import {
+  identityMatches,
+  isMailHash,
+  legacyMsgIdHash,
+  resolveMailIdentity,
+} from './util/hash.js';
 import { ArchiveRecoveryError, assertArchiveTransactionsRecovered } from './download/archiveJournal.js';
-import { processMail } from './pipeline.js';
+import { persistPendingDurable, processMail } from './pipeline.js';
 import type { ProcessMailResult } from './pipeline.js';
 import { organizeFromOcrResults } from './rename/rename.js';
 import { runOcrPending } from './ocr/runner.js';
 import { stopEfapiaoServices } from './ocr/efapiao.js';
 import { summarizeOcr } from './ocr/summary.js';
 import { pendingEmlExists, summarizePending } from './pending/summary.js';
-import { readCsvRows, csvCell, ensureCsvSchema, parseCsvLine } from './util/csv.js';
+import { readCsvRows, csvCell, ensureCsvSchema } from './util/csv.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -330,67 +336,80 @@ function requireValue(argv: string[], i: number, flag: string): string {
  * 本进程持有的数据目录租约。GUI 侧由 `OperationCoordinator` 持有同一把锁，
  * 两侧共用 `src/util/dataDirLock.ts` 描述的同一套锁文件协议，因此
  * 「GUI 挡住 CLI」「CLI 挡住 GUI」「两个 CLI 实例互斥」三条都成立。
+ *
+ * CORE-01：可能持有多把按路径排序的 per-target 锁（交集写目标仍互斥）。
  */
-let activeDataDirLease: DataDirLease | undefined;
+let activeDataDirLeases: DataDirLease[] = [];
 
 /**
- * CORE-01：锁身份必须覆盖实际写入目标，不能单靠 `--state` 父目录。
- * 两个 CLI 若用不同 state 路径但同一 invoices/csv，必须争同一把锁。
+ * 规范化写目标路径：realpath 消除符号链接/大小写别名；路径尚不存在时
+ * 回溯已存在祖先再拼回剩余段，保证同一物理目标得到同一字符串。
  */
-function commonPathPrefix(a: string, b: string): string {
-  const left = resolve(a).split(sep);
-  const right = resolve(b).split(sep);
-  const out: string[] = [];
-  for (let i = 0; i < Math.min(left.length, right.length); i++) {
-    if (left[i] !== right[i]) break;
-    out.push(left[i]!);
-  }
-  if (out.length === 0) return '';
-  // Windows 盘符根：`C:` → `C:\`
-  if (out.length === 1 && /^[A-Za-z]:$/.test(out[0]!)) return `${out[0]}${sep}`;
-  return out.join(sep) || sep;
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const rel = relative(resolve(parent), resolve(child));
-  return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !rel.startsWith('..'));
-}
-
-/**
- * 从 config 的实际写目标推导锁目录。优先 MFH_DATA_DIR；否则取 samples /
- * invoices / pending / output.csv 父目录的公共前缀；无法收敛时锁 invoices 本身。
- */
-function resolveLockDataDir(cfg: Config, hints: DataDirHints = {}): string {
-  const fromEnv = process.env.MFH_DATA_DIR;
-  if (fromEnv && fromEnv.length > 0) return resolve(fromEnv);
-
-  const writeDirs = [
-    resolve(cfg.paths.samples),
-    resolve(cfg.paths.invoices),
-    resolve(cfg.paths.pending),
-    dirname(resolve(cfg.output.csv)),
-  ];
-  let common = writeDirs[0]!;
-  for (const d of writeDirs.slice(1)) {
-    common = commonPathPrefix(common, d);
-    if (!common) break;
-  }
-  // 公共前缀退化为盘符/根时，改锁 invoices（主归档面），避免整盘一把锁。
-  const degenerate = !common || common === sep || /^[A-Za-z]:\\?$/.test(common);
-  const lockDir = degenerate ? resolve(cfg.paths.invoices) : common;
-
-  // 若调用方还传了 --state，且 state 落在另一棵树上：仍以写目标为准持锁，
-  // 并打一条警告——state 隔离不能换来双写台账。
-  if (hints.statePath && hints.statePath.length > 0) {
-    const stateDir = dirname(resolve(hints.statePath));
-    if (!isPathInside(lockDir, stateDir) && !isPathInside(stateDir, lockDir)) {
-      log.warn(
-        `state 路径（${stateDir}）不在业务数据锁目录（${lockDir}）内；`
-        + `锁按 invoices/samples/pending/csv 持有，避免两个 --state 并发写同一台账。`,
-      );
+function canonicalizePath(p: string): string {
+  const abs = resolve(p);
+  try {
+    return realpathSync(abs);
+  } catch {
+    // 目标尚不存在：规范化已存在的最长祖先。
+    let current = abs;
+    const missing: string[] = [];
+    for (;;) {
+      try {
+        const real = realpathSync(current);
+        return missing.length === 0 ? real : join(real, ...missing.reverse());
+      } catch {
+        const parent = dirname(current);
+        if (parent === current) return abs;
+        missing.push(basename(current));
+        current = parent;
+      }
     }
   }
-  return lockDir;
+}
+
+export interface LockTargetOverrides {
+  /** fetch --out 覆盖 samples 写目标。 */
+  samplesDir?: string;
+  /** 显式 state 路径（写入 state.json）。 */
+  statePath?: string;
+}
+
+/**
+ * CORE-01：收集本次命令的全部实际写目标（含 overrides），逐个 canonicalize。
+ * 返回按字典序排序的去重列表，供 per-target 加锁或稳定 hash。
+ */
+function collectWriteTargets(cfg: Config, overrides: LockTargetOverrides = {}): string[] {
+  const samples = overrides.samplesDir ?? cfg.paths.samples;
+  const statePath = overrides.statePath;
+  const targets = [
+    samples,
+    cfg.paths.invoices,
+    cfg.paths.pending,
+    dirname(resolve(cfg.output.csv)),
+    join(cfg.paths.invoices, 'ocr'),
+  ];
+  if (statePath && statePath.length > 0) {
+    targets.push(dirname(resolve(statePath)));
+  }
+  const canon = targets.map((t) => canonicalizePath(t));
+  return [...new Set(canon)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * 从完整规范写目标集合推导稳定锁根：
+ * - `MFH_DATA_DIR` 优先（与 GUI 对齐）
+ * - 否则对排序后的目标集做 sha256，在「字典序最小目标」下挂 `.mfh-cache/scope-<hash12>`
+ *   作为唯一锁目录——同一目标集永远同一把锁；目标集相交但不全等时，
+ *   仍通过下方 per-target 锁覆盖交集。
+ */
+function scopeLockDir(targets: string[]): string {
+  const fromEnv = process.env.MFH_DATA_DIR;
+  if (fromEnv && fromEnv.length > 0) return canonicalizePath(fromEnv);
+  if (targets.length === 0) return process.cwd();
+  const digest = createHash('sha256').update(targets.join('\0')).digest('hex').slice(0, 12);
+  // 锁落在字典序最小目标旁，避免依赖公共祖先（公共祖先会随「其它」路径漂移）。
+  const anchor = targets[0]!;
+  return join(anchor, '.mfh-cache', `scope-${digest}`);
 }
 
 /**
@@ -399,61 +418,128 @@ function resolveLockDataDir(cfg: Config, hints: DataDirHints = {}): string {
  *
  * 已加载 config 时必须传入 `cfg`，以便 CORE-01 按写目标持锁。
  */
-function acquireCommandLock(kind: DataOpKind, hints: DataDirHints, cfg?: Config): boolean {
-  const dataDir = cfg ? resolveLockDataDir(cfg, hints) : resolveDataDir(hints);
-  const result = acquireDataDirLock(dataDir, kind);
-  if (!result.ok) {
-    log.error(result.message);
-    return false;
+function acquireCommandLock(
+  kind: DataOpKind,
+  hints: DataDirHints,
+  cfg?: Config,
+  overrides: LockTargetOverrides = {},
+): boolean {
+  if (!cfg) {
+    const dataDir = resolveDataDir(hints);
+    const result = acquireDataDirLock(dataDir, kind);
+    if (!result.ok) {
+      log.error(result.message);
+      return false;
+    }
+    activeDataDirLeases = [result.lease];
+    if (result.lease.inherited) {
+      log.debug(`data dir lock inherited from parent process (${result.lease.lockPath})`);
+    }
+    return true;
   }
-  activeDataDirLease = result.lease;
-  if (result.lease.inherited) {
-    log.debug(`data dir lock inherited from parent process (${result.lease.lockPath})`);
+
+  const statePath = overrides.statePath ?? hints.statePath;
+  const targets = collectWriteTargets(cfg, {
+    samplesDir: overrides.samplesDir,
+    statePath,
+  });
+  // 稳定 scope 锁 + 每个写目标各一把，均按路径排序获取，避免死锁。
+  // scope 保证「相同完整目标集」互斥；per-target 保证「交集写路径」互斥。
+  const lockDirs = [...new Set([scopeLockDir(targets), ...targets])].sort((a, b) =>
+    (a < b ? -1 : a > b ? 1 : 0));
+
+  const acquired: DataDirLease[] = [];
+  for (const dir of lockDirs) {
+    const result = acquireDataDirLock(dir, kind);
+    if (!result.ok) {
+      for (const lease of acquired) {
+        try { lease.release(); } catch { /* best-effort */ }
+      }
+      log.error(result.message);
+      return false;
+    }
+    acquired.push(result.lease);
+    if (result.lease.inherited) {
+      log.debug(`data dir lock inherited from parent process (${result.lease.lockPath})`);
+    }
   }
+  activeDataDirLeases = acquired;
   return true;
 }
 
 /** 幂等释放；正常结束、异常与信号退出三条路径都会走到。 */
 function releaseDataDirLock(): void {
-  const lease = activeDataDirLease;
-  activeDataDirLease = undefined;
-  if (!lease) return;
-  try {
-    lease.release();
-  } catch {
-    // best-effort：释放失败会留下一把锁，下次由陈旧回收清理。
+  const leases = activeDataDirLeases;
+  activeDataDirLeases = [];
+  // 逆序释放。
+  for (let i = leases.length - 1; i >= 0; i--) {
+    try {
+      leases[i]!.release();
+    } catch {
+      // best-effort：释放失败会留下一把锁，下次由陈旧回收清理。
+    }
   }
 }
 
-const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
+const INDEX_HEADER = 'mailHash,messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
+const INDEX_LEGACY_HEADERS = [
+  'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount',
+];
 
 function ensureIndexCsv(path: string): void {
   // CORE-05：空文件也要写表头，不能只判断 exists。
+  // OCR-03：ensureCsvSchema 自身 fsync；mode 0600。
   ensureSecureDir(dirname(path));
-  ensureCsvSchema(path, INDEX_HEADER);
+  ensureCsvSchema(path, INDEX_HEADER, {
+    upgradeFrom: INDEX_LEGACY_HEADERS,
+    upgradeRow: (row) => {
+      if (row.mailHash && isMailHash(row.mailHash)) return row;
+      const mid = row.messageId ?? '';
+      const legacy = isMailHash(mid)
+        ? mid.toLowerCase()
+        : legacyMsgIdHash(
+          mid.length > 0 ? mid : undefined,
+          row.from ?? '',
+          row.date ?? '',
+          row.subject ?? '',
+        );
+      return { ...row, mailHash: legacy };
+    },
+  });
   secureFileMode(path);
 }
 
 /**
- * 一次性读出 INDEX.csv 已有的 messageId 集合。旧实现对每封邮件都重读整表，
- * 邮件量增大后同样呈二次成本（CODE-07）。
+ * 一次性读出 INDEX.csv 已有的 mailHash 集合（兼容旧表：无 mailHash 时退回 legacy）。
  */
-function readIndexMessageIds(path: string): Set<string> {
+function readIndexMailHashes(path: string): Set<string> {
   const out = new Set<string>();
-  if (!existsSync(path)) return out;
-  const text = readFileSync(path, 'utf8').replace(/^﻿/, '');
-  const lines = text.split(/\r?\n/);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const first = parseCsvLine(line)[0] ?? '';
-    if (first.length > 0) out.add(first);
+  for (const row of readCsvRows(path)) {
+    const h = (row.mailHash ?? '').trim();
+    if (h && isMailHash(h)) {
+      out.add(h.toLowerCase());
+      continue;
+    }
+    const mid = row.messageId ?? '';
+    if (isMailHash(mid)) {
+      out.add(mid.toLowerCase());
+      continue;
+    }
+    if (mid.length > 0 || (row.from ?? '') || (row.date ?? '') || (row.subject ?? '')) {
+      out.add(legacyMsgIdHash(
+        mid.length > 0 ? mid : undefined,
+        row.from ?? '',
+        row.date ?? '',
+        row.subject ?? '',
+      ));
+    }
   }
   return out;
 }
 
-function appendIndexRow(path: string, m: RawMail): void {
+function appendIndexRow(path: string, m: RawMail, mailHash: string): void {
   const row = [
+    csvCell(mailHash),
     csvCell(m.messageId ?? ''),
     csvCell(m.date.toISOString()),
     csvCell(m.from),
@@ -463,6 +549,7 @@ function appendIndexRow(path: string, m: RawMail): void {
     String(m.bodyLinkCount),
   ].join(',');
   appendFileSync(path, `${row}\n`, 'utf8');
+  secureFileMode(path);
 }
 
 function writeEmlAtomic(path: string, data: Buffer): void {
@@ -518,13 +605,18 @@ async function cmdFetch(argv: string[]): Promise<number> {
     log.error(`尚未配置邮箱：请先在设置中填写 ${missingCredentials.join('、')} 后再抓取邮件。`);
     return 2;
   }
-  // --dry-run 不写数据目录，因此不占锁。正式运行按写目标持锁（CORE-01）。
-  if (!opts.dryRun && !acquireCommandLock('fetch', { statePath: opts.statePath, configPath: opts.configPath }, cfg)) return 2;
-
   const outDir = resolve(opts.outDir ?? cfg.paths.samples);
+  // --dry-run 不写数据目录，因此不占锁。正式运行按写目标持锁（CORE-01，含 --out）。
+  if (!opts.dryRun && !acquireCommandLock(
+    'fetch',
+    { statePath: opts.statePath, configPath: opts.configPath },
+    cfg,
+    { samplesDir: outDir, statePath: opts.statePath },
+  )) return 2;
+
   const indexCsv = join(outDir, 'INDEX.csv');
   if (!opts.dryRun) ensureIndexCsv(indexCsv);
-  const indexedMessageIds = readIndexMessageIds(indexCsv);
+  const indexedMailHashes = readIndexMailHashes(indexCsv);
 
   const statePath = resolve(opts.statePath);
   let store: StateStore;
@@ -536,6 +628,8 @@ async function cmdFetch(argv: string[]): Promise<number> {
     } else {
       store = StateStore.open(statePath);
       await recoverQuarantinedState(store, cfg, outDir);
+      // CORE-03：台账 mailHash 回填；读侧用 aliases 覆盖旧 12 位，不写多别名。
+      backfillProcessedFromLedgers(store, cfg);
     }
   } catch (e) {
     log.error((e as Error).message);
@@ -550,46 +644,55 @@ async function cmdFetch(argv: string[]): Promise<number> {
   try {
     for await (const mail of fetchMails(cfg, log)) {
       seen++;
-      // CORE-03：把原始字节并入身份，避免重复/缺失 Message-Id 折叠不同邮件。
-      const hash = msgIdHash(
-        mail.messageId,
-        mail.from,
-        mail.date.toISOString(),
-        mail.subject,
-        mail.raw,
-      );
-      // APP-11：先解析预期的 .eml 目标路径，只有 state 命中**且**文件存在且非空
-      // 才跳过。否则换缓存目录 / 删除样本后，state 会谎称邮件已知，新目录永远为空。
-      const emlPath = join(outDir, monthDir(mail.date), `${hash}.eml`);
-      const cached = fileExistsNonEmpty(emlPath);
-      if (store.hasFetched(hash) && cached) {
+      // CORE-03：内容绑定 primary + legacy 别名；绝不单靠 Message-Id 跳过。
+      const identity = resolveMailIdentity({
+        messageId: mail.messageId,
+        from: mail.from,
+        date: mail.date.toISOString(),
+        subject: mail.subject,
+        raw: mail.raw,
+      });
+      const hash = identity.primary;
+      // APP-11：primary 与 legacy 文件名任一存在且非空即视为已缓存。
+      const month = monthDir(mail.date);
+      const primaryPath = join(outDir, month, `${hash}.eml`);
+      const legacyPath = identity.legacy !== hash
+        ? join(outDir, month, `${identity.legacy}.eml`)
+        : undefined;
+      const cachedPrimary = fileExistsNonEmpty(primaryPath);
+      const cachedLegacy = legacyPath ? fileExistsNonEmpty(legacyPath) : false;
+      const cached = cachedPrimary || cachedLegacy;
+      const emlPath = cachedPrimary ? primaryPath : (cachedLegacy && legacyPath ? legacyPath : primaryPath);
+
+      if (store.hasFetchedAny(identity.aliases) && cached) {
+        // 读侧任意别名命中即跳过；不回写多别名（非对称读写）。
         skippedKnown++;
         continue;
       }
 
       if (opts.dryRun) {
-        const why = store.hasFetched(hash) ? '(state 已记录但缓存缺失，需要重新抓取)' : '';
+        const why = store.hasFetchedAny(identity.aliases) ? '(state 已记录但缓存缺失，需要重新抓取)' : '';
         log.info(`[dry-run] would save ${emlPath} (subject="${mail.subject}")${why}`);
         continue;
       }
 
       if (!cached) {
-        if (store.hasFetched(hash)) {
+        if (store.hasFetchedAny(identity.aliases)) {
           repaired++;
-          log.info(`cached eml missing/empty, re-fetching ${hash}: ${emlPath}`);
+          log.info(`cached eml missing/empty, re-fetching ${hash}: ${primaryPath}`);
         }
-        writeEmlAtomic(emlPath, mail.raw);
+        writeEmlAtomic(primaryPath, mail.raw);
       } else {
         log.info(`eml exists, skip write: ${emlPath}`);
       }
 
-      // 缓存补写后同样修复 INDEX，避免出现「文件在但索引缺行」的空目录假象。
-      const midKey = mail.messageId ?? '';
-      if (midKey.length === 0 || !indexedMessageIds.has(midKey)) {
-        appendIndexRow(indexCsv, mail);
-        if (midKey.length > 0) indexedMessageIds.add(midKey);
+      // INDEX 按 mailHash 去重，禁止 Message-Id 单独充当「已索引」证据。
+      if (!identity.aliases.some((a) => indexedMailHashes.has(a))) {
+        appendIndexRow(indexCsv, mail, hash);
+        for (const a of identity.aliases) indexedMailHashes.add(a);
       }
 
+      // CORE-03 非对称写：只记 primary 一条。
       store.addFetched(hash);
       store.checkpoint();
       saved++;
@@ -684,35 +787,32 @@ async function collectEmlPaths(dir: string): Promise<string[]> {
   return out;
 }
 
-function archivedMessageIdSet(cfg: Config): Set<string> {
-  return new Set(readCsvRows(resolve(cfg.output.csv))
-    .map((row) => row.messageId ?? '')
-    .filter((messageId) => messageId.length > 0));
-}
-
 // ---------------------------------------------------------------------------
 // 状态重建（APP-18A）：只读缓存与台账，不删除任何业务数据
 // ---------------------------------------------------------------------------
 
 /**
- * msgIdHash 输出形态：历史 12 位，或 CORE-03 有 raw 时的 32 位（128 bit）。
- * 真实 Message-Id 必然含 `@`，不会与裸 hash 混淆。
+ * 台账行 -> 显式 mailHash（优先）或可安全推导的身份。
+ * CORE-03c：绝不能只靠展示列重算而丢掉已持久化的 32 位键。
  */
-const BARE_HASH_RE = /^[0-9a-f]{12}$|^[0-9a-f]{32}$/;
+function hashesFromLedgerRow(row: Record<string, string>): string[] {
+  const out = new Set<string>();
+  const explicit = (row.mailHash ?? row.hash ?? '').trim();
+  if (explicit && isMailHash(explicit)) out.add(explicit.toLowerCase());
 
-/**
- * 台账行 -> 运行期身份。pipeline 写 CSV 时 messageId 取 `mail.messageId || hash`，
- * 所以看起来就是裸 hash 的行直接采用，其余按同一个 msgIdHash 重算。
- */
-function hashFromLedgerRow(row: Record<string, string>): string {
   const messageId = row.messageId ?? '';
-  if (BARE_HASH_RE.test(messageId)) return messageId;
-  return msgIdHash(
-    messageId.length > 0 ? messageId : undefined,
-    row.from ?? '',
-    row.date ?? '',
-    row.subject ?? '',
-  );
+  if (isMailHash(messageId)) out.add(messageId.toLowerCase());
+
+  // 真实 Message-Id / 展示列 → legacy 12 位别名（与升级前 .eml 文件名对齐）。
+  if (!isMailHash(messageId)) {
+    out.add(legacyMsgIdHash(
+      messageId.length > 0 ? messageId : undefined,
+      row.from ?? '',
+      row.date ?? '',
+      row.subject ?? '',
+    ));
+  }
+  return [...out].filter((h) => h.length > 0);
 }
 
 /**
@@ -732,11 +832,18 @@ async function fetchedHashesFromCache(samplesDir: string): Promise<string[]> {
 /** 从 invoices.csv（已归档）与 pending.csv（已进入待确认）恢复 processed 身份。 */
 function processedHashesFromLedgers(cfg: Config): string[] {
   const out: string[] = [];
-  for (const row of readCsvRows(resolve(cfg.output.csv))) out.push(hashFromLedgerRow(row));
-  for (const row of readCsvRows(join(resolve(cfg.paths.pending), 'pending.csv'))) {
-    out.push(hashFromLedgerRow(row));
+  for (const row of readCsvRows(resolve(cfg.output.csv))) {
+    out.push(...hashesFromLedgerRow(row));
   }
-  return out.filter((h) => h.length > 0);
+  for (const row of readCsvRows(join(resolve(cfg.paths.pending), 'pending.csv'))) {
+    out.push(...hashesFromLedgerRow(row));
+  }
+  // OCR 队列的 hash 列即 mailHash。
+  const ocrPending = join(resolve(cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
+  for (const row of readCsvRows(ocrPending)) {
+    out.push(...hashesFromLedgerRow(row));
+  }
+  return [...new Set(out.filter((h) => h.length > 0))];
 }
 
 async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<State> {
@@ -744,6 +851,28 @@ async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<St
     processedHashes: processedHashesFromLedgers(cfg),
     fetchedHashes: await fetchedHashesFromCache(samplesDir),
   };
+}
+
+/**
+ * CORE-03：把台账（invoices.csv 等）里的显式 mailHash 幂等回填进 processed。
+ *
+ * 不再扫描 .eml 并把全部别名 bulk 写入 state——那会让集合基数 ≠ 邮件数。
+ * 升级兼容靠**读侧** `hasProcessedAny(aliases)` / `hasFetchedAny(aliases)`：
+ * 旧 state 只含 12 位时，aliases 仍含 legacy，命中即跳过，无需回写 32 位。
+ */
+function backfillProcessedFromLedgers(store: StateStore, cfg: Config): void {
+  let added = 0;
+  for (const h of processedHashesFromLedgers(cfg)) {
+    if (!store.hasProcessed(h)) {
+      store.addProcessed(h);
+      added++;
+    }
+  }
+  if (added > 0) {
+    store.checkpoint();
+    store.flush();
+    log.info(`mailHash 台账回填：新增 ${added} 条 processed 身份`);
+  }
 }
 
 /**
@@ -811,7 +940,12 @@ async function cmdRebuildState(argv: string[]): Promise<number> {
       log.info(`[dry-run] would rebuild ${statePath}: fetched=${new Set(rebuilt.fetchedHashes).size} processed=${new Set(rebuilt.processedHashes).size}`);
       return 0;
     }
-    if (!acquireCommandLock('pipeline', { statePath: parsed.statePath, configPath: parsed.configPath }, cfg)) return 2;
+    if (!acquireCommandLock(
+      'pipeline',
+      { statePath: parsed.statePath, configPath: parsed.configPath },
+      cfg,
+      { statePath: parsed.statePath },
+    )) return 2;
     const store = StateStore.open(statePath);
     if (store.quarantine) log.warn(store.quarantine.message);
     // 已处理身份只做并集：重建不应让历史上已处理的邮件重新进入处理队列。
@@ -851,7 +985,12 @@ async function cmdRun(argv: string[]): Promise<number> {
     return 2;
   }
 
-  if (!acquireCommandLock('pipeline', { statePath: opts.statePath, configPath: opts.configPath }, cfg)) return 2;
+  if (!acquireCommandLock(
+    'pipeline',
+    { statePath: opts.statePath, configPath: opts.configPath },
+    cfg,
+    { statePath: opts.statePath },
+  )) return 2;
 
   try {
     assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
@@ -865,11 +1004,12 @@ async function cmdRun(argv: string[]): Promise<number> {
   try {
     store = StateStore.open(statePath);
     await recoverQuarantinedState(store, cfg, resolve(cfg.paths.samples));
+    // CORE-03：台账 mailHash 回填；读侧 aliases 覆盖旧 12 位，不 bulk 写别名。
+    backfillProcessedFromLedgers(store, cfg);
   } catch (e) {
     log.error((e as Error).message);
     return 1;
   }
-  const archivedMessageIds = archivedMessageIdSet(cfg);
 
   let browserInstance: Browser | undefined;
   let browserPromise: Promise<Browser> | undefined;
@@ -901,8 +1041,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (fatalAbort.signal.aborted) return;
 
     const raw = readFileSync(emlPath);
-    // CORE-03：身份必须绑定原始字节，否则重复/缺失 Message-Id 会折叠不同邮件。
-    const contentHashId = msgIdHash(undefined, '', '', '', raw);
+    // CORE-03e：缓存文件名即 fetch 时身份；超大邮件解析失败时必须沿用它。
+    const fileHash = basename(emlPath, '.eml');
 
     let mail: Awaited<ReturnType<typeof parseMailWithGuards>>;
     try {
@@ -912,27 +1052,42 @@ async function cmdRun(argv: string[]): Promise<number> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.startsWith('mail_too_large_to_parse:')) {
-        const hash = contentHashId;
-        if (opts.onlyMail !== undefined && hash !== opts.onlyMail) return;
-        const reason = '邮件过大无法解析（原始超过 32MB），请在待确认中手动选择发票文件归档';
+        // CORE-03e：沿用 .eml 文件名上的 fetch 身份，禁止 content-only 重算分叉。
+        const identity = resolveMailIdentity({
+          from: '',
+          date: '',
+          subject: '',
+          fileHash: isMailHash(fileHash) ? fileHash : undefined,
+          raw: isMailHash(fileHash) ? undefined : raw,
+        });
+        const hash = identity.primary;
+        if (opts.onlyMail !== undefined && !identityMatches(opts.onlyMail, identity)) return;
+        const reason = 'mail_too_large_to_parse';
         log.warn(`mail too large, routing to pending: ${hash} (${msg})`);
         try {
-          const pendingDir = resolve(cfg.paths.pending);
-          ensureSecureDir(pendingDir);
-          const emlOut = join(pendingDir, `${hash}.eml`);
-          if (!fileExistsNonEmpty(emlOut)) {
-            writeEmlAtomic(emlOut, raw);
-          }
-          const pendingCsv = join(pendingDir, 'pending.csv');
-          ensureCsvSchema(pendingCsv, 'messageId,date,from,subject,reason');
-          // 无解析结果时用空 envelope + 稳定 reason；hash 已由内容决定。
-          const line = [hash, '', '', basename(emlPath), reason].map(csvCell).join(',') + '\n';
-          appendFileSync(pendingCsv, line, 'utf8');
+          // EXT-05 / item 10：走 durable pending 原语，保留 fetch 时身份。
+          persistPendingDurable({
+            cfg,
+            mailHash: hash,
+            reason: '邮件过大无法解析（原始超过 32MB），请在待确认中手动选择发票文件归档',
+            raw,
+            messageId: '',
+            date: '',
+            from: '',
+            subject: basename(emlPath),
+          });
           store.addProcessed(hash);
           store.checkpoint();
           processed++;
           log.info(`pending ${hash} reason=${reason}`);
         } catch (writeErr) {
+          // item 9：StateWriteError 必须传播到 abort，不能被吞掉。
+          if (writeErr instanceof StateWriteError) {
+            if (!fatalError) fatalError = writeErr;
+            fatalAbort.abort();
+            throw writeErr;
+          }
+          // item 10：pending 写失败 = 可重试失败，计 failed，最终非 0 退出。
           failed++;
           log.warn(
             `Failed to queue oversized mail ${emlPath} to pending: `
@@ -944,23 +1099,24 @@ async function cmdRun(argv: string[]): Promise<number> {
       throw err;
     }
 
-    const hash = msgIdHash(
-      mail.messageId ?? undefined,
-      mail.from?.text ?? '',
-      mail.date?.toISOString() ?? '',
-      mail.subject ?? '',
+    const identity = resolveMailIdentity({
+      messageId: mail.messageId ?? undefined,
+      from: mail.from?.text ?? '',
+      date: mail.date?.toISOString() ?? '',
+      subject: mail.subject ?? '',
       raw,
-    );
-    // Use the same identity the writer commits to invoices.csv (messageId,
-    // falling back to hash) so the archived-message self-heal recognizes emails
-    // that have no Message-Id header on restart.
+      fileHash: isMailHash(fileHash) ? fileHash : undefined,
+    });
+    const hash = identity.primary;
+    // invoices 行的 messageId 展示字段：真实 Message-Id，否则 primary hash。
     const messageId = mail.messageId || hash;
 
-    if (opts.onlyMail !== undefined && hash !== opts.onlyMail) {
+    // CORE-03f：--only-mail 接受 12/32 位，匹配任意别名。
+    if (opts.onlyMail !== undefined && !identityMatches(opts.onlyMail, identity)) {
       return;
     }
 
-    if (inFlight.has(hash)) {
+    if (identity.aliases.some((a) => inFlight.has(a)) || inFlight.has(hash)) {
       skipped++;
       return;
     }
@@ -977,14 +1133,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       return;
     }
 
-    if (opts.onlyMail === undefined && !opts.force && messageId && archivedMessageIds.has(messageId)) {
-      store.addProcessed(hash);
-      store.checkpoint();
-      skipped++;
-      return;
-    }
-
-    if (opts.onlyMail === undefined && !opts.force && store.hasProcessed(hash)) {
+    // CORE-03a：禁止仅凭 Message-Id 判定已处理；读侧用别名匹配旧 12 位 state。
+    if (opts.onlyMail === undefined && !opts.force && store.hasProcessedAny(identity.aliases)) {
       skipped++;
       return;
     }
@@ -992,11 +1142,13 @@ async function cmdRun(argv: string[]): Promise<number> {
     if (fatalAbort.signal.aborted) return;
 
     inFlight.add(hash);
+    for (const a of identity.aliases) inFlight.add(a);
     try {
+      const already = store.hasProcessedAny(identity.aliases);
       const taskState: State = {
-        // 只带当前邮件的判定所需：pipeline 仅用 `includes(hash)` 判断是否已处理，
-        // 全量复制会让每封邮件都付出 O(n) 复制成本（CODE-07）。
-        processedHashes: store.hasProcessed(hash) ? [hash] : [],
+        // 只带当前邮件的判定所需：pipeline 用 aliases∩state 判断是否已处理。
+        // 已处理时 seed primary 即可（primary ∈ aliases）；写回也只记 primary。
+        processedHashes: already ? [hash] : [],
         // pipeline 不读取 fetchedHashes，无需复制整份集合。
         fetchedHashes: [],
       };
@@ -1009,21 +1161,25 @@ async function cmdRun(argv: string[]): Promise<number> {
         force: opts.force || opts.onlyMail !== undefined,
         raw,
         signal: fatalAbort.signal,
+        fileHash: isMailHash(fileHash) ? fileHash : undefined,
       });
       if (result.reason === 'aborted') return;
       for (const item of taskState.processedHashes) store.addProcessed(item);
-      if (result.outcome === 'pdf' && result.messageId.length > 0) {
-        archivedMessageIds.add(result.messageId);
-      }
       // 部分成功（APP-01）同样携带 reason，且已写入待确认记录；网络失败统计必须
       // 一并覆盖，否则「一封邮件里一半链接超时」不会出现在 run 末尾的汇总里。
       if ((result.outcome === 'manual' || result.partial === true) && result.reason?.includes('network_retry_failed')) {
         networkFailures.push(result);
       }
       if (result.partial === true) partial++;
-      processed++;
+      // pending 写失败不得算作成功处理。
+      if (result.reason?.includes('pending_write_failed')) {
+        failed++;
+      } else {
+        processed++;
+      }
     } finally {
       inFlight.delete(hash);
+      for (const a of identity.aliases) inFlight.delete(a);
     }
   };
 
@@ -1084,7 +1240,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
     }
   }
-  return 0;
+  // item 10：存在可重试失败时非 0 退出。
+  return failed > 0 ? 1 : 0;
 }
 
 interface PendingOpts {

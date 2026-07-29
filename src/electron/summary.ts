@@ -244,8 +244,9 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
       seller: row.seller || '未识别销售方',
       invoiceNo: row.invoiceNo || '',
       amount: money(row.amount || ''),
-      // COPY-17：transport 是识别调用方式，不是发票来源；普通列表不展示 http/cli。
-      source: '归档文件',
+      // COPY-17：OCR transport（http/cli）不是发票来源；在有真实邮件/站点溯源前
+      // 普通列表不展示来源字段（空串），避免「归档文件」这种误导性占位。
+      source: '',
       filename: row.filename || '',
       filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
       // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
@@ -265,7 +266,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
       seller: row.documentType === 'supporting' ? '支撑材料' : '待识别',
       invoiceNo: '',
       amount: '',
-      source: '归档文件',
+      source: '',
       filename,
       filePath: resolveIn(cwd, path.join(cfg.paths.invoices, filename)),
       status: row.status === 'ignored' ? LIBRARY_STATUS.ARCHIVED : LIBRARY_STATUS.PENDING,
@@ -282,7 +283,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
         seller: '待识别',
         invoiceNo: '',
         amount: '',
-        source: '归档文件',
+        source: '',
         filename: entry.name,
         filePath: resolveIn(cwd, path.join(cfg.paths.invoices, entry.name)),
         status: LIBRARY_STATUS.PENDING,

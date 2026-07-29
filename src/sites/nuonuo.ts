@@ -1,7 +1,7 @@
 import type { Ctx } from '../extract/types.js';
 import type { SiteHandleResult, SiteHandler } from './types.js';
 import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
-import { assertDocumentResponse } from './common.js';
+import { assertDocumentResponse, redactUrlForLog } from './common.js';
 
 function isNuonuoHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
@@ -136,10 +136,12 @@ const nuonuoHandler: SiteHandler = {
   async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const entryUrl = invoiceEntryUrl(url);
     // EXT-03：匹配但无法解析入口时返回 issue，禁止空数组静默成功。
+    // CORE-08：pending 原因只写类型码；原始 signed URL 仅脱敏后进 debug 日志。
     if (!entryUrl) {
+      ctx.log.debug(`nuonuo entry_url_unresolved for ${redactUrlForLog(url)}`);
       return {
         artifacts: [],
-        issues: [{ reason: `entry_url_unresolved:${url}` }],
+        issues: [{ reason: 'entry_url_unresolved' }],
       };
     }
 
@@ -148,9 +150,10 @@ const nuonuoHandler: SiteHandler = {
       : await resolveShortLink(entryUrl, ctx);
     const paramList = extractParamList(resolvedUrl);
     if (!paramList) {
+      ctx.log.debug(`nuonuo paramList_missing for ${redactUrlForLog(resolvedUrl)}`);
       return {
         artifacts: [],
-        issues: [{ reason: `paramList_missing:${resolvedUrl}` }],
+        issues: [{ reason: 'paramList_missing' }],
       };
     }
 

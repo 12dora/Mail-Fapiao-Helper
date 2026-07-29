@@ -10,7 +10,9 @@ import { looksLikeOfdItineraryText } from './classify.js';
  * 于是发票 A 的 PDF 会让不相关的发票 B 的 OFD 无提示消失（APP-02）。
  * 两条流程现在共用本模块。
  *
- * EXT-01：通用文件名（invoice / 发票 / download 等）不能当作强身份；
+ * EXT-01 / EXT-07：删除 OFD 只允许在可验证的强身份（20 位发票号）一致时发生。
+ * - 两个不同的 20 位发票号必须强制判定为 distinct，禁止回落到文件名匹配；
+ * - 文件名（即便非通用 stem）单独匹配也绝不能触发删除——全局跨来源去重同样依赖此契约。
  * 没有可验证发票号时，宁可同时保留 PDF 与 OFD，交给 OCR 后再合并。
  */
 
@@ -28,6 +30,7 @@ function basename(value: string): string {
 /**
  * 规范化后不能单独触发 PDF/OFD 去重的通用 stem。
  * 这些名字在邮件附件/下载链接里极常见，不同发票经常撞名。
+ * （保留导出供诊断/测试；删除路径不再依赖文件名身份。）
  */
 const GENERIC_DOCUMENT_STEMS = new Set([
   'invoice',
@@ -89,19 +92,27 @@ export function looksLikeOfdItinerary(artifact: PdfArtifact): boolean {
 }
 
 /**
- * 只有可验证的发票号相同，或“非通用”规范化文件名相同，才认为是同一份文档。
- * 通用名撞名时返回 false，避免误删另一张票的 OFD（EXT-01）。
+ * 仅当两边都有可验证的 20 位发票号且完全相同时才认为是同一份文档。
+ *
+ * 契约（EXT-01，对 pipeline 全局跨来源去重同样成立）：
+ * 1. 两边都有发票号且相等 → same
+ * 2. 两边都有发票号且不等 → 强制 distinct（禁止回落到文件名）
+ * 3. 任一方缺发票号 → 不算 same（文件名匹配不足以授权删除）
+ *
+ * 签名保持兼容：pipeline / 提取器继续调用 `sameDocument(a, b)`。
  */
 export function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
   const aNo = invoiceNoKey(a);
   const bNo = invoiceNoKey(b);
-  if (aNo && bNo && aNo === bNo) return true;
 
-  const aKey = normalizedDocumentKey(a);
-  const bKey = normalizedDocumentKey(b);
-  if (!aKey || !bKey || aKey !== bKey) return false;
-  if (isGenericDocumentStem(aKey)) return false;
-  return true;
+  if (aNo && bNo) {
+    // 强身份存在时以发票号为准；不等则强制 distinct。
+    return aNo === bNo;
+  }
+
+  // 缺少可验证发票号时，文件名（含非通用 stem）一律不足以判定 identical。
+  // 删除 OFD 必须有 matching strong invoice identity。
+  return false;
 }
 
 /**
@@ -128,8 +139,8 @@ export function preferPdfOverDuplicateOfd(
       continue;
     }
 
-    // 仅当同一封邮件里的某个 PDF 可证明是同一份文档（20 位发票号一致，或非通用
-    // 规范化文件名一致）才丢弃 OFD。只因为“存在某个不相关的 PDF”就丢弃会丢真发票。
+    // 仅当同一邮件里的某个 PDF 可证明是同一份文档（两边 20 位发票号一致）才丢弃 OFD。
+    // 文件名撞名、或只有一方有发票号，都必须保留双方，交给 OCR 后再合并。
     const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf));
     if (duplicatePdf) {
       log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source}`);

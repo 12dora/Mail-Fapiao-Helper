@@ -16,12 +16,52 @@ const ZIP_RATIO_FLOOR_BYTES = 1024 * 1024;
 
 export { decodeHtmlEntities };
 
+/**
+ * 日志 / pending 边界的 URL 脱敏（CORE-08）。
+ * 镜像 `pipeline.redactUrlForLog`：只保留 scheme + host + 截断 path，去掉 query/hash
+ * （签名 URL 的 token 即凭据，不得写入日志或持久化原因串）。
+ */
+export function redactUrlForLog(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 96 ? `${u.pathname.slice(0, 96)}…` : u.pathname;
+    return `${u.protocol}//${u.host}${path}`;
+  } catch {
+    return '[invalid-url]';
+  }
+}
+
+/** 错误串 / 原因串里若夹带 URL，脱敏后再写入日志或 pending。 */
+export function redactErrorDetail(detail: string): string {
+  return detail.replace(/https?:\/\/[^\s"'<>\\]+/gi, (m) => redactUrlForLog(m));
+}
+
 /** decodeURIComponent that never throws on malformed percent-encoding. */
 export function tryDecodeURIComponent(value: string): string {
   try {
     return decodeURIComponent(value);
   } catch {
     return value;
+  }
+}
+
+/**
+ * OFD 包必须在根目录（或仅前导 ./）带 `OFD.xml`（GB/T 33190）。
+ * 没有它的 PK 容器是普通 ZIP，应解出内部发票条目，而不是整包当 OFD 归档。
+ */
+export function looksLikeOfdPackage(data: Buffer): boolean {
+  if (data.length < 4 || data.subarray(0, 2).toString('latin1') !== 'PK') return false;
+  try {
+    const zip = new AdmZip(data);
+    const declared = zip.getEntryCount();
+    if (declared > MAX_ZIP_TOTAL_ENTRIES) return false;
+    return zip.getEntries().some((entry) => {
+      if (entry.isDirectory) return false;
+      const leaf = entry.entryName.replace(/^[./\\]+/, '').toLowerCase();
+      return leaf === 'ofd.xml';
+    });
+  } catch {
+    return false;
   }
 }
 

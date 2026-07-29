@@ -228,11 +228,15 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     };
   }
 
-  // ELEC-10：读取前先 stat，限制累计字节，避免同步读入超大批次冻结主进程。
+  // ELEC-10 / MUST-REWORK 12：同一 fd 上 open → fstat → read，杜绝 stat-then-read TOCTOU
+  // 绕过大小上限。累计字节在 fstat 时强制。
+  const staged: StagedSource[] = [];
   let totalBytes = 0;
   for (const source of input.sources) {
+    let fd: number | undefined;
     try {
-      const stat = fs.statSync(source);
+      fd = fs.openSync(source, 'r');
+      const stat = fs.fstatSync(fd);
       if (!stat.isFile()) {
         return { ...empty, code: 'manual_archive_not_a_file', message: `「${path.basename(source)}」不是一个文件。` };
       }
@@ -254,6 +258,41 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
           message: '所选文件合计超过 256 MB，请减少文件数量后分批归档。',
         };
       }
+      // 按 fstat 的 size 读，若中途被截断/扩展则按实际读到的字节重新校验上限。
+      const data = Buffer.allocUnsafe(stat.size);
+      let offset = 0;
+      while (offset < data.length) {
+        const n = fs.readSync(fd, data, offset, data.length - offset, offset);
+        if (n <= 0) break;
+        offset += n;
+      }
+      const buffer = offset === data.length ? data : data.subarray(0, offset);
+      if (buffer.length === 0) {
+        return { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` };
+      }
+      if (buffer.length > MAX_FILE_BYTES) {
+        return {
+          ...empty,
+          code: 'manual_archive_too_large',
+          message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
+        };
+      }
+      const detected = detectFormat(buffer);
+      if (detected.kind === 'archive') {
+        return {
+          ...empty,
+          code: 'manual_archive_is_zip',
+          message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
+        };
+      }
+      if (detected.kind !== 'ok') {
+        return {
+          ...empty,
+          code: 'manual_archive_unsupported_format',
+          message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
+        };
+      }
+      staged.push({ source, data: buffer, format: detected.format, ext: detected.ext, hash: contentHash(buffer) });
     } catch (err) {
       return {
         ...empty,
@@ -261,39 +300,15 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
         message: `无法读取「${path.basename(source)}」，请确认文件仍然存在且可访问。`,
         detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       };
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // ignore
+        }
+      }
     }
-  }
-
-  // 1) 读入并校验格式；任何一个不合格都不落盘。
-  const staged: StagedSource[] = [];
-  for (const source of input.sources) {
-    let data: Buffer;
-    try {
-      data = fs.readFileSync(source);
-    } catch (err) {
-      return {
-        ...empty,
-        code: 'manual_archive_unreadable',
-        message: `无法读取「${path.basename(source)}」，请确认文件仍然存在且可访问。`,
-        detail: sanitizeText(err instanceof Error ? err.message : String(err)),
-      };
-    }
-    const detected = detectFormat(data);
-    if (detected.kind === 'archive') {
-      return {
-        ...empty,
-        code: 'manual_archive_is_zip',
-        message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
-      };
-    }
-    if (detected.kind !== 'ok') {
-      return {
-        ...empty,
-        code: 'manual_archive_unsupported_format',
-        message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
-      };
-    }
-    staged.push({ source, data, format: detected.format, ext: detected.ext, hash: contentHash(data) });
   }
 
   // ELEC-09：同批按 contentHash 去重，只保留第一个来源。
@@ -360,11 +375,16 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   }
 
   // 3) 规划最终文件名与 CSV 追加基线；先写 staging 再开 journal（OCR-05）。
-  let plannedNames: string[];
-  let ledgerBase: number;
-  let queueBase: number;
-  let stagingDir: string;
+  // NEW-DEFECT 2：staging 一旦创建，后续任意失败（含 journal 创建）都必须清理，
+  // 不能把 journal 创建放在 cleanup-protected 块之外。
+  let plannedNames: string[] = [];
+  let ledgerBase = 0;
+  let queueBase = 0;
+  let stagingDir = '';
   const stagingPaths: string[] = [];
+  let tx: ReturnType<typeof beginArchiveTransaction> | undefined;
+  const archived: ManualArchiveFile[] = [];
+
   try {
     fs.mkdirSync(input.invoicesDir, { recursive: true });
     plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
@@ -386,34 +406,23 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       fs.writeFileSync(stagingPath, item.data, { mode: 0o600 });
       stagingPaths.push(stagingPath);
     }
-  } catch (err) {
-    return {
-      ...empty,
-      code: 'manual_archive_prepare_failed',
-      message: '无法准备归档目录，请确认归档位置可写后重试。',
-      detail: sanitizeText(err instanceof Error ? err.message : String(err)),
-      duplicates,
-    };
-  }
 
-  const plannedPaths = plannedNames.map((name) => path.join(input.invoicesDir, name));
-  const plannedFiles = plannedPaths.map((finalPath, i) => ({
-    path: finalPath,
-    stagingPath: stagingPaths[i],
-    stagingDir,
-  }));
+    const plannedPaths = plannedNames.map((name) => path.join(input.invoicesDir, name));
+    const plannedFiles = plannedPaths.map((finalPath, i) => ({
+      path: finalPath,
+      stagingPath: stagingPaths[i],
+      stagingDir,
+    }));
 
-  const tx = beginArchiveTransaction(input.invoicesDir, {
-    files: plannedFiles,
-    csv: [
-      { path: input.ledgerCsv, baseLength: ledgerBase },
-      { path: input.ocrPendingCsv, baseLength: queueBase },
-    ],
-    stagingDir,
-  });
+    tx = beginArchiveTransaction(input.invoicesDir, {
+      files: plannedFiles,
+      csv: [
+        { path: input.ledgerCsv, baseLength: ledgerBase },
+        { path: input.ocrPendingCsv, baseLength: queueBase },
+      ],
+      stagingDir,
+    });
 
-  const archived: ManualArchiveFile[] = [];
-  try {
     // 4) hard-link 安装：与自动归档一致，prepared 阶段可用 inode 证明归属（OCR-05）。
     for (let i = 0; i < toInstall.length; i++) {
       const item = toInstall[i];
@@ -451,19 +460,25 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     if (ledgerLines.length > 0) fs.appendFileSync(input.ledgerCsv, ledgerLines.join(''), 'utf8');
     tx.markStage('ledger-committed');
     tx.commit();
+    tx = undefined;
   } catch (err) {
-    try {
-      tx.rollback();
-    } catch (rollbackErr) {
-      if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
-      throw err;
-    } finally {
-      removeDirQuietly(stagingDir);
+    if (tx) {
+      try {
+        tx.rollback();
+      } catch (rollbackErr) {
+        if (stagingDir) removeDirQuietly(stagingDir);
+        if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
+        throw err;
+      }
     }
+    if (stagingDir) removeDirQuietly(stagingDir);
+    const prepared = Boolean(tx) || stagingPaths.length > 0;
     return {
       ...empty,
-      code: 'manual_archive_failed',
-      message: '归档没有完成，已撤销本次改动，请检查归档目录是否可写后重试。',
+      code: prepared ? 'manual_archive_failed' : 'manual_archive_prepare_failed',
+      message: prepared
+        ? '归档没有完成，已撤销本次改动，请检查归档目录是否可写后重试。'
+        : '无法准备归档目录，请确认归档位置可写后重试。',
       detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       duplicates,
     };

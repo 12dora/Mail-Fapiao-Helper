@@ -5,7 +5,7 @@ import type { Browser } from 'playwright';
 import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import type { State } from './state.js';
-import { contentHash as contentHashOf, msgIdHash as msgIdHashFn } from './util/hash.js';
+import { contentHash as contentHashOf, msgIdHash as msgIdHashFn, resolveMailIdentity } from './util/hash.js';
 import { csvCell, ensureCsvSchema, parseCsv } from './util/csv.js';
 import { testFaultEnabled } from './util/testFaults.js';
 import {
@@ -17,7 +17,8 @@ import {
 } from './util/net.js';
 import { extractors } from './extract/registry.js';
 import type { Ctx, ExtractIssue, PdfArtifact } from './extract/types.js';
-import { preferPdfOverDuplicateOfd } from './extract/documentIdentity.js';
+import { invoiceNoKey, looksLikeOfdItinerary } from './extract/documentIdentity.js';
+import { looksLikeOfdItineraryText, supportingReason } from './extract/classify.js';
 import { ensureSecureDir, stageDocuments } from './download/downloader.js';
 import {
   ArchiveRecoveryError,
@@ -25,7 +26,6 @@ import {
   beginArchiveTransaction,
   assertArchiveTransactionsRecovered,
 } from './download/archiveJournal.js';
-import { supportingReason } from './extract/classify.js';
 
 interface CsvRow {
   messageId: string;
@@ -35,14 +35,22 @@ interface CsvRow {
   filename: string;
   source: string;
   contentHash: string;
+  mailHash: string;
 }
 
-interface OcrPendingRow extends CsvRow {
+interface OcrPendingRow {
   hash: string;
+  messageId: string;
+  date: string;
+  from: string;
+  subject: string;
+  filename: string;
+  source: string;
   format: string;
   documentType: string;
-  reason: string;
   status: string;
+  reason: string;
+  contentHash: string;
 }
 
 type FetchInput = Parameters<typeof fetch>[0];
@@ -65,11 +73,27 @@ export interface ProcessMailOpts {
   raw?: Buffer;
   /** CORE-02：致命错误后协调者 abort，归档临界区入口必须再检查一次。 */
   signal?: AbortSignal;
+  /**
+   * 缓存 `.eml` 文件名上的身份（无扩展名）。用于与 fetch 时身份对齐，
+   * 并在 state 中登记 legacy/primary 别名。
+   */
+  fileHash?: string;
 }
 
-const INVOICE_CSV_HEADER = 'messageId,date,from,subject,filename,source,contentHash\n';
+// CORE-03：mailHash 显式列；升级路径见 ensure*Schema 的 upgradeFrom。
+const INVOICE_CSV_HEADER = 'messageId,date,from,subject,filename,source,contentHash,mailHash\n';
+const INVOICE_CSV_LEGACY = [
+  'messageId,date,from,subject,filename,source,contentHash',
+  'messageId,date,from,subject,filename,source',
+];
 const OCR_CSV_HEADER = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash\n';
-const PENDING_CSV_HEADER = 'messageId,date,from,subject,reason\n';
+const OCR_CSV_LEGACY = [
+  'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+];
+const PENDING_CSV_HEADER = 'mailHash,messageId,date,from,subject,reason\n';
+const PENDING_CSV_LEGACY = [
+  'messageId,date,from,subject,reason',
+];
 
 function ensureDir(dir: string): void {
   ensureSecureDir(dir);
@@ -117,11 +141,11 @@ function withCsvRetry(fn: () => void): void {
  * 一次性追加整批 CSV 行。CORE-05：先 ensure schema（空文件写表头）；
  * OCR-03 / WIRE-02：走 durable 原语（write + fsync，新建时 fsync 父目录）。
  */
-function appendCsvBlock(csvPath: string, header: string, lines: string[]): void {
+function appendCsvBlock(csvPath: string, header: string, lines: string[], legacy?: string[]): void {
   if (lines.length === 0) return;
   ensureDir(path.dirname(csvPath));
   withCsvRetry(() => {
-    ensureCsvSchema(csvPath, header);
+    ensureCsvSchema(csvPath, header, legacy ? { upgradeFrom: legacy } : undefined);
     appendCsvBlockDurable(csvPath, header, lines);
   });
   hardenFile(csvPath);
@@ -175,6 +199,7 @@ function invoiceCsvLine(row: CsvRow): string {
     row.filename,
     row.source,
     row.contentHash,
+    row.mailHash,
   ].map(csvCell).join(',') + '\n';
 }
 
@@ -212,12 +237,18 @@ function readArchivedIndex(csvPath: string, messageId: string): ArchivedIndex {
   if (!fs.existsSync(csvPath)) return { byKey, byContentHash };
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(content);
+  const header = records[0] ?? [];
+  const idx = (name: string): number => header.indexOf(name);
+  const iMessageId = idx('messageId') >= 0 ? idx('messageId') : 0;
+  const iFilename = idx('filename') >= 0 ? idx('filename') : 4;
+  const iSource = idx('source') >= 0 ? idx('source') : 5;
+  const iHash = idx('contentHash') >= 0 ? idx('contentHash') : 6;
   for (let i = 1; i < records.length; i++) {
     const cols = records[i] ?? [];
-    const rowMessageId = cols[0] ?? '';
-    const filename = cols[4] ?? '';
-    const source = cols[5] ?? '';
-    const hash = cols[6] ?? '';
+    const rowMessageId = cols[iMessageId] ?? '';
+    const filename = cols[iFilename] ?? '';
+    const source = cols[iSource] ?? '';
+    const hash = cols[iHash] ?? '';
     if (hash.length === 0) continue;
     byKey.set(`${rowMessageId}\0${source}\0${hash}`, filename);
     if (rowMessageId === messageId && filename.length > 0) {
@@ -233,9 +264,12 @@ function readOcrKeys(csvPath: string): Set<string> {
   if (!fs.existsSync(csvPath)) return keys;
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(content);
+  const header = records[0] ?? [];
+  const iHash = header.indexOf('hash') >= 0 ? header.indexOf('hash') : 0;
+  const iContent = header.indexOf('contentHash') >= 0 ? header.indexOf('contentHash') : 11;
   for (let i = 1; i < records.length; i++) {
     const cols = records[i] ?? [];
-    keys.add(`${cols[0] ?? ''}\0${cols[11] ?? ''}`);
+    keys.add(`${cols[iHash] ?? ''}\0${cols[iContent] ?? ''}`);
   }
   return keys;
 }
@@ -257,36 +291,86 @@ function writePendingEml(raw: Buffer | undefined, pendingDir: string, hash: stri
   hardenFile(emlPath);
 }
 
-function pendingCsvContainsRow(csvPath: string, row: { messageId: string; date: string; from: string; subject: string }): boolean {
-  if (!fs.existsSync(csvPath)) return false;
+/** CORE-03d：按显式 mailHash 去重，禁止仅靠 messageId/date/from/subject 折叠。 */
+function pendingCsvContainsHash(csvPath: string, mailHash: string): boolean {
+  if (!fs.existsSync(csvPath) || mailHash.length === 0) return false;
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(content);
+  if (records.length === 0) return false;
+  const header = records[0] ?? [];
+  const iMailHash = header.indexOf('mailHash');
   for (let i = 1; i < records.length; i++) {
     const cols = records[i] ?? [];
-    if (
-      (cols[0] ?? '') === row.messageId
-      && (cols[1] ?? '') === row.date
-      && (cols[2] ?? '') === row.from
-      && (cols[3] ?? '') === row.subject
-    ) {
-      return true;
+    if (iMailHash >= 0) {
+      if ((cols[iMailHash] ?? '') === mailHash) return true;
+    } else {
+      // 旧 schema：无 mailHash 列时无法可靠去重；不按 envelope 折叠。
     }
   }
   return false;
 }
 
-function appendPendingCsv(csvPath: string, mail: ParsedMail, reason: string): void {
-  const messageId = mail.messageId || '';
-  const date = mail.date?.toISOString() || '';
-  // Store from/subject verbatim (csvCell quotes embedded newlines, parseCsv reads
-  // them back): stripping \r\n here would make the hash that pending/summary
-  // recomputes from these columns diverge from the pipeline's <hash>.eml filename
-  // for Message-Id-less mails, so their cached .eml could never be found again.
-  const from = mail.from?.text || '';
-  const subject = mail.subject || '';
-  if (pendingCsvContainsRow(csvPath, { messageId, date, from, subject })) return;
-  const line = [messageId, date, from, subject, reason].map(csvCell).join(',') + '\n';
-  appendCsvBlock(csvPath, PENDING_CSV_HEADER, [line]);
+function fillPendingMailHash(row: Record<string, string>): Record<string, string> {
+  if (row.mailHash && row.mailHash.length > 0) return row;
+  const messageId = row.messageId ?? '';
+  // 超大邮件路径曾把 hash 写在 messageId 位。
+  if (/^[0-9a-f]{12}$|^[0-9a-f]{32}$/i.test(messageId)) {
+    return { ...row, mailHash: messageId.toLowerCase() };
+  }
+  const legacy = msgIdHashFn(
+    messageId.length > 0 ? messageId : undefined,
+    row.from ?? '',
+    row.date ?? '',
+    row.subject ?? '',
+  );
+  return { ...row, mailHash: legacy };
+}
+
+function fillInvoiceMailHash(row: Record<string, string>): Record<string, string> {
+  if (row.mailHash && row.mailHash.length > 0) return row;
+  const messageId = row.messageId ?? '';
+  if (/^[0-9a-f]{12}$|^[0-9a-f]{32}$/i.test(messageId)) {
+    return { ...row, mailHash: messageId.toLowerCase(), contentHash: row.contentHash ?? '' };
+  }
+  const legacy = msgIdHashFn(
+    messageId.length > 0 ? messageId : undefined,
+    row.from ?? '',
+    row.date ?? '',
+    row.subject ?? '',
+  );
+  return { ...row, mailHash: legacy, contentHash: row.contentHash ?? '' };
+}
+
+function ensurePendingSchema(csvPath: string): void {
+  ensureCsvSchema(csvPath, PENDING_CSV_HEADER, {
+    upgradeFrom: PENDING_CSV_LEGACY,
+    upgradeRow: fillPendingMailHash,
+  });
+}
+
+function ensureInvoiceSchema(csvPath: string): void {
+  ensureCsvSchema(csvPath, INVOICE_CSV_HEADER, {
+    upgradeFrom: INVOICE_CSV_LEGACY,
+    upgradeRow: fillInvoiceMailHash,
+  });
+}
+
+function ensureOcrSchema(csvPath: string): void {
+  ensureCsvSchema(csvPath, OCR_CSV_HEADER, {
+    upgradeFrom: OCR_CSV_LEGACY,
+    upgradeRow: (row) => ({ ...row, contentHash: row.contentHash ?? '' }),
+  });
+}
+
+function appendPendingCsv(
+  csvPath: string,
+  mail: { messageId: string; date: string; from: string; subject: string },
+  reason: string,
+  mailHash: string,
+): void {
+  if (pendingCsvContainsHash(csvPath, mailHash)) return;
+  const line = [mailHash, mail.messageId, mail.date, mail.from, mail.subject, reason].map(csvCell).join(',') + '\n';
+  appendCsvBlock(csvPath, PENDING_CSV_HEADER, [line], PENDING_CSV_LEGACY);
 }
 
 /**
@@ -303,13 +387,60 @@ function persistPending(
   raw: Buffer | undefined,
 ): boolean {
   try {
+    const safeReason = sanitizePendingReason(reason);
     writePendingEml(raw, cfg.paths.pending, hash);
-    appendPendingCsv(path.join(cfg.paths.pending, 'pending.csv'), mail, reason);
+    appendPendingCsv(
+      path.join(cfg.paths.pending, 'pending.csv'),
+      {
+        messageId: mail.messageId || '',
+        date: mail.date?.toISOString() || '',
+        from: mail.from?.text || '',
+        subject: mail.subject || '',
+      },
+      safeReason,
+      hash,
+    );
     return true;
   } catch (err) {
     log.warn(`Pending write failed for ${hash}: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+}
+
+/**
+ * EXT-05 / CORE-03e：超大邮件等无法 parse 的路径写入 durable pending。
+ * 必须使用 fetch 时的 fileHash 身份，不得重算成另一把键。
+ * 失败抛错，由调用方计 failed 并返回非 0。
+ */
+export function persistPendingDurable(opts: {
+  cfg: Config;
+  mailHash: string;
+  reason: string;
+  raw: Buffer;
+  messageId?: string;
+  date?: string;
+  from?: string;
+  subject?: string;
+}): void {
+  const { cfg, mailHash, raw } = opts;
+  const safeReason = sanitizePendingReason(opts.reason);
+  writePendingEml(raw, cfg.paths.pending, mailHash);
+  const csvPath = path.join(cfg.paths.pending, 'pending.csv');
+  ensureDir(path.dirname(csvPath));
+  withCsvRetry(() => {
+    ensurePendingSchema(csvPath);
+    if (pendingCsvContainsHash(csvPath, mailHash)) return;
+    const line = [
+      mailHash,
+      opts.messageId ?? '',
+      opts.date ?? '',
+      opts.from ?? '',
+      opts.subject ?? '',
+      safeReason,
+    ].map(csvCell).join(',') + '\n';
+    appendCsvBlockDurable(csvPath, PENDING_CSV_HEADER, [line]);
+  });
+  hardenFile(csvPath);
 }
 
 function commitProcessed(state: State, hash: string, saveState: () => void): void {
@@ -346,8 +477,8 @@ function requestMethod(init: FetchInit): string {
 export function redactUrlForLog(url: string): string {
   try {
     const u = new URL(url);
-    const path = u.pathname.length > 96 ? `${u.pathname.slice(0, 96)}…` : u.pathname;
-    return `${u.protocol}//${u.host}${path}`;
+    const pathPart = u.pathname.length > 96 ? `${u.pathname.slice(0, 96)}…` : u.pathname;
+    return `${u.protocol}//${u.host}${pathPart}`;
   } catch {
     return '[invalid-url]';
   }
@@ -359,13 +490,42 @@ function redactErrorDetail(detail: string): string {
 }
 
 /**
+ * CORE-08：pending / 日志只保留稳定枚举与脱敏片段，不落签名 URL。
+ */
+function sanitizePendingReason(reason: string): string {
+  const redacted = redactErrorDetail(reason);
+  // 压缩过长诊断，避免台账膨胀；保留类型前缀。
+  return redacted.length > 400 ? `${redacted.slice(0, 400)}…` : redacted;
+}
+
+/**
  * 这些失败与网络抖动无关，重试只会放大伤害/浪费时间，必须原样上抛：
  * - `blocked_url:` SSRF 判定（调用方按前缀区分并降级）
  * - `response_too_large:` 超出 50MB 硬上限
+ *
+ * CORE-08：上抛前仍须脱敏——signed URL 可能出现在 redirect / invalid 细节里。
  */
 function isNonRetryableFetchError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.startsWith('blocked_url:') || msg.startsWith('response_too_large:');
+}
+
+/** 把非重试传输错误收成带类型码、已脱敏的 Error。 */
+function typedNonRetryableError(err: unknown): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith('blocked_url:')) {
+    // 保留 blocked_url:<kind> 前缀；其余 URL/细节脱敏。
+    const rest = msg.slice('blocked_url:'.length);
+    const kind = rest.split(':')[0] ?? 'unknown';
+    const detail = rest.includes(':') ? rest.slice(kind.length + 1) : '';
+    const safeDetail = detail ? redactErrorDetail(detail) : '';
+    return new Error(safeDetail ? `blocked_url:${kind}:${safeDetail}` : `blocked_url:${kind}`);
+  }
+  if (msg.startsWith('response_too_large:')) {
+    // 仅尺寸信息，无直接保留。
+    return new Error(msg);
+  }
+  return new Error(redactErrorDetail(msg));
 }
 
 /** 导出仅用于测试：构造带 per-attempt deadline 与重试的 fetch。 */
@@ -407,7 +567,8 @@ export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
           throw err;
         }
         if (isNonRetryableFetchError(err)) {
-          throw err;
+          // CORE-08：非重试错误也不得携带签名 URL。
+          throw typedNonRetryableError(err);
         }
         // 超时属于可重试失败：header 阶段由 fetch 抛出，body 阶段由
         // readCappedBuffer 转成 `response_timeout:*`，两者现在走同一条重试路径。
@@ -451,6 +612,51 @@ interface AggregatedExtraction {
 }
 
 /**
+ * EXT-07：跨来源 PDF/OFD 去重只认**强发票身份**（20 位发票号一致）。
+ * 文件名相等绝不足以删除另一来源的 OFD——附件 PDF 与站点 OFD 常撞名。
+ */
+function preferPdfOverStrongIdentityOfd(
+  artifacts: PdfArtifact[],
+  log: Logger,
+  subject?: string,
+): PdfArtifact[] {
+  const pdfs = artifacts.filter((item) => (item.format ?? 'pdf') === 'pdf');
+  const subjectIsItinerary = looksLikeOfdItineraryText(subject);
+  const out: PdfArtifact[] = [];
+
+  for (const artifact of artifacts) {
+    if (artifact.format !== 'ofd') {
+      out.push(artifact);
+      continue;
+    }
+
+    if (subjectIsItinerary || looksLikeOfdItinerary(artifact)) {
+      out.push({ ...artifact, documentType: artifact.documentType ?? 'itinerary', requiresOcr: true });
+      continue;
+    }
+
+    const ofdNo = invoiceNoKey(artifact);
+    if (!ofdNo) {
+      // 无强身份：保留 OFD，交给 OCR 后再合并。
+      out.push({ ...artifact, documentType: artifact.documentType ?? 'invoice', requiresOcr: true });
+      continue;
+    }
+    const duplicatePdf = pdfs.find((pdf) => {
+      const pdfNo = invoiceNoKey(pdf);
+      return Boolean(pdfNo && pdfNo === ofdNo);
+    });
+    if (duplicatePdf) {
+      log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source} (invoiceNo=${ofdNo})`);
+      continue;
+    }
+
+    out.push({ ...artifact, documentType: artifact.documentType ?? 'invoice', requiresOcr: true });
+  }
+
+  return out;
+}
+
+/**
  * 依次运行所有 `canHandle()` 为真的提取器并汇总结果。
  *
  * 此前 pipeline 在第一个匹配处 `break`，附件、普通直链和站点链接无法共同贡献
@@ -481,8 +687,10 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
       result = await extractor.extract(mail, ctx);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      ctx.log.warn(`Extractor ${extractor.name} failed for ${hash}: ${msg}`);
-      issues.push({ reason: `${extractor.name}:${msg}`, retryable: msg.includes('network_retry_failed') });
+      // CORE-08：提取器异常可能夹带签名 URL。
+      const safeMsg = redactErrorDetail(msg);
+      ctx.log.warn(`Extractor ${extractor.name} failed for ${hash}: ${safeMsg}`);
+      issues.push({ reason: `${extractor.name}:${safeMsg}`, retryable: safeMsg.includes('network_retry_failed') });
       continue;
     }
 
@@ -495,11 +703,17 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
       continue;
     }
     if (result.kind === 'manual') {
-      issues.push({ reason: result.reason, retryable: result.reason.includes('network_retry_failed') });
+      const safeReason = sanitizePendingReason(result.reason);
+      issues.push({ reason: safeReason, retryable: safeReason.includes('network_retry_failed') });
       continue;
     }
 
-    for (const issue of result.issues ?? []) issues.push(issue);
+    for (const issue of result.issues ?? []) {
+      issues.push({
+        ...issue,
+        reason: sanitizePendingReason(issue.reason),
+      });
+    }
     for (const artifact of result.pdfs) {
       const key = contentHashOf(artifact.data);
       if (seen.has(key)) continue;
@@ -508,9 +722,8 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
     }
   }
 
-  // EXT-07：跨来源（附件 / 直链 / 第三方）统一做 PDF-over-duplicate-OFD 去重。
-  // 各提取器内部的局部去重看不到另一路产物，聚合后才能避免双重归档。
-  const deduped = preferPdfOverDuplicateOfd(artifacts, ctx.log, mail.subject ?? undefined);
+  // EXT-07：跨来源仅按强发票号去重；文件名撞名不得删票。
+  const deduped = preferPdfOverStrongIdentityOfd(artifacts, ctx.log, mail.subject ?? undefined);
   return { artifacts: deduped, issues, matched, notApplicable, skipped };
 }
 
@@ -534,20 +747,23 @@ export async function processMail(
   browser: () => Promise<Browser>,
   opts: ProcessMailOpts = {},
 ): Promise<ProcessMailResult> {
-  const hash = msgIdHashFn(
-    mail.messageId ?? undefined,
-    mail.from?.text ?? '',
-    mail.date?.toISOString() ?? '',
-    mail.subject ?? '',
-    opts.raw,
-  );
+  const identity = resolveMailIdentity({
+    messageId: mail.messageId ?? undefined,
+    from: mail.from?.text ?? '',
+    date: mail.date?.toISOString() ?? '',
+    subject: mail.subject ?? '',
+    raw: opts.raw,
+    fileHash: opts.fileHash,
+  });
+  const hash = identity.primary;
   const messageId = mail.messageId || hash;
   const date = mail.date?.toISOString() || '';
   const from = mail.from?.text || '';
   const subject = mail.subject || '';
   const baseResult = { hash, messageId, date, from, subject };
 
-  if (!opts.force && state.processedHashes.includes(hash)) {
+  // 别名任一命中即跳过（升级后 32 位 primary 对齐旧 12 位 state）。
+  if (!opts.force && identity.aliases.some((a) => state.processedHashes.includes(a))) {
     log.debug(`Skip already processed ${hash}`);
     return { ...baseResult, outcome: 'skip', reason: 'already_processed' };
   }
@@ -566,10 +782,12 @@ export async function processMail(
   /** 统一的降级出口：pending 写不进去就不提交 processed state。 */
   const degradeToManual = (reason: string): ProcessMailResult => {
     if (!persistPending(mail, cfg, hash, reason, log, opts.raw)) {
-      return { ...baseResult, outcome: 'manual', reason: `${reason}|pending_write_failed` };
+      return { ...baseResult, outcome: 'manual', reason: `${sanitizePendingReason(reason)}|pending_write_failed` };
     }
-    commitProcessed(state, hash, saveState);
-    return { ...baseResult, outcome: 'manual', reason };
+    // CORE-03 非对称写：只记 primary；读侧用 aliases 覆盖旧 12 位 state。
+    commitProcessed(state, hash, () => {});
+    saveState();
+    return { ...baseResult, outcome: 'manual', reason: sanitizePendingReason(reason) };
   };
 
   const extraction = await runExtractors(mail, ctx, hash);
@@ -594,7 +812,8 @@ export async function processMail(
     }
     // 所有匹配的提取器都明确返回 skip：这封邮件无需归档。
     log.info(`Skipped ${hash}`);
-    commitProcessed(state, hash, saveState);
+    commitProcessed(state, hash, () => {});
+    saveState();
     return { ...baseResult, outcome: 'skip' };
   }
 
@@ -615,9 +834,9 @@ export async function processMail(
     assertWritableDir(cfg.paths.invoices);
     assertAppendableCsv(csvPath);
     assertAppendableCsv(ocrPendingCsvPath);
-    // CORE-05：空/缺失 CSV 先落好表头，避免首行数据被当成 header。
-    ensureCsvSchema(csvPath, INVOICE_CSV_HEADER);
-    ensureCsvSchema(ocrPendingCsvPath, OCR_CSV_HEADER);
+    // CORE-05：空/缺失 CSV 先落好表头；旧 schema 幂等升级补 mailHash。
+    ensureInvoiceSchema(csvPath);
+    ensureOcrSchema(ocrPendingCsvPath);
 
     // 2) 幂等协调：`(messageId, source, contentHash)` 已归档且文件仍在则直接复用。
     const archived = readArchivedIndex(csvPath, messageId);
@@ -679,6 +898,7 @@ export async function processMail(
           filename: dl.filename,
           source: pdf.source,
           contentHash: dl.contentHash,
+          mailHash: hash,
         }));
       }
 
@@ -706,11 +926,11 @@ export async function processMail(
 
     try {
       // OCR-03 / WIRE-02：fsync 之后才能标 ledger-committed。
-      appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines);
+      appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines, INVOICE_CSV_LEGACY);
       if (testFaultEnabled('MFH_TEST_FAIL_AFTER_INVOICE_CSV')) {
         throw new Error('forced_after_invoice_csv_failure');
       }
-      appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines);
+      appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines, OCR_CSV_LEGACY);
       // 两个 CSV 均已 durable：即使这之后被强杀，恢复也只会清理 journal 本身。
       tx.markStage('ledger-committed');
     } catch (err) {
@@ -725,7 +945,7 @@ export async function processMail(
     // Iron rule: a filesystem / CSV-lock failure during download or archive must
     // NOT abort the run. Degrade this email to the manual queue and continue.
     const errMsg = err instanceof Error ? err.message : String(err);
-    const reason = `download_or_csv:${errMsg}`;
+    const reason = `download_or_csv:${redactErrorDetail(errMsg)}`;
     log.warn(`Archive failed for ${hash}: ${reason}`);
     return degradeToManual(reason);
   }
@@ -735,16 +955,20 @@ export async function processMail(
     const reason = `partial_extract:${summarizeIssues(extraction.issues)}`;
     log.warn(`Partial extraction for ${hash}: ${reason}`);
     const durable = persistPending(mail, cfg, hash, reason, log, opts.raw);
-    if (durable) commitProcessed(state, hash, saveState);
+    if (durable) {
+      commitProcessed(state, hash, () => {});
+      saveState();
+    }
     return {
       ...baseResult,
       outcome: 'pdf',
       partial: true,
-      reason: durable ? reason : `${reason}|pending_write_failed`,
+      reason: durable ? sanitizePendingReason(reason) : `${sanitizePendingReason(reason)}|pending_write_failed`,
     };
   }
 
   log.info(`Processed ${hash}: ${downloadsCount} documents`);
-  commitProcessed(state, hash, saveState);
+  commitProcessed(state, hash, () => {});
+  saveState();
   return { ...baseResult, outcome: 'pdf' };
 }
