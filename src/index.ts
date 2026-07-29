@@ -1109,19 +1109,36 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   };
 
-  /** 结构化终态：任何退出路径（含 fatal / only-mail 未命中）都必须发出（BLOCKING 3/4）。 */
-  const emitRunTerminal = (): void => {
-    const processed = archived + pending;
-    emitTerminal(
-      `Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`
-      + `, archived=${archived}, pending=${pending}`,
-    );
+  /**
+   * 结构化终态 outcome 字段（与 Electron live parser 约定）：
+   * - `ok`             — 无失败、非 only-mail 未命中
+   * - `failed`         — 有 failed 计数（具体 partial/failed 仍看计数）
+   * - `mail_not_found` — `--only-mail` 目标未命中（零计数也不得渲染为成功）
+   * - `fatal`          — StateWrite/ArchiveRecovery 等整次中止
+   *
+   * 行格式（字段顺序固定，outcome 始终在末尾）：
+   * `Run complete: processed=N, partial=N, skipped=N, failed=N, archived=N, pending=N, outcome=<token>`
+   */
+  type RunTerminalOutcome = 'ok' | 'failed' | 'mail_not_found' | 'fatal';
+
+  /**
+   * 结构化终态：任何退出路径（含 fatal / only-mail 未命中）都必须发出（BLOCKING 3/4）。
+   * NEW DEFECT 2：网络失败诊断必须先于终态行，终态行是消费者看到的最后权威记录。
+   * C6：outcome= 写在同一锚定行上，零计数失败不会被读成 success 闪绿。
+   */
+  const emitRunTerminal = (outcome: RunTerminalOutcome): void => {
+    // 先发 per-message 诊断，再发终态——有界 ring 不得把终态挤出窗口。
     if (networkFailures.length > 0) {
       log.warn(`Network retry failures moved to pending: ${networkFailures.length}`);
       for (const failure of networkFailures) {
         log.warn(`pending ${failure.hash} date=${failure.date} from="${failure.from}" subject="${failure.subject}" reason=${failure.reason}`);
       }
     }
+    const processed = archived + pending;
+    emitTerminal(
+      `Run complete: processed=${processed}, partial=${partial}, skipped=${skipped}, failed=${failed}`
+      + `, archived=${archived}, pending=${pending}, outcome=${outcome}`,
+    );
   };
 
   const handleEml = async (emlPath: string): Promise<void> => {
@@ -1259,6 +1276,10 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   };
 
+  // 终态 outcome / 退出码在 try·catch·finally 之后统一发出（NEW DEFECT 2：终态最后）。
+  let exitCode = 0;
+  let terminalOutcome: RunTerminalOutcome = 'ok';
+
   try {
     // CORE-09：--only-mail 优先使用 pending/<hash>.eml（待确认页重试的权威副本）。
     let emlPaths: string[];
@@ -1315,12 +1336,14 @@ async function cmdRun(argv: string[]): Promise<number> {
       log.error(`state flush failed: ${(flushErr as Error).message}`);
     }
     log.error(`run aborted: ${(e as Error).message}`);
-    // BLOCKING 4：fatal 路径也必须发出终态计数，否则 Electron 丢失已归档事实。
+    // CORE-09：fatal 路径上若 only-mail 也未命中，优先标 mail_not_found。
     if (opts.onlyMail !== undefined && !onlyMailMatched) {
       log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
+      terminalOutcome = 'mail_not_found';
+    } else {
+      terminalOutcome = 'fatal';
     }
-    emitRunTerminal();
-    return 1;
+    exitCode = 1;
   } finally {
     if (browserInstance) {
       // Never let a browser-teardown failure turn a successful run into exit 1;
@@ -1331,18 +1354,26 @@ async function cmdRun(argv: string[]): Promise<number> {
     }
   }
 
-  // CORE-09 / BLOCKING 3：先断言 --only-mail 命中，再发终态——避免渲染器短暂显示成功零计数。
-  if (opts.onlyMail !== undefined && !onlyMailMatched) {
-    log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
-    emitRunTerminal();
-    return 1;
+  // 成功路径：在 finally（含 browser close 日志）之后再判定 only-mail / failed。
+  // catch 已写入 exitCode=1 时不得覆盖 fatal/mail_not_found outcome。
+  if (exitCode === 0) {
+    // CORE-09 / C6：--only-mail 未命中 → 非 0，且终态行带 outcome=mail_not_found。
+    if (opts.onlyMail !== undefined && !onlyMailMatched) {
+      log.error(`mail_not_found: only-mail target not found (${opts.onlyMail})`);
+      terminalOutcome = 'mail_not_found';
+      exitCode = 1;
+    } else {
+      // CORE-04：任一 retryable/fatal failure → 非 0；全成功才是 0。
+      terminalOutcome = failed > 0 ? 'failed' : 'ok';
+      exitCode = failed > 0 ? 1 : 0;
+    }
   }
 
-  // 结构化终态事件：行首 \x1eMFH_TERMINAL\x1e 锚定（见 log.emitTerminal）。
+  // BLOCKING 3/4 + NEW DEFECT 2：权威终态必须是命令的最后输出
+  //（网络诊断 → 本行；覆盖 success / partial / failed / fatal / mail_not_found）。
   // processed = archived + pending（不含 skipped/failed）。
-  emitRunTerminal();
-  // CORE-04：任一 retryable/fatal failure → 非 0；全成功才是 0。
-  return failed > 0 ? 1 : 0;
+  emitRunTerminal(terminalOutcome);
+  return exitCode;
 }
 
 interface PendingOpts {

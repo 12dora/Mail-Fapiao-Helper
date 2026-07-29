@@ -2,8 +2,9 @@
  * 测试专用 mock OCR provider。
  *
  * 本模块**不得**打进打包产物（见 package.json `build.files` 排除项）。
- * 生产/打包运行时 `registry.ts` 不会加载本文件；仅 `gui-design/tests` 通过
- * `MFH_ALLOW_MOCK_OCR=1` 在未打包的 `dist/` 上启用。
+ * `registry.ts` 仅在 `isDevelopmentRuntime()`（源码检出 + 非 production buildInfo）
+ * 且 `MFH_ALLOW_MOCK_OCR=1` 时加载；asar / release CLI / 纯 dist 出货树均 fail closed。
+ * 合法消费者只有 `gui-design/tests/*.mjs`。
  */
 import fs from 'node:fs';
 import os from 'node:os';

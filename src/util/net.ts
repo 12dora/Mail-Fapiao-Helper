@@ -67,21 +67,58 @@ export function bufferedResponse(original: Response, data: Buffer): Response {
   return rebuilt;
 }
 
-function ipv4Blocked(ip: string): boolean {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b] = parts as [number, number, number, number];
-  if (a === 0) return true;                     // 0.0.0.0/8 "this host"
-  if (a === 10) return true;                    // 10/8 private
-  if (a === 127) return true;                   // loopback
-  if (a === 169 && b === 254) return true;      // link-local
-  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12 private
-  if (a === 192 && b === 0) return true;        // 192.0.0.0/24 IETF Protocol Assignments
-  if (a === 192 && b === 168) return true;      // 192.168/16 private
-  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmarking
-  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
-  if (a >= 224) return true;                     // multicast + reserved
-  return false;
+/**
+ * IANA IPv4 special-purpose prefixes that are **not** global unicast destinations.
+ * Default-deny: anything matching these (or unparseable) is non-global.
+ * Sources: IANA IPv4 Special-Purpose Address Registry.
+ */
+const IPV4_NON_GLOBAL: ReadonlyArray<readonly [network: number, prefixLen: number]> = [
+  [0x00000000, 8],  // 0.0.0.0/8 this network
+  [0x0a000000, 8],  // 10.0.0.0/8 private
+  [0x64400000, 10], // 100.64.0.0/10 shared address space (CGNAT)
+  [0x7f000000, 8],  // 127.0.0.0/8 loopback
+  [0xa9fe0000, 16], // 169.254.0.0/16 link-local
+  [0xac100000, 12], // 172.16.0.0/12 private
+  [0xc0000000, 24], // 192.0.0.0/24 IETF protocol assignments
+  [0xc0000200, 24], // 192.0.2.0/24 TEST-NET-1 documentation
+  [0xc0586300, 24], // 192.88.99.0/24 6to4 relay anycast (deprecated)
+  [0xc0a80000, 16], // 192.168.0.0/16 private
+  [0xc6120000, 15], // 198.18.0.0/15 benchmarking
+  [0xc6336400, 24], // 198.51.100.0/24 TEST-NET-2 documentation
+  [0xcb007100, 24], // 203.0.113.0/24 TEST-NET-3 documentation
+  [0xe0000000, 4],  // 224.0.0.0/4 multicast
+  [0xf0000000, 4],  // 240.0.0.0/4 reserved
+];
+
+/** Parse dotted-quad to uint32; null if not a strict IPv4 literal. */
+function parseIpv4Uint(ip: string): number | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const o = Number(part);
+    if (!Number.isInteger(o) || o < 0 || o > 255) return null;
+    n = ((n << 8) | o) >>> 0;
+  }
+  return n >>> 0;
+}
+
+function ipv4InPrefix(ip: number, network: number, prefixLen: number): boolean {
+  if (prefixLen <= 0) return true;
+  if (prefixLen >= 32) return ip === (network >>> 0);
+  const mask = (0xffffffff << (32 - prefixLen)) >>> 0;
+  return ((ip & mask) >>> 0) === ((network & mask) >>> 0);
+}
+
+/** True if IPv4 is globally routable unicast (not any IANA special-purpose range). */
+function isGlobalIpv4(ip: string): boolean {
+  const n = parseIpv4Uint(ip);
+  if (n === null) return false;
+  for (const [network, prefixLen] of IPV4_NON_GLOBAL) {
+    if (ipv4InPrefix(n, network, prefixLen)) return false;
+  }
+  return true;
 }
 
 /** Expand any valid IPv6 literal (including `::` compression and an embedded
@@ -120,27 +157,87 @@ function ipv6ToBytes(ip: string): number[] | null {
   return bytes;
 }
 
-/** True if an IP literal falls in a loopback / private / link-local / reserved range. */
-export function isBlockedIp(ip: string): boolean {
-  if (net.isIPv4(ip)) return ipv4Blocked(ip);
-  if (net.isIPv6(ip)) {
-    const bytes = ipv6ToBytes(ip);
-    if (!bytes) return true; // unparseable but net.isIPv6 accepted it -> block defensively
-    if (bytes.every((b) => b === 0)) return true;                                    // :: unspecified
-    if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return true;     // ::1 loopback (any form)
-    const first10Zero = bytes.slice(0, 10).every((b) => b === 0);
-    if (first10Zero && bytes[10] === 0xff && bytes[11] === 0xff) {
-      return ipv4Blocked(bytes.slice(12).join('.'));                                  // ::ffff:a.b.c.d (mapped, incl. hex form)
-    }
-    if (bytes.slice(0, 12).every((b) => b === 0)) {
-      return ipv4Blocked(bytes.slice(12).join('.'));                                  // ::a.b.c.d (IPv4-compatible)
-    }
-    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true;                 // fe80::/10 link-local
-    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0xc0) return true;                 // fec0::/10 site-local (deprecated)
-    if ((bytes[0]! & 0xfe) === 0xfc) return true;                                      // fc00::/7 unique-local
-    if (bytes[0] === 0xff) return true;                                                // ff00::/8 multicast
-    return false;
+function ipv6MatchesPrefix(bytes: number[], prefix: number[], prefixBits: number): boolean {
+  const fullBytes = Math.floor(prefixBits / 8);
+  const remBits = prefixBits % 8;
+  for (let i = 0; i < fullBytes; i++) {
+    if ((bytes[i] ?? 0) !== (prefix[i] ?? 0)) return false;
   }
+  if (remBits > 0) {
+    const mask = (0xff << (8 - remBits)) & 0xff;
+    if (((bytes[fullBytes] ?? 0) & mask) !== ((prefix[fullBytes] ?? 0) & mask)) return false;
+  }
+  return true;
+}
+
+/** Pad a short prefix array to 16 bytes for matching helpers. */
+function v6Prefix(hexGroups: string, prefixBits: number): { bytes: number[]; bits: number } {
+  // hexGroups like "2001:db8" — expand via ipv6ToBytes by padding with ::
+  const literal = hexGroups.includes('::') ? hexGroups : `${hexGroups}::`;
+  const bytes = ipv6ToBytes(literal);
+  if (!bytes) throw new Error(`internal: bad v6 prefix ${hexGroups}`);
+  return { bytes, bits: prefixBits };
+}
+
+/**
+ * IANA / RFC IPv6 special-purpose prefixes that are not global destinations.
+ * IPv4-mapped / IPv4-compatible are handled before this list (embedded IPv4 path).
+ */
+const IPV6_NON_GLOBAL: ReadonlyArray<{ bytes: number[]; bits: number }> = [
+  v6Prefix('::', 128),           // ::/128 unspecified
+  v6Prefix('::1', 128),          // ::1/128 loopback
+  v6Prefix('64:ff9b', 96),       // 64:ff9b::/96 well-known NAT64
+  v6Prefix('100', 64),           // 100::/64 discard-only
+  v6Prefix('2001', 23),          // 2001::/23 IETF protocol assignments
+  v6Prefix('2001:db8', 32),      // 2001:db8::/32 documentation
+  v6Prefix('2002', 16),          // 2002::/16 6to4
+  v6Prefix('3fff', 20),          // 3fff::/20 documentation (RFC 9637)
+  v6Prefix('fc00', 7),           // fc00::/7 unique-local
+  v6Prefix('fe80', 10),          // fe80::/10 link-local
+  v6Prefix('ff00', 8),           // ff00::/8 multicast
+];
+
+/** Global unicast space 2000::/3 (after excluding specials above). */
+const IPV6_GLOBAL_UNICAST = v6Prefix('2000', 3);
+
+function embeddedIpv4FromBytes(bytes: number[], offset: number): string {
+  return `${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`;
+}
+
+/**
+ * True if an IPv6 literal is a globally routable unicast address.
+ * Default-deny: unparseable, non-2000::/3, or any special-purpose prefix → false.
+ * IPv4-mapped (`::ffff:x.x.x.x`) and IPv4-compatible (`::x.x.x.x`) use IPv4 global rules.
+ */
+function isGlobalIpv6(ip: string): boolean {
+  const bytes = ipv6ToBytes(ip);
+  if (!bytes) return false;
+
+  // ::ffff:0:0/96 IPv4-mapped
+  const first10Zero = bytes.slice(0, 10).every((b) => b === 0);
+  if (first10Zero && bytes[10] === 0xff && bytes[11] === 0xff) {
+    return isGlobalIpv4(embeddedIpv4FromBytes(bytes, 12));
+  }
+  // ::/96 IPv4-compatible (deprecated), excluding :: and ::1 already covered by mapped check length
+  if (bytes.slice(0, 12).every((b) => b === 0)) {
+    return isGlobalIpv4(embeddedIpv4FromBytes(bytes, 12));
+  }
+
+  for (const { bytes: prefix, bits } of IPV6_NON_GLOBAL) {
+    if (ipv6MatchesPrefix(bytes, prefix, bits)) return false;
+  }
+
+  // Only 2000::/3 is global unicast; everything else default-deny.
+  return ipv6MatchesPrefix(bytes, IPV6_GLOBAL_UNICAST.bytes, IPV6_GLOBAL_UNICAST.bits);
+}
+
+/**
+ * True if an IP literal is **not** a global unicast destination (SSRF deny list is
+ * inverted: we require positive global classification). Unparseable → blocked.
+ */
+export function isBlockedIp(ip: string): boolean {
+  if (net.isIPv4(ip)) return !isGlobalIpv4(ip);
+  if (net.isIPv6(ip)) return !isGlobalIpv6(ip);
   return true; // not a recognizable IP -> treat as blocked
 }
 
@@ -233,6 +330,9 @@ export async function assertPublicUrl(urlStr: string): Promise<URL> {
  * - `localhost` / `127.0.0.1` / `::1`：DNS 结果必须全部是 loopback
  * - 其它 hostname：与 `resolvePublicUrl` 相同（全部公网）
  * - 其它私网 IP 字面量：拒绝（防把发票字节与 API Key 打到链路本地/CGNAT 等）
+ *
+ * 注意：`safeServiceFetch` 在**首跳**用本函数，随后将 redirect 链锁定到首跳策略
+ * （公网链不得进 loopback，loopback 链不得出站）。
  */
 export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolution> {
   let url: URL;
@@ -275,6 +375,73 @@ export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolu
     publicAddrs.push(a.address);
   }
   return { url, addresses: publicAddrs };
+}
+
+/** Redirect / service hop policy locked from the first authorized hop. */
+export type ServiceHopPolicy = 'public' | 'loopback';
+
+/**
+ * Classify a resolved service URL: all-loopback addresses → loopback, else public.
+ * Used to pin redirect chains so a public OCR host cannot 307 into 127.0.0.1.
+ */
+export function serviceHopPolicyOf(resolved: PublicUrlResolution): ServiceHopPolicy {
+  if (resolved.addresses.length > 0 && resolved.addresses.every((a) => isLoopbackIp(a))) {
+    return 'loopback';
+  }
+  const host = resolved.url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+  if (isLoopbackHost(host)) return 'loopback';
+  return 'public';
+}
+
+/**
+ * Loopback-only URL resolver（redirect 链锁定为 loopback 时使用）。
+ * 拒绝任何非回环主机，防止本机 efapiao 被指到站外。
+ */
+export async function resolveLoopbackServiceUrl(urlStr: string): Promise<PublicUrlResolution> {
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    throw new Error(`blocked_url:invalid:${urlStr}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`blocked_url:scheme:${url.protocol}`);
+  }
+  const host = url.hostname.replace(/^\[/, '').replace(/\]$/, '');
+  if (net.isIP(host)) {
+    if (!isLoopbackIp(host)) {
+      throw new Error(`blocked_url:redirect_policy:loopback_only:${host}`);
+    }
+    return { url, addresses: [host] };
+  }
+  if (!isLoopbackHost(host)) {
+    throw new Error(`blocked_url:redirect_policy:loopback_only:${host}`);
+  }
+  let addrs: { address: string; family: number }[];
+  try {
+    addrs = await dnsLookup(host, { all: true });
+  } catch {
+    throw new Error(`blocked_url:dns:${host}`);
+  }
+  if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
+  const loopbackAddrs: string[] = [];
+  for (const a of addrs) {
+    if (!isLoopbackIp(a.address)) {
+      throw new Error(`blocked_url:localhost_non_loopback:${host}->${a.address}`);
+    }
+    loopbackAddrs.push(a.address);
+  }
+  return { url, addresses: loopbackAddrs };
+}
+
+/**
+ * Resolver for subsequent hops under a pinned first-hop policy.
+ * Public-first chains use the global-only public resolver (never loopback/private).
+ */
+function resolveUrlForPinnedPolicy(
+  policy: ServiceHopPolicy,
+): (urlStr: string) => Promise<PublicUrlResolution> {
+  return policy === 'loopback' ? resolveLoopbackServiceUrl : resolvePublicUrl;
 }
 
 /**
@@ -660,6 +827,14 @@ export interface SafeFetchInit extends RequestInit {
 
 type ResolveUrlFn = (urlStr: string) => Promise<PublicUrlResolution>;
 
+interface ControlledFetchOptions {
+  /**
+   * 首跳成功后把 redirect 策略锁到首跳类别（public 或 loopback）。
+   * OCR `safeServiceFetch` 必须开启：公网 OCR 不得 307 把发票 body 打到 127.0.0.1。
+   */
+  pinRedirectPolicy?: boolean;
+}
+
 /**
  * 受控 HTTP transport 内核：逐跳校验 + DNS pin + body 上限。
  * `resolveUrl` 决定公网-only（safeFetch）还是服务端点（safeServiceFetch）。
@@ -668,6 +843,7 @@ async function controlledFetch(
   input: string | URL | Request,
   init: SafeFetchInit | undefined,
   resolveUrl: ResolveUrlFn,
+  options?: ControlledFetchOptions,
 ): Promise<Response> {
   const maxRedirects = init?.maxRedirects ?? MAX_REDIRECTS;
   const bodyCapBytes = typeof init?.maxBodyBytes === 'number' && init.maxBodyBytes > 0
@@ -699,6 +875,9 @@ async function controlledFetch(
   let headerRecord: Record<string, string> | undefined;
   // 整链共用同一 abort signal，deadline 覆盖全部 redirect hop。
   const signal = restInit.signal;
+  // 首跳策略锁定：后续跳不再使用「公网或 loopback 均可」的宽解析器。
+  let resolveHop: ResolveUrlFn = resolveUrl;
+  let pinnedPolicy: ServiceHopPolicy | null = null;
 
   while (true) {
     if (signal?.aborted) {
@@ -707,7 +886,12 @@ async function controlledFetch(
     if (hop > maxRedirects) {
       throw new Error(`blocked_url:too_many_redirects:${maxRedirects}:${currentUrl}`);
     }
-    const resolved = await resolveUrl(currentUrl);
+    const resolved = await resolveHop(currentUrl);
+    if (options?.pinRedirectPolicy && pinnedPolicy === null) {
+      pinnedPolicy = serviceHopPolicyOf(resolved);
+      // 从第二跳起强制同一策略；跨策略 Location 在解析阶段即拒绝（含 307/308 保 body）。
+      resolveHop = resolveUrlForPinnedPolicy(pinnedPolicy);
+    }
     const hostHeader = resolved.url.host; // 含非默认端口
     if (!headerRecord) {
       headerRecord = headersToRecord(restInit.headers, hostHeader);
@@ -779,9 +963,14 @@ export async function safeFetch(input: string | URL | Request, init?: SafeFetchI
  * OCR 服务专用 transport：在 `safeFetch` 同等防护上，额外允许**显式回环**地址
  *（bundled efapiao 的 `http://127.0.0.1:port`），并拒绝其它私网/链路本地目标。
  * 跨源 redirect 会丢掉 `X-API-Key` / `Authorization` / `Referer` 等敏感头。
+ *
+ * Redirect 策略与首跳绑定（S4）：
+ * - 首跳公网 → 后续仅公网（`resolvePublicUrl`），不得 307/308 进 loopback；
+ * - 首跳 loopback → 后续仅 loopback，不得出站。
+ * 发票字节在 body-preserving redirect 下也不会被带到另一策略空间。
  */
 export async function safeServiceFetch(input: string | URL | Request, init?: SafeFetchInit): Promise<Response> {
-  return controlledFetch(input, init, resolveServiceUrl);
+  return controlledFetch(input, init, resolveServiceUrl, { pinRedirectPolicy: true });
 }
 
 /**

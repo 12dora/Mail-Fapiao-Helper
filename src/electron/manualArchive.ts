@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { csvCell, ensureCsvSchema, readCsvRows } from '../util/csv.js';
-import { contentHash } from '../util/hash.js';
+import { csvCell, ensureCsvSchema, readCsvRows, rewriteCsvRows } from '../util/csv.js';
+import { contentHash, isMailHash, msgIdHash } from '../util/hash.js';
 import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, beginArchiveTransaction } from '../download/archiveJournal.js';
 import { sanitizeText } from './sanitize.js';
 import { testFaultEnabled } from '../util/testFaults.js';
@@ -164,13 +164,86 @@ function detectFormat(data: Buffer): DetectResult {
 // CSV 追加（与自动归档一致：只 append，回滚靠 journal 截断回 baseLength）
 // ---------------------------------------------------------------------------
 
-function ensureInvoiceLedgerSchema(file: string): void {
+/**
+ * 从已归档文件回填 contentHash（六列表头升级后列为空时）。
+ * 与 pipeline.hashArchivedFile 行为一致；pipeline 未 export，此处最小复制。
+ * 只接受 invoices 目录下的 basename，拒绝路径穿越。
+ */
+function hashArchivedFile(invoicesDir: string, filename: string): string {
+  const leaf = path.basename(filename);
+  if (!leaf || leaf === '.' || leaf === '..') return '';
+  try {
+    const resolved = path.resolve(invoicesDir, leaf);
+    const root = path.resolve(invoicesDir);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) return '';
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return '';
+    return contentHash(fs.readFileSync(resolved));
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 升级/修复 invoices 行：补 mailHash；contentHash 为空时对归档文件现算回填。
+ * 与 pipeline.fillInvoiceRow 对齐（BLOCKING 14 / NEW DEFECT 1）。
+ */
+function fillInvoiceLedgerRow(row: Record<string, string>, invoicesDir: string): Record<string, string> {
+  let ch = (row.contentHash ?? '').trim();
+  const filename = row.filename ?? '';
+  if (!ch && filename.length > 0) {
+    ch = hashArchivedFile(invoicesDir, filename);
+  }
+  let mailHash = (row.mailHash ?? '').trim();
+  if (!mailHash) {
+    const messageId = row.messageId ?? '';
+    if (isMailHash(messageId)) {
+      mailHash = messageId.toLowerCase();
+    } else {
+      mailHash = msgIdHash(
+        messageId.length > 0 ? messageId : undefined,
+        row.from ?? '',
+        row.date ?? '',
+        row.subject ?? '',
+      );
+    }
+  }
+  return { ...row, mailHash, contentHash: ch };
+}
+
+/** 已升表头但列值为空的升级残骸：对磁盘文件回填 contentHash/mailHash。 */
+function repairInvoiceLedgerRows(csvPath: string, invoicesDir: string): void {
+  if (!fs.existsSync(csvPath)) return;
+  try {
+    if (fs.statSync(csvPath).size === 0) return;
+  } catch {
+    return;
+  }
+  const rows = readCsvRows(csvPath);
+  if (rows.length === 0) return;
+  let dirty = false;
+  const fixed = rows.map((row) => {
+    const needHash = !(row.contentHash ?? '').trim();
+    const needMail = !(row.mailHash ?? '').trim();
+    if (!needHash && !needMail) return row;
+    dirty = true;
+    return fillInvoiceLedgerRow(row, invoicesDir);
+  });
+  if (!dirty) return;
+  rewriteCsvRows(csvPath, INVOICE_CSV_HEADER, fixed);
+}
+
+/**
+ * 与 pipeline.ensureInvoiceSchema 对齐：升级时即回填 contentHash（对磁盘文件现算），
+ * 并 repair 已升表头但列值为空的残骸。pipeline 未 export schema 常量/函数，表头字符串
+ * 与 upgrade/repair 语义在此最小复制。
+ */
+function ensureInvoiceLedgerSchema(file: string, invoicesDir: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   ensureCsvSchema(file, INVOICE_CSV_HEADER, {
     upgradeFrom: INVOICE_CSV_LEGACY,
-    // 旧 7 列升级时 mailHash 留空；本批新行会写显式 mailHash。
-    upgradeRow: (row) => ({ ...row, mailHash: row.mailHash ?? '' }),
+    upgradeRow: (row) => fillInvoiceLedgerRow(row, invoicesDir),
   });
+  repairInvoiceLedgerRows(file, invoicesDir);
 }
 
 function ensureOcrPendingSchema(file: string): void {
@@ -344,12 +417,29 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
 
   assertArchiveTransactionsRecovered(input.invoicesDir);
 
-  // 2) 读取台账与队列现状，做去重与「半提交修复」判定（按列名，兼容 7/8 列表头）。
+  // 2) 先 ensure+repair 台账（与 pipeline 一致：升级/回填 blank contentHash），再读去重索引。
+  // 六列 legacy 升级不得留下空 contentHash，否则同票手工归档会装碰撞后缀副本。
+  try {
+    ensureInvoiceLedgerSchema(input.ledgerCsv, input.invoicesDir);
+  } catch {
+    // 未知 schema 时仍尝试按列名读取；后续 append 路径会再次 ensure 并失败得更清晰。
+  }
+  try {
+    ensureOcrPendingSchema(input.ocrPendingCsv);
+  } catch {
+    // 同上
+  }
+
+  // 读取台账与队列现状，做去重与「半提交修复」判定（按列名，兼容 7/8 列表头）。
+  // 读时若仍有空 contentHash（文件缺失等），再对磁盘现算一次（pipeline.readArchivedIndex）。
   const ledgerFilenameByKey = new Map<string, string>();
   for (const row of readCsvRows(input.ledgerCsv)) {
     const mid = row.messageId ?? '';
-    const ch = row.contentHash ?? '';
     const filename = row.filename ?? '';
+    let ch = (row.contentHash ?? '').trim();
+    if (!ch && filename.length > 0) {
+      ch = hashArchivedFile(input.invoicesDir, filename);
+    }
     if (ch) ledgerFilenameByKey.set(`${mid}${SEP}${ch}`, filename);
   }
   const queueSeen = new Set(
@@ -410,7 +500,8 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   try {
     fs.mkdirSync(input.invoicesDir, { recursive: true });
     plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
-    ensureInvoiceLedgerSchema(input.ledgerCsv);
+    // 再次 ensure（幂等）：保证 append 前表头与 baseLength 基线正确。
+    ensureInvoiceLedgerSchema(input.ledgerCsv, input.invoicesDir);
     ensureOcrPendingSchema(input.ocrPendingCsv);
     ledgerBase = fs.statSync(input.ledgerCsv).size;
     queueBase = fs.statSync(input.ocrPendingCsv).size;

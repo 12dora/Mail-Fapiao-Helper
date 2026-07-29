@@ -53,14 +53,37 @@ export interface ArchiveTransaction {
   rollback(): void;
 }
 
+/**
+ * 机器可读 journal 形态错误前缀。Electron 隔离路径可据此识别「可安全隔离」条目
+ *（与 JSON 解析失败一样 fail closed，不驱动恢复动作）。
+ */
+export const JOURNAL_INVALID_SHAPE_PREFIX = 'archive_recovery_journal_invalid_shape';
+
 export class ArchiveRecoveryError extends Error {
   readonly code = 'archive_journal_recovery_failed';
+  /**
+   * 机器可读原因（通常等于 cause.message），例如
+   * `archive_recovery_journal_invalid_shape:stage` / `archive_recovery_live_pid_journal`。
+   * UI 隔离路径应读此字段，勿解析本地化 message。
+   */
+  readonly reason: string;
 
   constructor(cause: unknown) {
     super('archive_journal_recovery_failed');
     this.name = 'ArchiveRecoveryError';
     this.cause = cause;
+    this.reason = cause instanceof Error
+      ? cause.message
+      : typeof cause === 'string'
+        ? cause
+        : 'archive_journal_recovery_failed';
   }
+}
+
+/** 是否为 journal 形态/解析类错误（可隔离，不得驱动回滚动作）。 */
+export function isJournalShapeFailureReason(reason: string): boolean {
+  return reason === 'archive_recovery_journal_malformed'
+    || reason.startsWith(JOURNAL_INVALID_SHAPE_PREFIX);
 }
 
 interface InstalledFile {
@@ -172,6 +195,159 @@ function statOrNull(target: string): fs.Stats | null {
 
 function normalizePlannedFile(file: string | ArchivePlannedFile): ArchivePlannedFile {
   return typeof file === 'string' ? { path: file, legacy: true } : { ...file };
+}
+
+const ARCHIVE_STAGES: ReadonlySet<string> = new Set([
+  'prepared',
+  'files-installed',
+  'ledger-committed',
+]);
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0;
+}
+
+/**
+ * 严格解析 journal JSON 形态。任何不合规字段 fail closed，并抛出
+ * `archive_recovery_journal_invalid_shape:<field>` 机器可读原因。
+ * 兼容旧 journal：`files` 条目可为非空路径字符串（legacy）。
+ */
+function parseJournalRecord(raw: unknown): JournalRecord {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:not_object`);
+  }
+  const o = raw as Record<string, unknown>;
+
+  if (!isNonEmptyString(o.txId)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:txId`);
+  }
+  if (typeof o.pid !== 'number' || !Number.isInteger(o.pid) || o.pid < 1) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:pid`);
+  }
+  if (o.processStartId !== undefined && typeof o.processStartId !== 'string') {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:processStartId`);
+  }
+  if (typeof o.startedAtMs !== 'number' || !Number.isFinite(o.startedAtMs)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:startedAtMs`);
+  }
+  if (typeof o.stage !== 'string' || !ARCHIVE_STAGES.has(o.stage)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:stage`);
+  }
+  if (!Array.isArray(o.files)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files`);
+  }
+  if (!Array.isArray(o.csv)) {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:csv`);
+  }
+
+  const files: ArchivePlannedFile[] = [];
+  for (let i = 0; i < o.files.length; i++) {
+    const entry = o.files[i];
+    if (typeof entry === 'string') {
+      if (entry.length === 0) {
+        throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}]`);
+      }
+      files.push({ path: entry, legacy: true });
+      continue;
+    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}]`);
+    }
+    const fe = entry as Record<string, unknown>;
+    if (!isNonEmptyString(fe.path)) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}].path`);
+    }
+    if (fe.stagingPath !== undefined && typeof fe.stagingPath !== 'string') {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}].stagingPath`);
+    }
+    if (fe.stagingDir !== undefined && typeof fe.stagingDir !== 'string') {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}].stagingDir`);
+    }
+    if (fe.legacy !== undefined && typeof fe.legacy !== 'boolean') {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:files[${i}].legacy`);
+    }
+    const planned: ArchivePlannedFile = { path: fe.path };
+    if (typeof fe.stagingPath === 'string') planned.stagingPath = fe.stagingPath;
+    if (typeof fe.stagingDir === 'string') planned.stagingDir = fe.stagingDir;
+    if (typeof fe.legacy === 'boolean') planned.legacy = fe.legacy;
+    files.push(planned);
+  }
+
+  const csv: { path: string; baseLength: number }[] = [];
+  for (let i = 0; i < o.csv.length; i++) {
+    const entry = o.csv[i];
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:csv[${i}]`);
+    }
+    const ce = entry as Record<string, unknown>;
+    if (!isNonEmptyString(ce.path)) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:csv[${i}].path`);
+    }
+    if (typeof ce.baseLength !== 'number' || !Number.isFinite(ce.baseLength) || ce.baseLength < 0) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:csv[${i}].baseLength`);
+    }
+    csv.push({ path: ce.path, baseLength: ce.baseLength });
+  }
+
+  if (o.csvRollbackDisabled !== undefined && typeof o.csvRollbackDisabled !== 'boolean') {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:csvRollbackDisabled`);
+  }
+
+  let installed: InstalledFile[] | undefined;
+  if (o.installed !== undefined) {
+    if (!Array.isArray(o.installed)) {
+      throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:installed`);
+    }
+    installed = [];
+    for (let i = 0; i < o.installed.length; i++) {
+      const entry = o.installed[i];
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:installed[${i}]`);
+      }
+      const ie = entry as Record<string, unknown>;
+      if (!isNonEmptyString(ie.path)) {
+        throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:installed[${i}].path`);
+      }
+      if (typeof ie.size !== 'number' || !Number.isFinite(ie.size) || ie.size < 0) {
+        throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:installed[${i}].size`);
+      }
+      if (typeof ie.mtimeMs !== 'number' || !Number.isFinite(ie.mtimeMs)) {
+        throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:installed[${i}].mtimeMs`);
+      }
+      installed.push({ path: ie.path, size: ie.size, mtimeMs: ie.mtimeMs });
+    }
+  }
+
+  if (o.stagingDir !== undefined && typeof o.stagingDir !== 'string') {
+    throw new Error(`${JOURNAL_INVALID_SHAPE_PREFIX}:stagingDir`);
+  }
+
+  const record: JournalRecord = {
+    txId: o.txId,
+    pid: o.pid,
+    startedAtMs: o.startedAtMs,
+    stage: o.stage as ArchiveStage,
+    files,
+    csv,
+  };
+  if (typeof o.processStartId === 'string') record.processStartId = o.processStartId;
+  if (o.csvRollbackDisabled === true) record.csvRollbackDisabled = true;
+  if (installed) record.installed = installed;
+  if (typeof o.stagingDir === 'string') record.stagingDir = o.stagingDir;
+  return record;
+}
+
+/**
+ * 供 Electron 隔离路径：返回 null 表示形态合法；否则返回机器可读 reason。
+ * 不执行任何恢复/删除动作。
+ */
+export function journalRecordInvalidReason(raw: unknown): string | null {
+  try {
+    parseJournalRecord(raw);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : JOURNAL_INVALID_SHAPE_PREFIX;
+  }
 }
 
 function samePhysicalFile(a: string, b: string): boolean {
@@ -614,30 +790,35 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
     const recordPath = path.join(dir, entry);
     let record: JournalRecord;
     try {
-      record = JSON.parse(fs.readFileSync(recordPath, 'utf8')) as JournalRecord;
+      const rawText = fs.readFileSync(recordPath, 'utf8');
+      let raw: unknown;
+      try {
+        raw = JSON.parse(rawText) as unknown;
+      } catch {
+        throw new Error('archive_recovery_journal_malformed');
+      }
+      // 完整形态校验后再驱动任何恢复动作（S7）；非法条目 fail closed。
+      record = parseJournalRecord(raw);
     } catch (err) {
-      // 无法读取或解析：严格模式不得当作「已恢复」。
+      // 无法读取、解析或形态非法：严格模式不得当作「已恢复」。
       if (opts.strict) {
         const code = (err as NodeJS.ErrnoException)?.code;
+        const msg = err instanceof Error ? err.message : String(err);
+        // 形态错误 / 解析错误：保留机器可读 reason，供 UI 隔离路径识别。
+        if (isJournalShapeFailureReason(msg) || msg.startsWith(JOURNAL_INVALID_SHAPE_PREFIX)) {
+          throw new ArchiveRecoveryError(new Error(msg));
+        }
         throw new ArchiveRecoveryError(
           new Error(
             code
               ? `archive_recovery_journal_unreadable:${code}`
-              : 'archive_recovery_journal_malformed',
+              : (msg || 'archive_recovery_journal_malformed'),
           ),
         );
       }
       skipped++;
       continue;
     }
-    if (!Array.isArray(record.files) || !Array.isArray(record.csv)) {
-      if (opts.strict) {
-        throw new ArchiveRecoveryError(new Error('archive_recovery_journal_invalid_shape'));
-      }
-      skipped++;
-      continue;
-    }
-    record.files = record.files.map(normalizePlannedFile);
 
     // 另一个仍在运行的进程正持有这笔事务，不能替它回滚。
     // 使用 pid + processStartId，避免 PID 复用永久阻塞（OCR-06）。
