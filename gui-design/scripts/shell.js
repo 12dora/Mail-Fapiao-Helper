@@ -44,15 +44,14 @@
     ];
     const SPA_PAGES = new Set(['dashboard', 'inbox', 'library', 'pending', 'config', 'settings']);
     const PAGE_META = {
-        dashboard: { heading: '运行控制台', title: '运行控制台 · 发票助手' },
-        inbox:     { heading: '邮件记录',   title: '收件箱 · 发票助手' },
-        library:   { heading: '发票库',     title: '发票库 · 发票助手' },
-        pending:   { heading: '待处理队列', title: '待处理队列 · 发票助手' },
-        config:    { heading: '配置',       title: '配置 · 发票助手' },
-        settings:  { heading: '关于',       title: '关于 · 发票助手' },
+        dashboard: { heading: '开始处理', title: '开始处理 · 发票助手' },
+        inbox:     { heading: '邮件记录', title: '邮件记录 · 发票助手' },
+        library:   { heading: '发票库',   title: '发票库 · 发票助手' },
+        pending:   { heading: '待确认',   title: '待确认 · 发票助手' },
+        config:    { heading: '邮箱与保存', title: '邮箱与保存 · 发票助手' },
+        settings:  { heading: '关于',     title: '关于 · 发票助手' },
     };
     const PAGE_SCRIPT_INIT = {
-        dashboard: () => window.MFH_PAGE_INIT?.dashboard?.(),
         config: () => window.MFH_PAGE_INIT?.config?.(),
     };
 
@@ -176,6 +175,27 @@
     function prefersReducedMotion() {
         if (document.documentElement.getAttribute('data-motion') === 'off') return true;
         return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+    }
+
+    /* Restart page enter motion on every SPA commit, including cached revisits.
+       UI-05 / NEW-DEFECT 4: generation-guard so a stale 400ms timeout from a
+       rapid A→B→A revisit cannot strip the newer animation class. */
+    let pageEnterGen = 0;
+    function playPageEnter(mainEl) {
+        const page = mainEl?.querySelector?.('.page') || mainEl;
+        if (!page || !page.classList) return;
+        const gen = ++pageEnterGen;
+        page.dataset.pageEnterGen = String(gen);
+        page.classList.remove('is-page-entering');
+        // Force reflow so re-adding the class retriggers the animation.
+        void page.offsetWidth;
+        page.classList.add('is-page-entering');
+        const clear = () => {
+            if (page.dataset.pageEnterGen !== String(gen)) return;
+            page.classList.remove('is-page-entering');
+        };
+        page.addEventListener('animationend', clear, { once: true });
+        window.setTimeout(clear, 400);
     }
 
     function titlebarHTML() {
@@ -307,10 +327,6 @@
                 else { renderInboxRows(); renderLibraryRows(); }
             }
 
-            // Toggle controls
-            const tg = e.target.closest('.toggle');
-            if (tg) tg.classList.toggle('is-on');
-
             const action = e.target.closest('[data-action]');
             if (action && !t && !action.closest('.tabs') && !action.closest('#date-preset-buttons')) {
                 // Catch here so any action handler that rejects (e.g. an IPC error)
@@ -440,52 +456,144 @@
         { kind: 'fetch',    selector: '#run-btn' },
         { kind: 'pipeline', selector: '[data-action="run-pipeline"], [data-action="rerun-pipeline"]' },
         { kind: 'ocr',      selector: '[data-action="ocr-toggle"]' },
-        { kind: 'organize', selector: '[data-action="organize"], [data-action="rename-organize"]' },
+        { kind: 'organize', selector: '[data-action="rename-organize"]' },
     ];
+    const MUTEX_ALL_SELECTORS = MUTEX_GROUPS.map((g) => g.selector).join(', ');
 
-    async function wireOpState() {
+    function setOpStateBanner(message) {
+        let banner = document.getElementById('mfh-op-state-banner');
+        if (!message) {
+            if (banner) banner.remove();
+            return;
+        }
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = 'mfh-op-state-banner';
+            banner.className = 'op-state-banner';
+            banner.setAttribute('role', 'alert');
+            // NEW-DEFECT 2: never prepend into the two-column `.app` grid — that
+            // shifts sidebar/main into the wrong cells. Host on body as fixed.
+            document.body.appendChild(banner);
+        }
+        banner.replaceChildren();
+        const textEl = document.createElement('span');
+        textEl.textContent = message;
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn btn--sm';
+        retry.textContent = '重新确认任务状态';
+        retry.addEventListener('click', () => { wireOpState({ force: true }); });
+        banner.append(textEl, retry);
+    }
+
+    async function wireOpState(opts = {}) {
         const subscribe = window.mfhBridge?.onOpState;
-        if (typeof subscribe === 'function') {
+        if (typeof subscribe === 'function' && !window.FPH._opStateSubscribed) {
+            window.FPH._opStateSubscribed = true;
             subscribe((payload) => {
                 const running = payload?.running || null;
                 window.FPH.opState = running;
+                window.FPH.opStateSync = 'ok';
+                setOpStateBanner('');
                 applyOpState(running);
             });
         }
         // Subscribing only sees FUTURE transitions. Ask for the current state so
         // a window opened mid-run does not render idle controls (FB-01).
         const read = window.mfhBridge?.getOpState;
-        if (typeof read !== 'function') return;
+        if (typeof read !== 'function') {
+            // FE-13: only a wholly absent bridge (static HTML preview) may
+            // degrade to idle. An installed desktop bridge without getOpState
+            // is an incompatible preload — keep long-task entry points locked.
+            if (!window.mfhBridge) {
+                window.FPH.opStateSync = 'ok';
+                window.FPH.opState = window.FPH.opState || null;
+                setOpStateBanner('');
+                applyOpState(window.FPH.opState);
+                return;
+            }
+            window.FPH.opStateSync = 'error';
+            window.FPH.opState = window.FPH.opState || null;
+            setOpStateBanner('当前版本无法确认任务状态。长任务入口已锁定，请重新打开应用或更新到最新版本。');
+            applyOpState(window.FPH.opState);
+            return;
+        }
+        // Until the first successful read completes, treat long-running entry
+        // points as locked so a mid-run window cannot double-submit (FE-13).
+        if (window.FPH.opStateSync !== 'ok' || opts.force) {
+            window.FPH.opStateSync = 'pending';
+            applyOpState(window.FPH.opState || null);
+        }
         try {
             const state = await read();
             window.FPH.opState = state?.running || null;
+            window.FPH.opStateSync = 'ok';
+            setOpStateBanner('');
             applyOpState(window.FPH.opState);
-        } catch {
-            // Older main process without the handler: stay in degraded mode.
+        } catch (err) {
+            window.FPH.opStateSync = 'error';
+            setOpStateBanner('无法确认当前是否有任务在运行。长任务入口已暂时锁定，请重试或重启应用。');
+            applyOpState(window.FPH.opState || null);
+            if (opts.force) {
+                showToast('无法确认任务状态', '请重试；若持续失败，请重新打开应用。', 'err', {
+                    scope: 'global',
+                    detail: err?.message,
+                });
+            }
         }
     }
 
+    /* FE-08: lock every mutex start entry synchronously before IPC; clear when
+       the local runner finishes. Authoritative op-state still re-locks if a job
+       is actually running. */
+    function beginLocalMutexLock(kind) {
+        window.FPH.localMutexLock = kind || 'busy';
+        applyOpState(window.FPH.opState || null);
+    }
+    function endLocalMutexLock() {
+        window.FPH.localMutexLock = null;
+        applyOpState(window.FPH.opState || null);
+    }
+
     function applyOpState(running) {
+        const sync = window.FPH.opStateSync || 'pending';
         const busyKind = running?.kind || '';
+        const localLock = window.FPH.localMutexLock || null;
+        // Sync OCR labels first so we can keep the stop control available.
+        if (busyKind === 'ocr') setOcrControlState('running');
+        else if (sync === 'ok' && !busyKind && !localLock) setOcrControlState('idle');
+
+        const lockAllStarts = sync !== 'ok' || Boolean(busyKind) || Boolean(localLock);
         for (const group of MUTEX_GROUPS) {
             document.querySelectorAll(group.selector).forEach((el) => {
-                const conflicts = Boolean(busyKind) && busyKind !== group.kind;
-                if (conflicts) {
+                const allowOcrStop = sync === 'ok'
+                    && busyKind === 'ocr'
+                    && !localLock
+                    && group.kind === 'ocr'
+                    && (el.dataset.ocrMode === 'stop' || el.dataset.ocrMode === 'stopping');
+                if (lockAllStarts && !allowOcrStop) {
                     el.disabled = true;
                     el.dataset.opLocked = 'true';
-                    el.title = '另一个任务正在运行，完成后可再操作。';
-                } else if (el.dataset.opLocked === 'true') {
-                    el.disabled = false;
-                    delete el.dataset.opLocked;
-                    el.removeAttribute('title');
+                    el.title = busyKind || localLock
+                        ? '另一个任务正在运行，完成后可再操作。'
+                        : (sync === 'error'
+                            ? '无法确认任务状态，请重试或重新打开应用。'
+                            : '正在确认任务状态，请稍候。');
+                } else if (el.dataset.opLocked === 'true' || allowOcrStop) {
+                    if (allowOcrStop) {
+                        el.disabled = el.dataset.ocrMode === 'stopping';
+                        delete el.dataset.opLocked;
+                        if (el.dataset.ocrMode !== 'stopping') el.removeAttribute('title');
+                    } else {
+                        el.disabled = false;
+                        delete el.dataset.opLocked;
+                        el.removeAttribute('title');
+                    }
                 }
             });
         }
-        // The OCR toggle must show "停止识别" for a job that started before this
-        // page (or this window) existed.
-        if (busyKind === 'ocr') setOcrControlState('running');
         // Let the dashboard re-apply its own date-range validity after unlocking.
-        if (!busyKind) window.MFH_DASHBOARD_REFRESH_RUN_BTN?.();
+        if (sync === 'ok' && !busyKind && !localLock) window.MFH_DASHBOARD_REFRESH_RUN_BTN?.();
     }
 
     function ocrJobRunning() {
@@ -533,22 +641,41 @@
         const engineEl = document.querySelector('[data-about-engine]');
         if (engineEl) {
             engineEl.className = `pill ${engineEnabled ? 'pill--ok' : ''}`;
-            engineEl.textContent = engineEnabled ? `已启用 · ${ocr.provider || 'efapiao'}` : '未启用（只保存原件）';
+            engineEl.textContent = engineEnabled ? '已启用' : '未启用（只保存原件）';
         }
         const hasId = Boolean(secrets.tencentSecretId ?? ocr.credentials?.tencentSecretId ?? ocr.credentials?.secretId);
         const hasKey = Boolean(secrets.tencentSecretKey ?? ocr.credentials?.tencentSecretKey ?? ocr.credentials?.secretKey);
         const cloudEl = document.querySelector('[data-about-cloud]');
         if (cloudEl) {
+            // COPY-09: derive from engine + mode + credentials; never claim upload
+            // solely because keys exist, and always mention 行程单 when upload may happen.
             const configured = hasId && hasKey;
-            cloudEl.className = `pill ${configured ? 'pill--warn' : ''}`;
-            cloudEl.textContent = configured ? '已填写密钥（会上传发票文件）' : '未填写密钥（不会上传文件）';
+            const mode = ocr.ocrMode || 'auto';
+            if (!engineEnabled) {
+                cloudEl.className = 'pill';
+                cloudEl.textContent = '识别已关闭（不会上传文件）';
+            } else if (mode === 'disabled') {
+                cloudEl.className = 'pill';
+                cloudEl.textContent = configured
+                    ? '已填写密钥（当前模式不上传）'
+                    : '未填写密钥（不会上传文件）';
+            } else if (!configured) {
+                cloudEl.className = 'pill';
+                cloudEl.textContent = '未填写密钥（不会上传文件）';
+            } else if (mode === 'required') {
+                cloudEl.className = 'pill pill--warn';
+                cloudEl.textContent = '会上传发票和行程单文件';
+            } else {
+                cloudEl.className = 'pill pill--warn';
+                cloudEl.textContent = '必要时会上传发票和行程单文件';
+            }
         }
         const modeEl = document.querySelector('[data-about-ocr-mode]');
         if (modeEl) {
             const mode = ocr.ocrMode || 'auto';
-            modeEl.textContent = mode === 'disabled' ? '仅本地规则，不调用云端 OCR'
-                : mode === 'required' ? '每个文件都调用云端 OCR'
-                : '规则优先，必要时调用云端 OCR';
+            modeEl.textContent = mode === 'disabled' ? '仅本地规则，不使用云端识别'
+                : mode === 'required' ? '每个文件都使用云端识别'
+                : '规则优先，必要时使用云端识别';
         }
     }
 
@@ -716,14 +843,21 @@
                 heading.focus({ preventScroll: true });
             }
             wireLogFollow();
-            // Page-scoped errors belong to the page the user just left.
+            // Non-sticky page toasts belong to the page the user just left.
+            // Sticky errors stay until the user dismisses them (FE-10).
             dismissPageToasts();
+            // Replay route enter animation for cached SPA pages (UI-05).
+            playPageEnter(target);
             // A freshly inserted page must reflect the live state (running job,
             // real app version/channel) instead of its static placeholders.
             applyLiveState(pageId);
             announce(`${meta?.heading || pageId} 已打开`);
             if (opts.push !== false) {
                 history.pushState({ page: pageId }, '', pathForPage(pageId));
+            }
+            // Flush config autosave before any hydrate that might overwrite drafts (FE-02).
+            if (typeof window.MFH_CONFIG_FLUSH_SAVE === 'function') {
+                try { await window.MFH_CONFIG_FLUSH_SAVE(); } catch { /* save error already toasted */ }
             }
             await loadBridgeSummary();
             await loadBridgeConfig();
@@ -873,13 +1007,6 @@
         return source || '归档文件';
     }
 
-    function documentTypeLabel(value) {
-        if (value === 'itinerary') return '行程单';
-        if (value === 'supporting') return '支撑材料';
-        if (value === 'invoice') return '发票';
-        return value || '未分类';
-    }
-
     function reasonLabel(value) {
         const v = String(value || '');
         if (v.includes('rule_unhandled')) return '暂未识别';
@@ -927,18 +1054,35 @@
     }
 
     async function loadBridgeSummary() {
-        if (!window.mfhBridge?.getSummary) return;
+        if (!window.mfhBridge?.getSummary) return false;
         try {
-            const summary = await window.mfhBridge.getSummary();
+            // Keep already-loaded pages when refreshing after navigation (FE-11):
+            // request enough rows to cover the current cursor instead of offset=0 default.
+            const inboxCursor = sectionCursor('inbox');
+            const libraryCursor = sectionCursor('library');
+            const args = {};
+            if (inboxCursor > 0) {
+                args.inboxOffset = 0;
+                args.inboxLimit = Math.max(inboxCursor, Number(window.FPH.inboxLimit || PAGE_SIZE) || PAGE_SIZE);
+            }
+            if (libraryCursor > 0) {
+                args.libraryOffset = 0;
+                args.libraryLimit = Math.max(libraryCursor, Number(window.FPH.libraryLimit || PAGE_SIZE) || PAGE_SIZE);
+            }
+            const summary = Object.keys(args).length > 0
+                ? await window.mfhBridge.getSummary(args)
+                : await window.mfhBridge.getSummary();
             window.FPH.summary = summary;
             applySummary(summary);
+            return true;
         } catch (err) {
             showToast('读取本地数据失败', '无法读取本机的邮件和发票记录，请确认配置文件是否完整。', 'err', { detail: err?.message });
+            return false;
         }
     }
 
     async function loadBridgeConfig() {
-        if (!window.mfhBridge?.getConfig) return;
+        if (!window.mfhBridge?.getConfig) return false;
         try {
             const payload = await window.mfhBridge.getConfig();
             window.FPH.configPayload = payload;
@@ -946,9 +1090,11 @@
             if (payload?.configError) showConfigError(payload.configError);
             else clearConfigError();
             applyConfig(payload.config || {}, payload.secrets || {});
+            return true;
         } catch (err) {
             showConfigError({ message: '无法读取本机配置文件。' });
             window.FPH.configLoadError = err?.message || '';
+            return false;
         } finally {
             window.FPH.configReady = true;
             window.FPH._configReadyResolvers?.forEach((resolve) => resolve());
@@ -1087,7 +1233,7 @@
         document.querySelectorAll('[data-ocr-log]').forEach((el) => {
             appendLogLine(el, consoleLine('准备', message), { reset: true });
         });
-        announce('已开始识别发票文件，正在准备。');
+        announce('已开始识别，正在准备。');
     }
 
     function appendOcrLog(message, kind = '') {
@@ -1145,18 +1291,16 @@
             el.disabled = false;
             el.classList.toggle('btn--danger', running);
             el.classList.toggle('btn--primary', !running);
-            const ownerMain = el.closest('main.main');
-            const ownerPage = ownerMain?.dataset.spaPage || document.body.dataset.page;
-            const longLabel = ownerPage === 'dashboard';
+            // COPY-16: one action vocabulary everywhere — 开始识别 / 重新识别 / 停止识别.
             if (running) {
                 el.dataset.ocrMode = 'stop';
                 el.textContent = '停止识别';
             } else if (hasRecognizedResults()) {
                 el.dataset.ocrMode = 'rerun';
-                el.textContent = longLabel ? '重新识别发票文件' : '重新识别';
+                el.textContent = '重新识别';
             } else {
                 el.dataset.ocrMode = 'start';
-                el.textContent = longLabel ? '开始识别发票文件' : '开始识别';
+                el.textContent = '开始识别';
             }
         });
     }
@@ -1173,7 +1317,7 @@
         document.querySelectorAll('[data-file-log]').forEach((el) => {
             appendLogLine(el, consoleLine('准备', message), { reset: true });
         });
-        announce('已开始获取发票文件，正在准备。');
+        announce('已开始获取发票文件，正在准备。'); // COPY-16: 获取发票文件
     }
 
     function appendFileLog(message, kind = '') {
@@ -1187,19 +1331,33 @@
         const processed = Number(data.processed || 0);
         const skipped = Number(data.skipped || 0);
         const failed = Number(data.failed || 0);
-        const percent = data.percent === undefined
-            ? Math.min(96, 12 + (processed + skipped + failed) * 4)
-            : Math.max(0, Math.min(100, Number(data.percent) || 0));
+        const total = Number(data.total || 0);
         const fileErrored = data.kind === 'err';
         const phase = data.phase || (data.done ? '获取完成' : '正在获取');
+        // Without a known total, never invent a fake percentage (FE-12). Even if
+        // the backend still sends a synthetic percent, prefer indeterminate.
+        const hasTotal = total > 0;
+        const indeterminate = !data.done && !fileErrored && !hasTotal;
+        let percent = 0;
+        if (hasTotal) {
+            percent = data.percent === undefined
+                ? Math.min(96, Math.round(((processed + skipped + failed) / total) * 100))
+                : Math.max(0, Math.min(100, Number(data.percent) || 0));
+        } else if (data.done) {
+            percent = 100;
+        }
+        const countLabel = `已处理 ${fmtInt(processed)} 封，失败 ${fmtInt(failed)}`;
         setProgressState('[data-file-progress]', '[data-file-bar]', {
             percent,
-            done: !fileErrored && (Boolean(data.done) || percent >= 100),
+            indeterminate,
+            done: !fileErrored && Boolean(data.done),
             error: fileErrored,
-            label: `${phase}，${percent}%`,
+            label: indeterminate ? `${phase}：${countLabel}` : `${phase}，${percent}%`,
         });
         text('[data-file-phase]', phase);
-        text('[data-file-counts]', `${fmtInt(processed)} 封`);
+        text('[data-file-counts]', hasTotal
+            ? `${fmtInt(processed + skipped + failed)} / ${fmtInt(total)} 封`
+            : `${fmtInt(processed)} 封`);
         text('[data-file-processed]', fmtInt(processed));
         text('[data-file-skipped]', fmtInt(skipped));
         text('[data-file-failed]', fmtInt(failed));
@@ -1207,7 +1365,7 @@
         appendFileLog(readable, data.kind || '');
         if (fileErrored) announce(`获取发票文件失败：${readable || '请查看诊断信息'}`, 'alert');
         else if (data.done) announce(`获取发票文件完成：处理 ${processed}，跳过 ${skipped}，失败 ${failed}。`);
-        else announce(`正在获取发票文件：已处理 ${processed}`);
+        else announce(`正在获取发票文件：${countLabel}`);
     }
 
     /* Backend status enum (src/electron/summary.ts). 已识别 = 完整 only. */
@@ -1277,7 +1435,7 @@
         }).join('') || `
                 <div class="empty empty--compact">
                     <div class="empty__title">还没有运行记录</div>
-                    <div class="empty__sub">点击“开始获取邮件”或“开始识别发票文件”后，这里会显示真实结果。</div>
+                    <div class="empty__sub">点击「获取邮件」或「开始识别」后，这里会显示真实结果。</div>
                 </div>
             `;
         const total = document.querySelector('[data-history-total]');
@@ -1300,7 +1458,7 @@
         const batch = window.FPH.currentBatch;
         const note = document.querySelector('[data-current-batch-note]');
         if (!batch) {
-            tbody.innerHTML = '<tr><td colspan="7" class="muted">本次还没有运行。点击“开始获取邮件”后，这里只显示这一次新保存的邮件。</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7" class="muted">本次还没有运行。点击「获取邮件」后，这里只显示这一次新保存的邮件。</td></tr>';
             if (note) note.textContent = '只显示最近一次运行新增的邮件，不是全部本地缓存。';
             return;
         }
@@ -1470,17 +1628,8 @@
         const scope = activeMain();
         const tbody = scope.querySelector('[data-inbox-rows]');
         if (!tbody) return;
-        const query = String(scope.querySelector('[data-search="inbox"]')?.value || '').trim().toLowerCase();
-        const attachmentOnly = scope.querySelector('[data-filter="inbox-attachment"]')?.classList.contains('is-active');
-        const linksOnly = scope.querySelector('[data-filter="inbox-links"]')?.classList.contains('is-active');
         const loadedRows = window.FPH.inboxRows || [];
-        const rows = sortRows(loadedRows.filter((row) => {
-            const haystack = `${row.messageId || ''} ${row.from || ''} ${row.subject || ''} ${row.mailbox || ''}`.toLowerCase();
-            if (query && !haystack.includes(query)) return false;
-            if (attachmentOnly && !row.hasAttachment) return false;
-            if (linksOnly && Number(row.bodyLinkCount || 0) <= 0) return false;
-            return true;
-        }), 'sortInbox');
+        const rows = selectVisibleInboxRows();
         tbody.innerHTML = rows.map((row) => `
             <tr>
                 <td class="mono">${fmtDateTime(row.date)}</td>
@@ -1498,11 +1647,12 @@
     }
 
     function applyLibrarySummary(library) {
-        text('[data-lib="total"]', fmtInt(library.total || library.pending || 0));
+        // data-lib="pending" = 待识别；data-lib="total" = 发票库总记录 (FE-03).
+        text('[data-lib="pending"]', fmtInt(library.pending));
+        text('[data-lib="total"]', fmtInt(library.total || 0));
         text('[data-lib="recognized"]', fmtInt(library.recognized));
         text('[data-lib="ignored"]', fmtInt(library.ignored));
         text('[data-lib="failed"]', fmtInt(library.failed));
-        text('[data-lib="pending"]', fmtInt(library.pending));
         text('[data-lib="invoice-like"]', fmtInt(library.invoiceLike));
         text('[data-lib="itinerary"]', fmtInt(library.itinerary));
         text('[data-lib="supporting"]', fmtInt(library.supporting));
@@ -1516,24 +1666,9 @@
         const scope = activeMain();
         const tbody = scope.querySelector('[data-library-rows]');
         if (!tbody) return;
-        const query = String(scope.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
-        const activeTab = scope.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
-        const seller = scope.querySelector('[data-library-seller]')?.value || '';
         const loadedRows = window.FPH.libraryRows || [];
-        const rows = sortRows(loadedRows.filter((row) => {
-            const haystack = `${row.seller || ''} ${row.invoiceNo || ''} ${row.amount || ''} ${row.filename || ''} ${row.error || ''}`.toLowerCase();
-            if (query && !haystack.includes(query)) return false;
-            if (seller && row.seller !== seller) return false;
-            const status = String(row.status || '');
-            const docType = String(row.documentType || '');
-            // Status semantics come from the backend enum: 已识别 = 完整 only.
-            if (activeTab === 'recognized' && status !== STATUS.COMPLETE) return false;
-            if (activeTab === 'partial' && status !== STATUS.PARTIAL) return false;
-            if (activeTab === 'failed' && status !== STATUS.FAILED) return false;
-            if (activeTab === 'supporting' && docType !== 'supporting') return false;
-            if (activeTab === 'itinerary' && docType !== 'itinerary') return false;
-            return true;
-        }), 'sortLibrary');
+        const seller = scope.querySelector('[data-library-seller]')?.value || '';
+        const rows = selectVisibleLibraryRows();
         tbody.innerHTML = rows.map((row) => `
             <tr>
                 <td class="mono">${escapeHtml((row.date || '').slice(0, 10))}</td>
@@ -1563,7 +1698,8 @@
 
     const KNOWN_PENDING_ACTIONS = new Set(['refresh_link', 'retry', 'ignore', 'manual_archive']);
     function actionText(action) {
-        if (action === 'refresh_link') return ['打开原始邮件', '在邮件中刷新授权后重新抓取'];
+        // COPY-16: use the same verb set as the rest of the app (获取 / 识别).
+        if (action === 'refresh_link') return ['打开原始邮件', '在邮件中刷新授权后重新获取'];
         if (action === 'retry') return ['重新尝试', '适合临时网络失败'];
         if (action === 'ignore') return ['确认忽略', '从待确认队列中移除'];
         if (action === 'manual_archive') return ['选择文件归档', '把下载好的文件复制到归档目录'];
@@ -1668,7 +1804,7 @@
             return group.action === activeTab;
         });
         const emptyMarkup = allGroups.length === 0
-            ? '<div class="card"><div class="strong" tabindex="-1" data-pending-empty-focus>待确认队列是空的</div><div class="small muted mt-12">所有邮件都已经自动处理完成，这里不需要你做任何事。</div></div>'
+            ? '<div class="card"><div class="strong" tabindex="-1" data-pending-empty-focus>目前没有需要你确认的邮件</div><div class="small muted mt-12">获取发票文件后，如有无法自动处理的邮件，会显示在这里。</div></div>'
             : '<div class="card"><div class="strong" tabindex="-1" data-pending-empty-focus>当前分类暂无邮件</div><div class="small muted mt-12">切换到「全部」可以查看其它分类的邮件。</div></div>';
         mount.innerHTML = groups.map((group, index) => {
             const headId = `pending-head-${index}`;
@@ -1689,9 +1825,11 @@
                     </h3>
                     <div class="group__body" id="${bodyId}" role="region" aria-labelledby="${headId}">
                         <div class="group__inner">
-                            ${description ? `<div class="small muted mb-12">${escapeHtml(description)}</div>` : ''}
-                            <div data-pending-rows>${rows || '<div class="card card--tight muted">暂无明细</div>'}</div>
-                            ${groupTotal > shown ? `<div class="small muted mt-12" data-group-more>本地只取回了 ${fmtInt(shown)} / ${fmtInt(groupTotal)} 条，请点击“刷新列表”重新读取。</div>` : ''}
+                            <div class="group__content">
+                                ${description ? `<div class="small muted mb-12">${escapeHtml(description)}</div>` : ''}
+                                <div data-pending-rows>${rows || '<div class="card card--tight muted">暂无明细</div>'}</div>
+                                ${groupTotal > shown ? `<div class="small muted mt-12" data-group-more>本地只取回了 ${fmtInt(shown)} / ${fmtInt(groupTotal)} 条，请点击“刷新列表”重新读取。</div>` : ''}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1783,6 +1921,27 @@
         return !PLACEHOLDER_SECRETS.has(value);
     }
 
+    /* UI-01: bind "已连接" to the exact IMAP settings that were tested. */
+    function mailConfigFingerprint(cfg, secrets) {
+        const imap = cfg?.imap || {};
+        const host = typeof imap.host === 'string' ? imap.host.trim().toLowerCase() : '';
+        const user = typeof imap.user === 'string' ? imap.user.trim().toLowerCase() : '';
+        const port = imap.port == null || imap.port === '' ? '' : String(imap.port);
+        const tls = imap.tls !== false;
+        const hasPass = credentialStored(secrets, typeof imap.pass === 'string' ? imap.pass : '');
+        return `${host}|${port}|${user}|${tls ? '1' : '0'}|${hasPass ? '1' : '0'}`;
+    }
+
+    function clearMailVerification() {
+        window.FPH.credentialsVerified = false;
+        window.FPH.credentialsVerifiedFor = '';
+    }
+
+    function markMailVerified(cfg, secrets) {
+        window.FPH.credentialsVerified = true;
+        window.FPH.credentialsVerifiedFor = mailConfigFingerprint(cfg, secrets);
+    }
+
     function applyMailStatus(cfg, secrets) {
         const imap = cfg?.imap || {};
         const host = typeof imap.host === 'string' ? imap.host.trim() : '';
@@ -1791,12 +1950,28 @@
         const realHost = Boolean(host) && !PLACEHOLDER_HOSTS.has(host.toLowerCase());
         const realUser = Boolean(user) && !PLACEHOLDER_USERS.has(user.toLowerCase());
         const configured = realHost && realUser && credentialStored(secrets, pass);
-        const verified = configured && window.FPH.credentialsVerified === true;
+        const fp = mailConfigFingerprint(cfg, secrets);
+        if (window.FPH.credentialsVerified && window.FPH.credentialsVerifiedFor !== fp) {
+            clearMailVerification();
+        }
+        const verified = configured && window.FPH.credentialsVerified === true
+            && window.FPH.credentialsVerifiedFor === fp;
+        // UI-03: keep the visible label short; put the address in title.
+        const shortLabel = verified ? '已连接' : configured ? '已保存' : '邮箱未配置';
+        const fullTitle = verified ? `已连接 · ${user}`
+            : configured ? `已保存 · ${user}`
+            : '邮箱未配置';
         document.querySelectorAll('[data-mail-status-label]').forEach((el) => {
-            el.textContent = verified ? `已连接 · ${user}` : configured ? `已保存 · ${user}` : '邮箱未配置';
+            el.textContent = shortLabel;
+            el.title = fullTitle;
+            el.classList.add('sidebar__mail-status');
         });
+        // UI-01: three explicit states — unconfigured / saved / verified.
         document.querySelectorAll('[data-mail-status-dot]').forEach((el) => {
-            el.classList.toggle('is-off', !configured);
+            el.classList.remove('is-off', 'is-unconfigured', 'is-saved', 'is-verified');
+            if (verified) el.classList.add('is-verified');
+            else if (configured) el.classList.add('is-saved');
+            else el.classList.add('is-unconfigured');
         });
         document.querySelectorAll('[data-mail-status-meta]').forEach((el) => {
             el.textContent = verified ? `邮箱已连接 · ${host}`
@@ -1805,8 +1980,34 @@
         });
     }
 
+    /* Recompute mail status from the live form (used when IMAP fields change). */
+    function refreshMailStatusFromForm() {
+        const tlsEl = document.querySelector('[data-config-check="imap.tls"]');
+        const cfg = {
+            imap: {
+                host: document.querySelector('[data-config="imap.host"]')?.value || '',
+                port: document.querySelector('[data-config="imap.port"]')?.value || '',
+                user: document.querySelector('[data-config="imap.user"]')?.value || '',
+                pass: document.querySelector('[data-config="imap.pass"]')?.value || '',
+                tls: tlsEl ? isChecked(tlsEl) : true,
+            },
+        };
+        const secrets = window.FPH.configPayload?.secrets || {};
+        // Typed password counts as a credential change; empty keeps the stored shadow.
+        const passTyped = String(cfg.imap.pass || '').trim();
+        const effectiveSecrets = passTyped
+            ? { ...secrets, imapPass: true }
+            : secrets;
+        applyMailStatus(cfg, effectiveSecrets);
+    }
+
     function applyConfig(cfg, secrets = {}) {
         applyMailStatus(cfg, secrets);
+        // FE-02: never overwrite a dirty draft with a concurrent getConfig hydrate.
+        if (window.MFH_CONFIG_IS_DIRTY?.() === true) {
+            applyOcrStatusCards();
+            return;
+        }
         const set = (selector, value) => {
             const el = document.querySelector(selector);
             if (el && value !== undefined && value !== null) el.value = value;
@@ -1839,14 +2040,20 @@
         set('[data-config="paths.samples"]', cfg.paths?.samples);
         set('[data-config="paths.invoices"]', cfg.paths?.invoices);
         set('[data-config="paths.pending"]', cfg.paths?.pending);
-        const setText = (selector, value) => {
+        // COPY-15: About page keeps generic Chinese copy — never overwrite with
+        // absolute/relative machine paths or put them in title tooltips.
+        const setPathStatus = (selector, value) => {
             document.querySelectorAll(selector).forEach((el) => {
-                if (value) el.textContent = value;
+                if (value) {
+                    el.textContent = '已配置（在「邮箱与保存」中管理）';
+                    el.removeAttribute('title');
+                    el.classList.add('setting-row__value');
+                }
             });
         };
-        setText('[data-settings-path="samples"]', cfg.paths?.samples);
-        setText('[data-settings-path="invoices"]', cfg.paths?.invoices);
-        setText('[data-settings-path="pending"]', cfg.paths?.pending);
+        setPathStatus('[data-settings-path="samples"]', cfg.paths?.samples);
+        setPathStatus('[data-settings-path="invoices"]', cfg.paths?.invoices);
+        setPathStatus('[data-settings-path="pending"]', cfg.paths?.pending);
         set('[data-config="output.csv"]', cfg.output?.csv);
         set('[data-config="rename.rule"]', cfg.rename?.rule);
         set('[data-config="rename.fallback"]', cfg.rename?.fallback);
@@ -1862,7 +2069,8 @@
             setChecked(el, cfg.rename?.organizeByType === true);
         });
         set('[data-config="network.retries"]', cfg.network?.retries);
-        set('[data-config="network.retryDelayMs"]', cfg.network?.retryDelayMs);
+        // COPY-14: present retry/wait times in seconds in the form; config stays ms.
+        set('[data-config="network.retryDelayMs"]', msToSecondsField(cfg.network?.retryDelayMs));
         set('[data-config="ocr.provider"]', cfg.ocr?.enabled === false ? 'none' : (cfg.ocr?.provider || 'efapiao'));
         set('[data-config="ocr.ocrMode"]', cfg.ocr?.ocrMode || 'auto');
         set('[data-config="ocr.executionMode"]', cfg.ocr?.executionMode);
@@ -1881,11 +2089,21 @@
         setSecretPlaceholder('[data-config="imap.pass"]', Boolean(secrets.imapPass ?? cfg.imap?.pass));
         setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretId"]', Boolean(secrets.tencentSecretId ?? cfg.ocr?.credentials?.tencentSecretId ?? cfg.ocr?.credentials?.secretId));
         setSecretPlaceholder('[data-config="ocr.credentials.tencentSecretKey"]', Boolean(secrets.tencentSecretKey ?? cfg.ocr?.credentials?.tencentSecretKey ?? cfg.ocr?.credentials?.secretKey));
-        set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || 'ap-shanghai');
+        set('[data-config="ocr.credentials.tencentRegion"]', cfg.ocr?.credentials?.tencentRegion || cfg.ocr?.credentials?.region || '');
         // playwright.browserManagement is intentionally not surfaced: the setting
         // was never read by the CLI (APP-19). Chrome/Edge must exist on the system.
-        set('[data-config="playwright.timeoutMs"]', cfg.playwright?.timeoutMs);
+        set('[data-config="playwright.timeoutMs"]', msToSecondsField(cfg.playwright?.timeoutMs));
         applyOcrStatusCards();
+    }
+
+    /* COPY-14 helpers: form fields show seconds; on-disk config keeps milliseconds. */
+    function msToSecondsField(ms) {
+        if (ms === undefined || ms === null || ms === '') return '';
+        const n = Number(ms);
+        if (!Number.isFinite(n)) return '';
+        // Prefer whole seconds; keep one decimal when the stored value is fractional seconds.
+        const sec = n / 1000;
+        return Number.isInteger(sec) ? String(sec) : String(Math.round(sec * 10) / 10);
     }
 
     /* ---------- Page-commit hook ----------
@@ -1952,7 +2170,6 @@
         'reload-mailboxes',
         'developer-reset',
         'clear-secret',
-        'organize',
         'rename-organize',
         'run-pipeline',
         'rerun-pipeline',
@@ -1967,7 +2184,6 @@
         'reload-mailboxes': '正在读取…',
         'developer-reset': '正在删除…',
         'clear-secret': '正在清除…',
-        'organize': '正在整理…',
         'rename-organize': '正在改名…',
         'run-pipeline': '正在获取…',
         'rerun-pipeline': '正在重新获取…',
@@ -1999,22 +2215,32 @@
         }
     }
 
+    const MUTEX_ACTIONS = new Set(['run-pipeline', 'rerun-pipeline', 'ocr-toggle', 'rename-organize']);
+
     async function handleAction(action) {
         const name = action.dataset.action;
-        if (BUSY_ACTIONS.has(name)) {
-            // For pending-primary, also lock peer buttons so users can't fire on multiple rows.
-            const peers = name === 'pending-primary'
-                ? Array.from(document.querySelectorAll('[data-action="pending-primary"]')).filter((el) => el !== action)
-                : [];
-            const peerStates = peers.map((el) => ({ el, wasDisabled: el.disabled }));
-            for (const { el } of peerStates) el.disabled = true;
-            try {
-                return await withBusyButton(action, () => handleActionImpl(action, name));
-            } finally {
-                for (const { el, wasDisabled } of peerStates) el.disabled = wasDisabled;
+        // FE-08: lock every mutex start entry before any await/IPC.
+        const needsMutex = MUTEX_ACTIONS.has(name)
+            && !(name === 'ocr-toggle' && (action.dataset.ocrMode === 'stop' || action.dataset.ocrMode === 'stopping'));
+        if (needsMutex) beginLocalMutexLock(name);
+        try {
+            if (BUSY_ACTIONS.has(name)) {
+                // For pending-primary, also lock peer buttons so users can't fire on multiple rows.
+                const peers = name === 'pending-primary'
+                    ? Array.from(document.querySelectorAll('[data-action="pending-primary"]')).filter((el) => el !== action)
+                    : [];
+                const peerStates = peers.map((el) => ({ el, wasDisabled: el.disabled }));
+                for (const { el } of peerStates) el.disabled = true;
+                try {
+                    return await withBusyButton(action, () => handleActionImpl(action, name));
+                } finally {
+                    for (const { el, wasDisabled } of peerStates) el.disabled = wasDisabled;
+                }
             }
+            return await handleActionImpl(action, name);
+        } finally {
+            if (needsMutex) endLocalMutexLock();
         }
-        return handleActionImpl(action, name);
     }
 
     async function handleActionImpl(action, name) {
@@ -2024,24 +2250,21 @@
         if (name === 'export-table') { exportVisibleTable(action); return; }
         if (name === 'load-more') { await loadMoreRows(action.dataset.loadKind || 'inbox', action); return; }
         if (name === 'copy-diagnostics') { await copyPendingDiagnostics(action.dataset.hash || ''); return; }
-        if (name === 'copy-text') { await copyText(sanitizeText(action.dataset.copyText || '')); return; }
+        if (name === 'export-pending-tech') { exportPendingTechTable(); return; }
         if (name === 'open-invoices-folder') { await openConfiguredPath('paths.invoices', './invoices'); return; }
         if (name === 'open-pending-folder') { await openConfiguredPath('paths.pending', './pending'); return; }
         if (name === 'open-samples-folder') { await openConfiguredPath('paths.samples', './samples/raw'); return; }
         if (name === 'open-row-file') { await openRowFile(action); return; }
         if (name === 'ocr-toggle') { await handleOcrToggle(action); return; }
-        if (name === 'organize' || name === 'rename-organize') {
+        if (name === 'rename-organize') {
             const fn = window.mfhBridge?.organize;
             if (!fn) { bridgeUnavailable(); return; }
-            const applyRename = name === 'rename-organize';
-            const result = await fn({ applyRename });
+            const result = await fn({ applyRename: true });
             if (result?.summary) applySummary(result.summary);
             const empty = typeof result?.message === 'string' && result.message.includes('目前没有可整理');
             const kind = result?.ok ? (empty ? 'warn' : 'ok') : 'err';
-            const successTitle = applyRename ? '改名完成' : '整理完成';
-            const emptyTitle = '没有可整理的识别结果';
-            const title = result?.ok ? (empty ? emptyTitle : successTitle) : '运行失败';
-            const okFallback = applyRename ? '已按当前规则改名并整理输出。' : '已按当前规则整理输出。';
+            const title = result?.ok ? (empty ? '没有可整理的识别结果' : '改名完成') : '运行失败';
+            const okFallback = '已按当前规则改名并整理输出。';
             showToast(title, eventMessage(result) || (result?.ok ? okFallback : '请查看最近运行记录。'), kind, {
                 detail: result?.ok ? '' : eventDetail(result),
             });
@@ -2049,7 +2272,7 @@
         }
         if (name === 'run-pipeline') { await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: false }, '获取完成', '已从本地邮件中获取发票文件。'); return; }
         if (name === 'rerun-pipeline') {
-            const confirmed = window.confirm('重新获取会忽略已处理标记，重新跑一遍所有邮件。确认继续吗？');
+            const confirmed = window.confirm('重新获取发票文件会忽略已处理标记，重新跑一遍所有邮件。确认继续吗？');
             if (!confirmed) return;
             await runBridgeAction('runPipeline', { avoidConflictBeforeOcr: downloadRenameEnabled(), force: true }, '重新获取完成', '已重新获取本地邮件中的发票文件。');
             return;
@@ -2061,7 +2284,10 @@
             if (hasPending && !window.confirm('当前还有未保存的改动，重新读取后会被丢弃。确认继续吗？')) {
                 return;
             }
-            window.MFH_CONFIG_CANCEL_PENDING_SAVE?.();
+            // FE-02: cancel supersedes queued writes and waits for in-flight ones.
+            if (typeof window.MFH_CONFIG_CANCEL_PENDING_SAVE === 'function') {
+                try { await window.MFH_CONFIG_CANCEL_PENDING_SAVE(); } catch { /* already surfaced */ }
+            }
             await loadBridgeConfig();
             // Clear any lingering invalid markers since values just came from disk.
             document.querySelectorAll('[data-config].is-invalid').forEach((el) => el.classList.remove('is-invalid'));
@@ -2093,7 +2319,7 @@
         try {
             const saved = await saveConfigChecked(patch);
             if (!saved.ok) return;
-            window.FPH.credentialsVerified = false;
+            if (key === 'imap.pass' || key.startsWith('imap.')) clearMailVerification();
             await loadBridgeConfig();
             const input = document.querySelector(`[data-config="${key}"]`);
             if (input) input.value = '';
@@ -2153,29 +2379,62 @@
             el.dataset.ocrMode = 'stopping';
             el.textContent = '正在停止…';
         });
-        const result = await fn();
-        if (!result?.ok) {
-            setOcrControlState('running');
-        } else {
-            // Safety net: if the engine ignored SIGTERM, restore the button so the user can retry.
-            window.clearTimeout(window.FPH?._stopOcrFallback);
-            const timer = window.setTimeout(() => {
-                document.querySelectorAll('[data-action="ocr-toggle"]').forEach((el) => {
-                    if (el.dataset.ocrMode === 'stopping') {
-                        el.disabled = false;
-                        el.dataset.ocrMode = 'stop';
-                        el.textContent = '再次尝试停止';
+        // Establish the fallback BEFORE awaiting so a rejected IPC cannot jam the button (FE-07).
+        window.clearTimeout(window.FPH?._stopOcrFallback);
+        const timer = window.setTimeout(async () => {
+            try {
+                const read = window.mfhBridge?.getOpState;
+                if (typeof read === 'function') {
+                    const state = await read();
+                    window.FPH.opState = state?.running || null;
+                    window.FPH.opStateSync = 'ok';
+                    applyOpState(window.FPH.opState);
+                    if (window.FPH.opState?.kind === 'ocr') {
+                        document.querySelectorAll('[data-action="ocr-toggle"]').forEach((el) => {
+                            el.disabled = false;
+                            el.dataset.ocrMode = 'stop';
+                            el.textContent = '再次尝试停止';
+                        });
+                        return;
                     }
-                });
-            }, 5000);
-            if (window.FPH) window.FPH._stopOcrFallback = timer;
+                }
+            } catch { /* fall through to idle restore */ }
+            setOcrControlState(ocrJobRunning() ? 'running' : 'idle');
+            applyOpState(window.FPH.opState || null);
+        }, 5000);
+        if (window.FPH) window.FPH._stopOcrFallback = timer;
+        try {
+            const result = await fn();
+            if (!result?.ok) {
+                window.clearTimeout(window.FPH?._stopOcrFallback);
+                if (window.FPH) window.FPH._stopOcrFallback = 0;
+                setOcrControlState(ocrJobRunning() ? 'running' : 'idle');
+                applyOpState(window.FPH.opState || null);
+            }
+            showToast(
+                result?.ok ? '正在停止识别' : '停止失败',
+                eventMessage(result) || (result?.ok ? '已经发出停止指令，正在等待引擎退出。' : '没能停止识别，请稍后重试。'),
+                result?.ok ? 'warn' : 'err',
+                { detail: result?.ok ? '' : eventDetail(result), scope: result?.ok ? 'page' : 'global' },
+            );
+        } catch (err) {
+            window.clearTimeout(window.FPH?._stopOcrFallback);
+            if (window.FPH) window.FPH._stopOcrFallback = 0;
+            try {
+                const read = window.mfhBridge?.getOpState;
+                if (typeof read === 'function') {
+                    const state = await read();
+                    window.FPH.opState = state?.running || null;
+                    window.FPH.opStateSync = 'ok';
+                }
+            } catch { /* keep previous opState */ }
+            setOcrControlState(ocrJobRunning() ? 'running' : 'idle');
+            applyOpState(window.FPH.opState || null);
+            showToast('停止失败', '没能停止识别，请稍后重试。', 'err', {
+                scope: 'global',
+                detail: err?.message,
+            });
         }
-        showToast(
-            result?.ok ? '正在停止识别' : '停止失败',
-            eventMessage(result) || (result?.ok ? '已经发出停止指令，正在等待引擎退出。' : '没能停止识别，请稍后重试。'),
-            result?.ok ? 'warn' : 'err',
-            { detail: result?.ok ? '' : eventDetail(result) },
-        );
     }
 
     function bridgeUnavailable() {
@@ -2322,7 +2581,7 @@
         await copyText(lines.join('\n'), '诊断信息');
     }
 
-    async function copyText(value, label) {
+    async function copyText(value, label, opts = {}) {
         try {
             if (window.mfhBridge?.copyText) {
                 await window.mfhBridge.copyText({ text: value });
@@ -2333,9 +2592,14 @@
             }
         } catch (err) {
             showToast('复制失败', '当前环境不允许写入剪贴板，请改用桌面版或检查权限。', 'err', { detail: err?.message });
-            return;
+            return false;
         }
-        showToast('已复制', label ? `${label}已复制到剪贴板。` : '内容已复制到剪贴板。');
+        if (opts.silent) return true;
+        const kind = opts.kind || 'ok';
+        const title = opts.title || '已复制';
+        const message = opts.message || (label ? `${label}已复制到剪贴板。` : '内容已复制到剪贴板。');
+        showToast(title, message, kind);
+        return true;
     }
 
     /* ---------- Config save contract (APP-08 / UI-06) ----------
@@ -2554,11 +2818,56 @@
             detail: result?.ok ? '' : eventDetail(result),
         });
         if (result?.ok) {
-            // Only a real successful connection may mark credentials as configured.
-            window.FPH.credentialsVerified = true;
+            // UI-01: only a real successful connection may mark credentials verified,
+            // and only for the exact settings that were tested.
+            const testedCfg = payload || window.FPH.configPayload?.config || {};
+            const testedSecrets = window.FPH.configPayload?.secrets || {};
+            if (payload?.imap) {
+                markMailVerified(payload, {
+                    ...testedSecrets,
+                    imapPass: Boolean(payload.imap.pass) || testedSecrets.imapPass,
+                });
+            } else {
+                markMailVerified(testedCfg, testedSecrets);
+            }
+            applyMailStatus(
+                payload?.imap ? payload : testedCfg,
+                payload?.imap
+                    ? { ...testedSecrets, imapPass: Boolean(payload.imap.pass) || testedSecrets.imapPass }
+                    : testedSecrets,
+            );
             await reloadMailboxes({ silent: true });
             await loadBridgeConfig();
+        } else {
+            clearMailVerification();
+            refreshMailStatusFromForm();
         }
+    }
+
+    /* COPY-14: common IMAP folder names shown in Chinese; value stays machine name. */
+    const MAILBOX_DISPLAY = {
+        INBOX: '收件箱',
+        SENT: '已发送',
+        'SENT MESSAGES': '已发送',
+        'SENT ITEMS': '已发送',
+        DRAFTS: '草稿箱',
+        DRAFT: '草稿箱',
+        TRASH: '已删除',
+        'DELETED MESSAGES': '已删除',
+        JUNK: '垃圾邮件',
+        SPAM: '垃圾邮件',
+        ARCHIVE: '归档',
+        ARCHIVES: '归档',
+        JUNKMAIL: '垃圾邮件',
+    };
+    function mailboxDisplayName(name) {
+        const raw = String(name || '');
+        if (!raw) return raw;
+        const upper = raw.toUpperCase();
+        if (MAILBOX_DISPLAY[upper]) return MAILBOX_DISPLAY[upper];
+        // Gmail-style "[Gmail]/已发送邮件" etc. — keep server label as-is when already CJK.
+        if (/[\u4e00-\u9fff]/.test(raw)) return raw;
+        return raw;
     }
 
     function setMailboxOptions(mailboxes, selected) {
@@ -2570,7 +2879,7 @@
             if (value && !list.includes(value)) list.push(value);
         }
         select.innerHTML = list
-            .map((name) => `<option value="${escapeHtml(name)}"${chosen.has(name) ? ' selected' : ''}>${escapeHtml(name)}</option>`)
+            .map((name) => `<option value="${escapeHtml(name)}"${chosen.has(name) ? ' selected' : ''}>${escapeHtml(mailboxDisplayName(name))}</option>`)
             .join('');
         // Programmatic mutation does not fire change naturally — emit one so autosave / status pills react.
         select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2730,7 +3039,7 @@
             `邮箱文件夹：${mailboxes}`,
             dryRun ? '模式：只预览，不保存原件' : '模式：保存命中邮件到本机',
         ];
-        showToast('将要执行的抓取', lines.join(' · '), 'ok', { duration: 6000 });
+        showToast('操作预览', lines.join(' · '), 'ok', { duration: 6000 });
     }
 
     function exportVisibleLog() {
@@ -2758,19 +3067,80 @@
 
     function tableSourceLabel() {
         const page = document.body.dataset.page;
-        if (page === 'inbox') return '收件箱';
+        if (page === 'inbox') return '邮件记录';
         if (page === 'library') return '发票库';
-        if (page === 'pending') return '待确认队列';
+        if (page === 'pending') return '待确认';
         return '当前表格';
+    }
+
+    /* Spreadsheet-safe CSV encoding (FE-05): quote fields and neutralize formula
+       characters even when they appear after leading whitespace and/or quotes.
+       Prefix the ENTIRE original value so Excel/Sheets treats it as text.
+       Existing CSV quoting and embedded-quote doubling stay correct. */
+    function csvSafeText(value) {
+        const s = String(value ?? '');
+        // Strip leading whitespace and ASCII/smart quotes only for the danger check;
+        // the neutralization prefix is always applied to the full original string.
+        // \u2018\u2019 = ‘’  \u201C\u201D = “”
+        const stripped = s.replace(/^[\s'"`\u2018\u2019\u201C\u201D]+/, '');
+        if (/^[=+\-@\t\r]/.test(stripped)) return `'${s}`;
+        return s;
+    }
+    function csvField(value) {
+        return `"${csvSafeText(value).replace(/"/g, '""')}"`;
+    }
+
+    function selectVisibleInboxRows() {
+        const scope = activeMain();
+        const query = String(scope.querySelector('[data-search="inbox"]')?.value || '').trim().toLowerCase();
+        const attachmentOnly = scope.querySelector('[data-filter="inbox-attachment"]')?.classList.contains('is-active');
+        const linksOnly = scope.querySelector('[data-filter="inbox-links"]')?.classList.contains('is-active');
+        const loadedRows = window.FPH.inboxRows || [];
+        return sortRows(loadedRows.filter((row) => {
+            const haystack = `${row.messageId || ''} ${row.from || ''} ${row.subject || ''} ${row.mailbox || ''}`.toLowerCase();
+            if (query && !haystack.includes(query)) return false;
+            if (attachmentOnly && !row.hasAttachment) return false;
+            if (linksOnly && Number(row.bodyLinkCount || 0) <= 0) return false;
+            return true;
+        }), 'sortInbox');
+    }
+
+    function selectVisibleLibraryRows() {
+        const scope = activeMain();
+        const query = String(scope.querySelector('[data-search="library"]')?.value || '').trim().toLowerCase();
+        const activeTab = scope.querySelector('[data-library-tab].is-active')?.dataset.libraryTab || 'all';
+        const seller = scope.querySelector('[data-library-seller]')?.value || '';
+        const loadedRows = window.FPH.libraryRows || [];
+        return sortRows(loadedRows.filter((row) => {
+            const haystack = `${row.seller || ''} ${row.invoiceNo || ''} ${row.amount || ''} ${row.filename || ''} ${row.error || ''}`.toLowerCase();
+            if (query && !haystack.includes(query)) return false;
+            if (seller && row.seller !== seller) return false;
+            const status = String(row.status || '');
+            const docType = String(row.documentType || '');
+            if (activeTab === 'recognized' && status !== STATUS.COMPLETE) return false;
+            if (activeTab === 'partial' && status !== STATUS.PARTIAL) return false;
+            if (activeTab === 'failed' && status !== STATUS.FAILED) return false;
+            if (activeTab === 'supporting' && docType !== 'supporting') return false;
+            if (activeTab === 'itinerary' && docType !== 'itinerary') return false;
+            return true;
+        }), 'sortLibrary');
+    }
+
+    function exportCoverageNote(exported, loaded, total) {
+        const parts = [`已复制当前筛选结果 ${fmtInt(exported)} 条`];
+        if (Number(loaded) < Number(total)) {
+            parts.push(`仅含已加载的 ${fmtInt(loaded)} / ${fmtInt(total)} 条记录，未加载的内容未包含`);
+        }
+        return parts.join('。') + '。';
     }
 
     function exportVisibleTable(action) {
         const scope = activeMain();
         const page = document.body.dataset.page;
-        const csvField = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
         if (page === 'pending') {
             const groups = window.FPH.pending?.groups || [];
-            const lines = [['分组', '下一步', '主题', '日期', '发件人', '原因分类', '支持编号', '诊断原因（已脱敏）'].map(csvField).join(',')];
+            // COPY-13: default list is for reimbursement work, not support diagnostics.
+            const lines = [['分类', '下一步', '邮件标题', '日期', '发件人', '原因说明'].map(csvField).join(',')];
             for (const group of groups) {
                 const [primary] = actionText(group.action);
                 for (const row of group.rows || []) {
@@ -2780,19 +3150,22 @@
                         row.subject || '',
                         (row.date || '').slice(0, 10),
                         row.from || '',
-                        rowCategory(row),
-                        supportRef(row.hash),
-                        sanitizeText(row.reason || ''),
+                        rowUserMessage(row, group),
                     ].map(csvField).join(','));
                 }
             }
-            if (lines.length === 1) { showToast('没有可复制的内容', '当前待确认队列为空。', 'warn'); return; }
-            copyText(lines.join('\n'), '待确认队列 CSV');
+            if (lines.length === 1) { showToast('没有可复制的内容', '当前待确认列表为空。', 'warn'); return; }
+            copyText(lines.join('\n'), '待确认清单', {
+                title: '已复制待确认清单',
+                message: `共 ${fmtInt(lines.length - 1)} 条，可粘贴到 Excel。`,
+            });
             return;
         }
         if (page === 'inbox') {
-            const rows = window.FPH.inboxRows || [];
-            const lines = [['日期', '发件人', '主题', '附件', '链接数', '邮箱'].map(csvField).join(',')];
+            const rows = selectVisibleInboxRows();
+            const loaded = (window.FPH.inboxRows || []).length;
+            const total = Number(window.FPH.inboxTotal ?? loaded);
+            const lines = [['日期', '发件人', '邮件标题', '附件', '链接数', '邮箱'].map(csvField).join(',')];
             for (const row of rows) {
                 lines.push([
                     fmtDateTime(row.date),
@@ -2803,26 +3176,35 @@
                     row.mailbox || '',
                 ].map(csvField).join(','));
             }
-            if (lines.length === 1) { showToast('没有可复制的内容', '当前收件箱为空。', 'warn'); return; }
-            copyText(lines.join('\n'), '收件箱 CSV');
+            if (lines.length === 1) { showToast('没有可复制的内容', '当前筛选结果为空。', 'warn'); return; }
+            copyText(lines.join('\n'), '邮件记录', {
+                title: '已复制当前筛选结果',
+                message: exportCoverageNote(rows.length, loaded, total),
+                kind: loaded < total ? 'warn' : 'ok',
+            });
             return;
         }
         if (page === 'library') {
-            const rows = window.FPH.libraryRows || [];
-            const lines = [['开票日期', '销售方', '发票号码', '金额', '来源', '文件名', '状态'].map(csvField).join(',')];
+            const rows = selectVisibleLibraryRows();
+            const loaded = (window.FPH.libraryRows || []).length;
+            const total = Number(window.FPH.libraryTotal ?? loaded);
+            const lines = [['开票日期', '销售方', '发票号码', '金额', '文件名', '状态'].map(csvField).join(',')];
             for (const row of rows) {
                 lines.push([
                     (row.date || '').slice(0, 10),
                     row.seller || '',
                     row.invoiceNo || '',
                     row.amount || '',
-                    sourceLabel(row.source),
                     row.filename || '',
                     row.status || '',
                 ].map(csvField).join(','));
             }
-            if (lines.length === 1) { showToast('没有可复制的内容', '当前发票库为空。', 'warn'); return; }
-            copyText(lines.join('\n'), '发票库 CSV');
+            if (lines.length === 1) { showToast('没有可复制的内容', '当前筛选结果为空。', 'warn'); return; }
+            copyText(lines.join('\n'), '发票库', {
+                title: '已复制当前筛选结果',
+                message: exportCoverageNote(rows.length, loaded, total),
+                kind: loaded < total ? 'warn' : 'ok',
+            });
             return;
         }
         const table = action.closest('.card')?.querySelector('table') || scope.querySelector('table');
@@ -2830,7 +3212,29 @@
         const csv = Array.from(table.querySelectorAll('tr')).map((tr) => (
             Array.from(tr.children).map((cell) => csvField(cell.textContent.trim())).join(',')
         )).join('\n');
-        copyText(csv, `${tableSourceLabel()} CSV`);
+        copyText(csv, `${tableSourceLabel()}`);
+    }
+
+    function exportPendingTechTable() {
+        const groups = window.FPH.pending?.groups || [];
+        const lines = [['分类', '邮件标题', '日期', '发件人', '支持编号', '诊断原因（已脱敏）'].map(csvField).join(',')];
+        for (const group of groups) {
+            for (const row of group.rows || []) {
+                lines.push([
+                    group.title || '',
+                    row.subject || '',
+                    (row.date || '').slice(0, 10),
+                    row.from || '',
+                    supportRef(row.hash),
+                    sanitizeText(row.reason || ''),
+                ].map(csvField).join(','));
+            }
+        }
+        if (lines.length === 1) { showToast('没有可复制的内容', '当前待确认列表为空。', 'warn'); return; }
+        copyText(lines.join('\n'), '待确认技术详情', {
+            title: '已复制技术详情',
+            message: `共 ${fmtInt(lines.length - 1)} 条诊断信息。`,
+        });
     }
 
     function shortSender(value) {
@@ -2851,13 +3255,15 @@
     }
 
     /* showToast(title, sub, kind, options)
-       options: number (legacy duration) | { duration, detail, sticky }
-       - success/info → role="status", auto-dismiss
-       - failures that need action (kind === 'err') → role="alert", never
-         auto-dismiss, always closable
+       options: number (legacy duration) | { duration, detail, sticky, scope }
+       - success/info → role="status", auto-dismiss, page-scoped
+       - failures (kind === 'err') → role="alert", sticky until dismissed,
+         global scope so navigation cannot silently drop them (FE-10)
        - hover/focus pauses the dismissal timer
-       - technical output only appears inside the redacted「诊断信息」disclosure */
+       - technical output only appears inside the redacted「诊断信息」disclosure
+       - exit always goes through dismissToastElement for a leave animation (UI-07) */
     const MAX_VISIBLE_TOASTS = 4;
+    const TOAST_LEAVE_MS = 160;
 
     function toastStack() {
         let stack = document.querySelector('.toast-stack');
@@ -2869,23 +3275,46 @@
         return stack;
     }
 
-    /* Sticky errors used to grow without bound: with no cap, no dedupe and no
-       scroll the oldest toasts left the viewport and their close buttons became
-       unreachable (FB-02). */
-    function trimToastStack(stack) {
-        const toasts = Array.from(stack.querySelectorAll('.toast'));
-        const excess = toasts.length - MAX_VISIBLE_TOASTS;
-        if (excess <= 0) return;
-        // Drop auto-dismissing toasts first; only then the oldest sticky ones.
-        const disposable = toasts.filter((el) => el.dataset.toastSticky !== 'true');
-        const ordered = disposable.concat(toasts.filter((el) => el.dataset.toastSticky === 'true'));
-        ordered.slice(0, excess).forEach((el) => el.remove());
+    function clearToastTimer(toast) {
+        if (!toast) return;
+        const id = Number(toast.dataset.toastTimer || 0);
+        if (id) window.clearTimeout(id);
+        delete toast.dataset.toastTimer;
     }
 
-    /* Close every page-scoped toast; background job failures are marked
-       `scope: 'global'` and survive navigation. */
+    function dismissToastElement(toast, opts = {}) {
+        if (!toast || toast.dataset.toastLeaving === 'true') return;
+        // UI-07 / NEW-DEFECT 6: centralize timer cleanup so dismissed toasts
+        // never keep a duration callback that fires after DOM removal.
+        clearToastTimer(toast);
+        if (prefersReducedMotion() || opts.immediate) {
+            toast.dataset.toastLeaving = 'true';
+            toast.remove();
+            return;
+        }
+        toast.dataset.toastLeaving = 'true';
+        toast.classList.add('is-leaving');
+        const finish = () => { if (toast.isConnected) toast.remove(); };
+        toast.addEventListener('animationend', finish, { once: true });
+        window.setTimeout(finish, TOAST_LEAVE_MS + 40);
+    }
+
+    /* Sticky errors must never be deleted by trim or navigation. Disposable
+       toasts go first; if sticky still overflow, the stack scrolls (FE-10). */
+    function trimToastStack(stack) {
+        const toasts = Array.from(stack.querySelectorAll('.toast:not(.is-leaving)'));
+        const excess = toasts.length - MAX_VISIBLE_TOASTS;
+        if (excess <= 0) return;
+        const disposable = toasts.filter((el) => el.dataset.toastSticky !== 'true');
+        disposable.slice(0, excess).forEach((el) => dismissToastElement(el));
+    }
+
+    /* Close non-sticky page-scoped toasts only. Sticky/global errors survive. */
     function dismissPageToasts() {
-        document.querySelectorAll('.toast[data-toast-scope="page"]').forEach((el) => el.remove());
+        document.querySelectorAll('.toast[data-toast-scope="page"]').forEach((el) => {
+            if (el.dataset.toastSticky === 'true') return;
+            dismissToastElement(el);
+        });
     }
 
     function showToast(title, sub, kind = 'ok', options) {
@@ -2894,7 +3323,8 @@
             : (options && typeof options === 'object' ? options : {});
         const isError = kind === 'err';
         const sticky = opts.sticky ?? isError;
-        const scope = opts.scope === 'global' ? 'global' : 'page';
+        // Errors default to global so SPA navigation cannot wipe unacked failures.
+        const scope = opts.scope ? opts.scope : (isError || sticky ? 'global' : 'page');
         const duration = Math.max(1500, Number(opts.duration) || (kind === 'warn' ? 4200 : 2600));
         const detail = opts.detail ? sanitizeText(opts.detail) : '';
         const safeSub = sub ? sanitizeText(sub) : '';
@@ -2903,7 +3333,7 @@
         const stack = toastStack();
 
         // Merge repeats of the same message instead of stacking copies.
-        const existing = Array.from(stack.querySelectorAll('.toast'))
+        const existing = Array.from(stack.querySelectorAll('.toast:not(.is-leaving)'))
             .find((el) => el.dataset.toastSignature === signature);
         if (existing) {
             const count = Number(existing.dataset.toastCount || 1) + 1;
@@ -2935,7 +3365,7 @@
         close.className = 'toast__close';
         close.type = 'button';
         close.setAttribute('aria-label', '关闭提示');
-        close.textContent = '\u00d7';
+        close.textContent = '×';
 
         const titleEl = document.createElement('div');
         titleEl.className = 'strong';
@@ -2968,22 +3398,27 @@
             toast.append(details, actions);
         }
         stack.appendChild(toast);
+        // Trim may immediately dismiss this toast when sticky items fill the stack.
         trimToastStack(stack);
 
-        let timer = 0;
-        const dismiss = () => { window.clearTimeout(timer); toast.remove(); };
+        const dismiss = () => dismissToastElement(toast);
         const schedule = () => {
+            // UI-07: refuse scheduling for sticky, leaving, or disconnected toasts
+            // (trim/mouseleave/focusout can race after dismissal).
             if (sticky) return;
-            window.clearTimeout(timer);
-            timer = window.setTimeout(dismiss, duration);
+            if (toast.dataset.toastLeaving === 'true') return;
+            if (!toast.isConnected) return;
+            clearToastTimer(toast);
+            const timer = window.setTimeout(dismiss, duration);
+            toast.dataset.toastTimer = String(timer);
         };
         close.addEventListener('click', dismiss);
         toast.querySelector('[data-toast-copy]')?.addEventListener('click', () => {
             copyText(`${title}\n${safeSub}\n\n${detail}`, '诊断信息');
         });
-        toast.addEventListener('mouseenter', () => window.clearTimeout(timer));
+        toast.addEventListener('mouseenter', () => clearToastTimer(toast));
         toast.addEventListener('mouseleave', schedule);
-        toast.addEventListener('focusin', () => window.clearTimeout(timer));
+        toast.addEventListener('focusin', () => clearToastTimer(toast));
         toast.addEventListener('focusout', schedule);
         toast.addEventListener('mfh:toast-repeat', schedule);
         schedule();
@@ -3015,6 +3450,12 @@
         showConfigError,
         clearConfigError,
         repairConfig,
+        beginLocalMutexLock,
+        endLocalMutexLock,
+        clearMailVerification,
+        refreshMailStatusFromForm,
+        markMailVerified,
+        applyMailStatus,
         applyOpState,
         applyLiveState,
         loadAppInfo,

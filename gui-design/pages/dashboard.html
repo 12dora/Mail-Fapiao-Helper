@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>运行控制台 · 发票助手</title>
+    <title>开始处理 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="dashboard">
@@ -13,10 +13,10 @@
 
     <main class="main">
         <div class="toolbar">
-            <span class="toolbar__crumb">工作流</span>
-            <h1 class="toolbar__title" tabindex="-1">运行控制台</h1>
+            <span class="toolbar__crumb">日常操作</span>
+            <h1 class="toolbar__title" tabindex="-1">开始处理</h1>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta"><span data-mail-status-meta>请先在「配置」页填写邮箱</span> · <span data-clock>--:--</span></span>
+            <span class="toolbar__meta"><span data-mail-status-meta>请先在「邮箱与保存」页填写邮箱</span> · <span data-clock>--:--</span></span>
         </div>
 
         <div class="page stagger">
@@ -98,14 +98,13 @@
                     </div>
                     <div class="small muted mb-12" data-normalized-filter></div>
 
-                    <div class="row gap-8 mb-12">
+                    <div class="row gap-8 mb-12 fetch-actions">
                         <button class="btn btn--primary" id="run-btn" type="button">
                             <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
-                            开始获取邮件
+                            获取邮件
                         </button>
-                        <button class="btn" type="button" data-action="preview-fetch">查看将要执行的操作</button>
-                        <div style="flex: 1;"></div>
-                        <span class="mono small muted" id="range-preview">--</span>
+                        <button class="btn" type="button" data-action="preview-fetch">操作预览</button>
+                        <span class="mono small muted range-preview" id="range-preview">--</span>
                     </div>
 
                     <div class="progress is-idle" id="run-progress" role="progressbar"
@@ -129,7 +128,7 @@
                         <h3 class="card__title" style="margin: 0;">获取邮件实时日志</h3>
                     </div>
                     <div class="console console--panel" id="console-out">
-                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">选择日期范围后，点击“开始获取邮件”才会运行。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">选择日期范围后，点击「获取邮件」才会运行。</span></div>
                     </div>
                 </div>
             </div>
@@ -163,7 +162,7 @@
                     </div>
                     <hr class="hairline">
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary" type="button" data-action="run-pipeline">开始获取发票文件</button>
+                        <button class="btn btn--sm btn--primary" type="button" data-action="run-pipeline">获取发票文件</button>
                         <button class="btn btn--sm" type="button" data-action="rerun-pipeline">重新获取（忽略已处理）</button>
                         <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
                     </div>
@@ -188,7 +187,7 @@
                         <h3 class="card__title" style="margin: 0;">获取发票文件实时日志</h3>
                     </div>
                     <div class="console console--panel" data-file-log>
-                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始获取发票文件”后，这里会显示下载和归档过程。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击「获取发票文件」后，这里会显示下载和归档过程。</span></div>
                     </div>
                 </div>
             </div>
@@ -198,20 +197,20 @@
                     <div class="row row--between mb-12">
                         <div>
                             <h3 class="card__title" style="margin: 0 0 4px;">第三步：识别发票文件（可选）</h3>
-                            <p class="card__sub" style="margin: 0;">把已获取的发票和行程单送到识别引擎，可按并行数加速处理</p>
+                            <p class="card__sub" style="margin: 0;">把已获取的发票和行程单送到识别引擎，可调整同时识别数量</p>
                         </div>
                         <span class="pill pill--info">再识别内容</span>
                     </div>
                     <div class="row gap-8">
-                        <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别发票文件</button>
+                        <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别</button>
                         <button class="btn btn--sm" type="button" data-action="rename-organize">一键改名</button>
                         <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
-                        <label class="sr-only" for="dash-ocr-parallel">识别并行数</label>
-                        <select class="select" id="dash-ocr-parallel" data-ocr-parallel style="width: 120px;">
-                            <option value="1" selected>1 个并行</option>
-                            <option value="2">2 个并行</option>
-                            <option value="4">4 个并行</option>
-                            <option value="8">8 个并行</option>
+                        <label class="sr-only" for="dash-ocr-parallel">同时识别数量</label>
+                        <select class="select" id="dash-ocr-parallel" data-ocr-parallel style="width: 160px;">
+                            <option value="1" selected>每次同时识别 1 份（推荐）</option>
+                            <option value="2">每次同时识别 2 份</option>
+                            <option value="4">每次同时识别 4 份</option>
+                            <option value="8">每次同时识别 8 份</option>
                         </select>
                     </div>
                     <div class="ocr-runner mt-12" data-ocr-runner>
@@ -235,7 +234,7 @@
                         <h3 class="card__title" style="margin: 0;">识别发票文件实时日志</h3>
                     </div>
                     <div class="console console--panel" data-ocr-log>
-                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击“开始识别发票文件”后，这里会显示识别过程。</span></div>
+                        <div class="console__line" data-placeholder><span class="console__time">--:--</span><span class="console__tag">待命</span><span class="console__msg">点击「开始识别」后，这里会显示识别过程。</span></div>
                     </div>
                 </div>
             </div>
@@ -245,7 +244,7 @@
                 <div style="padding: 18px; border-bottom: 1px solid var(--border);">
                     <div class="row row--between">
                         <div>
-                            <h3 class="card__title" style="margin: 0 0 4px;">本次抓取邮件清单</h3>
+                            <h3 class="card__title" style="margin: 0 0 4px;">本次获取的邮件</h3>
                             <p class="card__sub" style="margin: 0;" data-current-batch-note>只显示最近一次运行新增的邮件，不是全部本地缓存。</p>
                         </div>
                     </div>
@@ -265,7 +264,7 @@
                             </tr>
                         </thead>
                         <tbody data-current-batch-rows>
-                            <tr><td colspan="7" class="muted">本次还没有运行。点击“开始获取邮件”后，这里只显示这一次新保存的邮件。</td></tr>
+                            <tr><td colspan="7" class="muted">本次还没有运行。点击「获取邮件」后，这里只显示这一次新保存的邮件。</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -278,7 +277,7 @@
                 <div class="history-grid" data-run-history>
                     <div class="empty empty--compact">
                         <div class="empty__title">还没有运行记录</div>
-                        <div class="empty__sub">点击“开始获取邮件”或“开始识别发票文件”后，这里会显示真实结果。</div>
+                        <div class="empty__sub">点击「获取邮件」或「开始识别」后，这里会显示真实结果。</div>
                     </div>
                 </div>
 
@@ -502,69 +501,74 @@
         consoleOut.innerHTML = '';
         status.innerHTML = '<span class="pill pill--info"><span class="pill__dot"></span>运行中</span>';
         window.FPH?.announce?.('已开始获取邮件，正在连接邮箱。');
+        // FE-08: lock pipeline/OCR/organize peers before the first await.
+        window.FPH?.beginLocalMutexLock?.('fetch');
+        try {
+            // Make sure the bridge config has been applied before reading the checks, so we
+            // never send the hardcoded HTML defaults when the user has saved something else.
+            await window.FPH?.whenConfigReady?.();
 
-        // Make sure the bridge config has been applied before reading the checks, so we
-        // never send the hardcoded HTML defaults when the user has saved something else.
-        await window.FPH?.whenConfigReady?.();
+            const payload = {
+                // Local calendar days, passed through verbatim.
+                from: dateFrom.value,
+                to: dateTo.value,
+                matchSubject: fetchCheck('matchSubject'),
+                matchBody: fetchCheck('matchBody'),
+                dryRun: fetchCheck('dryRun'),
+            };
+            appendLog('开始', `正在${payload.dryRun ? '预览' : '获取'} ${payload.from} 至 ${payload.to} 的邮件`);
 
-        const payload = {
-            // Local calendar days, passed through verbatim.
-            from: dateFrom.value,
-            to: dateTo.value,
-            matchSubject: fetchCheck('matchSubject'),
-            matchBody: fetchCheck('matchBody'),
-            dryRun: fetchCheck('dryRun'),
-        };
-        appendLog('开始', `正在${payload.dryRun ? '预览' : '获取'} ${payload.from} 至 ${payload.to} 的邮件`);
-
-        if (window.mfhBridge?.startFetch) {
-            window.mfhBridge.onFetchProgress?.(applyProgress);
-            let result;
-            try {
-                result = await window.mfhBridge.startFetch(payload);
-            } catch (err) {
-                appendLog('失败', '获取邮件没有完成。', 'err');
-                status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+            if (window.mfhBridge?.startFetch) {
+                window.mfhBridge.onFetchProgress?.(applyProgress);
+                let result;
+                try {
+                    result = await window.mfhBridge.startFetch(payload);
+                } catch (err) {
+                    appendLog('失败', '获取邮件没有完成。', 'err');
+                    status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+                    progress.classList.remove('is-indeterminate');
+                    progress.classList.add('is-error');
+                    runBtn.dataset.busy = '';
+                    runBtn.disabled = false;
+                    window.FPH?.showToast?.('获取邮件失败', '没有连接成功，本机数据没有变化。', 'err', { detail: err?.message });
+                    return;
+                }
                 progress.classList.remove('is-indeterminate');
-                progress.classList.add('is-error');
-                runBtn.dataset.busy = '';
-                runBtn.disabled = false;
-                window.FPH?.showToast?.('获取邮件失败', '没有连接成功，本机数据没有变化。', 'err', { detail: err?.message });
+                if (result?.summary) window.FPH?.applySummary?.(result.summary);
+                if (result?.normalizedFilter) window.FPH?.applyNormalizedFilter?.(result.normalizedFilter);
+                // "本次抓取" only ever shows what this run actually returned.
+                window.FPH?.setCurrentBatch?.(result);
+                if (!result?.ok) {
+                    appendLog('失败', result?.message || '获取邮件失败，请检查配置。', 'err');
+                    status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
+                    progress.classList.add('is-error');
+                    runBtn.dataset.busy = '';
+                    runBtn.disabled = false;
+                    window.FPH?.showToast?.('获取邮件失败', result?.message || '请检查邮箱设置后重试。', 'err', {
+                        detail: result?.detail || result?.stderr || result?.error || '',
+                    });
+                    return;
+                }
+                // Fallback in case no final progress event arrived: guarantee the UI lands on "完成".
+                if (!progress.classList.contains('is-done')) {
+                    setProgressValue(100, '获取完成');
+                    progress.classList.add('is-done');
+                    status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
+                    runBtn.dataset.busy = '';
+                    runBtn.disabled = false;
+                    window.FPH?.announce?.('获取邮件完成。');
+                }
                 return;
             }
-            progress.classList.remove('is-indeterminate');
-            if (result?.summary) window.FPH?.applySummary?.(result.summary);
-            if (result?.normalizedFilter) window.FPH?.applyNormalizedFilter?.(result.normalizedFilter);
-            // "本次抓取" only ever shows what this run actually returned.
-            window.FPH?.setCurrentBatch?.(result);
-            if (!result?.ok) {
-                appendLog('失败', result?.message || '抓取失败，请检查配置。', 'err');
-                status.innerHTML = '<span class="pill pill--err"><span class="pill__dot"></span>失败</span>';
-                progress.classList.add('is-error');
-                runBtn.dataset.busy = '';
-                runBtn.disabled = false;
-                window.FPH?.showToast?.('获取邮件失败', result?.message || '请检查邮箱设置后重试。', 'err', {
-                    detail: result?.detail || result?.stderr || result?.error || '',
-                });
-                return;
-            }
-            // Fallback in case no final progress event arrived: guarantee the UI lands on "完成".
-            if (!progress.classList.contains('is-done')) {
-                setProgressValue(100, '获取完成');
-                progress.classList.add('is-done');
-                status.innerHTML = '<span class="pill pill--ok"><span class="pill__dot"></span>完成</span>';
-                runBtn.dataset.busy = '';
-                runBtn.disabled = false;
-                window.FPH?.announce?.('获取邮件完成。');
-            }
-            return;
-        }
 
-        progress.classList.remove('is-indeterminate');
-        appendLog('未运行', '请在桌面版中使用“开始获取邮件”，静态预览不会连接邮箱。', 'warn');
-        status.innerHTML = '<span class="pill pill--warn"><span class="pill__dot"></span>未运行</span>';
-        runBtn.dataset.busy = '';
-        runBtn.disabled = false;
+            progress.classList.remove('is-indeterminate');
+            appendLog('未运行', '请在桌面版中使用「获取邮件」，静态预览不会连接邮箱。', 'warn');
+            status.innerHTML = '<span class="pill pill--warn"><span class="pill__dot"></span>未运行</span>';
+            runBtn.dataset.busy = '';
+            runBtn.disabled = false;
+        } finally {
+            window.FPH?.endLocalMutexLock?.();
+        }
     }
 
     // Lets shell.js re-apply the date-range validity after an op-state unlock,
@@ -584,8 +588,6 @@
     setRange(rangePreset.value || 'month');
 })();
 
-window.MFH_PAGE_INIT = window.MFH_PAGE_INIT || {};
-window.MFH_PAGE_INIT.dashboard = () => {};
 </script>
 </body>
 </html>
