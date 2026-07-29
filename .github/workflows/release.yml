@@ -12,11 +12,19 @@ name: Release
 # unsigned-prerelease workflow may publish only an explicitly labelled GitHub
 # prerelease with `-unsigned` filenames and user-facing trust warnings.
 
+# NOTE: the automatic tag-push trigger is disabled while no signing secrets are
+# configured. This workflow is fail-closed by design (see the trust-chain gate
+# below), so every pushed vX.Y.Z tag produced an immediately failing run and a
+# tag with no Release attached. Until the certificates exist, stable tags are
+# published through the unsigned channel (marked unsigned in the artifact names
+# and in the release notes). Restore the `push.tags` trigger below as soon as
+# MACOS_CERTIFICATE_P12 / WINDOWS_CERTIFICATE_PFX / notarization secrets are set.
+#
+#  push:
+#    tags:
+#      - 'v*'
+#      - '!v*-unsigned*'
 on:
-  push:
-    tags:
-      - 'v*'
-      - '!v*-unsigned*'
   workflow_dispatch:
     inputs:
       tag:

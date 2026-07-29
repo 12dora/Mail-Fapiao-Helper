@@ -1,24 +1,33 @@
-name: Unsigned prerelease
+name: Unsigned release
 
-# Temporary distribution path for projects that do not yet have Apple
-# Developer ID / notarization and Windows Authenticode credentials.
+# Distribution path for projects that do not yet have Apple Developer ID /
+# notarization and Windows Authenticode credentials.
 #
 # This workflow is intentionally separate from release.yml:
 #   * it can only be started manually for an existing immutable semver tag;
 #   * every downloadable binary is built through the development channel and
-#     carries an `-unsigned` suffix;
-#   * the GitHub Release is always marked prerelease;
+#     carries an `-unsigned` suffix — that labelling is NOT optional;
 #   * no auto-update metadata is published;
 #   * release notes explain the missing trust chain and the safest per-app
 #     Gatekeeper override. The stable Release workflow remains fail-closed.
+#
+# `mark_prerelease` chooses only how the GitHub Release ENTRY is labelled. It
+# never changes how the binaries are built, named or verified: they are unsigned
+# either way, and the notes say so. Publishing an unsigned build as the latest
+# Release is a deliberate owner decision — see docs/SECURITY_NOTES.md.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '已存在的未签名 tag，例如 v0.0.5-unsigned.1（必须已推送，且与 package.json 一致）'
+        description: '已存在的 tag，例如 v0.0.5 或 v0.0.5-unsigned.1（必须已推送，且与 package.json 一致）'
         required: true
         type: string
+      mark_prerelease:
+        description: '标记为预发布版？取消勾选则作为正式（最新）Release 发布，安装包仍然是未签名的'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -46,8 +55,11 @@ jobs:
           set -euo pipefail
 
           TAG="${INPUT_TAG}"
-          if ! printf '%s' "${TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-unsigned\.(0|[1-9][0-9]*)$'; then
-            echo "::error::Tag '${TAG}' must use the explicit unsigned prerelease form vX.Y.Z-unsigned.N"
+          # Accept both the explicit unsigned prerelease form (vX.Y.Z-unsigned.N)
+          # and a plain stable tag (vX.Y.Z). The binaries are unsigned in both
+          # cases; the tag form does not change that, only the Release label does.
+          if ! printf '%s' "${TAG}" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-unsigned\.(0|[1-9][0-9]*))?$'; then
+            echo "::error::Tag '${TAG}' must be vX.Y.Z or vX.Y.Z-unsigned.N"
             exit 1
           fi
 
@@ -229,15 +241,17 @@ jobs:
           test -s SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
           target_commitish: ${{ needs.resolve.outputs.sha }}
-          name: 发票助手 ${{ needs.resolve.outputs.tag }}（未签名预发布版）
+          # The title always says 未签名 regardless of the prerelease flag: the
+          # binaries are unsigned either way and the user must know before install.
+          name: 发票助手 ${{ needs.resolve.outputs.tag }}（未签名）
           body_path: release-notes.md
           draft: false
-          prerelease: true
+          prerelease: ${{ inputs.mark_prerelease }}
           fail_on_unmatched_files: true
           files: |
             release-artifacts/*-unsigned.dmg
