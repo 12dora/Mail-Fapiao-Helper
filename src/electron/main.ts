@@ -655,8 +655,13 @@ function showItemInFolderForUser(target: string): void {
  * 还在铸造 open 令牌前用内容 magic 正向确认文档类型。
  *
  * 应用合法产出（pdf/ofd/csv/xml/图片/zip/eml/log）且内容匹配才 shell.openPath；
- * 可执行 / 快捷方式扩展名一律拒绝；macOS 替身 / Windows 快捷方式等间接文件
- * 即使伪装成 .eml/.pdf 也不得 open；其余文件改为在文件夹中显示。
+ * 可执行 / 快捷方式扩展名一律拒绝；macOS 替身（含经典 resource-fork `alis`）/
+ * Windows 快捷方式等间接文件即使伪装成 .eml/.pdf 也不得 open；其余文件改为
+ * 请求在文件夹中显示（不断言文件管理器一定弹出）。
+ *
+ * 文件 open 可达面：仅主进程签发的 `ext:` 句柄（落在主控归档根内），或主进程
+ * 内部已 containment 的归档路径（如 pending 邮件）。renderer 用配置派生 path
+ * 打开时只 reveal——缩小 pathname TOCTOU 攻击面。
  *
  * 目录：bundle-like（.app 等）一律拒绝；普通目录仅当 allowDirectoryOpen（符号
  * location 或主进程签发的 ext: 句柄）才 shell.openPath。任意 renderer 提供的
@@ -907,12 +912,74 @@ function contentMatchesClaimedOpenableType(ext: string, data: Buffer): boolean {
 }
 
 /**
- * 廉价检测 macOS Finder 替身（防御纵深）。
- * 现代 Finder「制作替身」写入 bookmark 数据头 `book…mark…`；realpath 不跟随，
- * 但 NSWorkspace 会。Node 无稳定 getattrlist/xattr 绑定，故以头部 magic 为准。
+ * 在 buffer 中查找 4 字节 ASCII fourcc（如 resource type `alis`）。
+ * 不跨字节对齐假设——resource map 中 type code 按 4 字节对齐，
+ * 全缓冲扫描足够廉价且对错位 map 仍 fail-closed 友好。
  */
-function hasMacFinderAliasIndicator(_target: string, head: Buffer): boolean {
-  return isMacBookmarkAliasHead(head);
+function bufferHasAsciiFourcc(data: Buffer, fourcc: string): boolean {
+  if (fourcc.length !== 4 || data.length < 4) return false;
+  const a = fourcc.charCodeAt(0);
+  const b = fourcc.charCodeAt(1);
+  const c = fourcc.charCodeAt(2);
+  const d = fourcc.charCodeAt(3);
+  for (let i = 0; i <= data.length - 4; i++) {
+    if (data[i] === a && data[i + 1] === b && data[i + 2] === c && data[i + 3] === d) return true;
+  }
+  return false;
+}
+
+/**
+ * macOS Finder 替身探测结果：
+ * - `alias`：已确认（bookmark 头或 resource fork 中的 `alis`）→ 拒绝 open
+ * - `clean`：未发现替身迹象
+ * - `unknown`：无法判定（读失败等）→ 不得 open，上层改为 reveal
+ *
+ * 现代替身：数据叉 bookmark magic `book\0\0\0\0mark\0\0\0\0`。
+ * 经典替身：数据叉可为合法 RFC5322/.pdf 等，别名在 resource fork 的 `alis` 资源里；
+ * Node 经伪路径 `<file>/..namedfork/rsrc` 读取；无 resource fork 时 size 0 或 ENOENT。
+ */
+function probeMacFinderAlias(target: string, head: Buffer): 'alias' | 'clean' | 'unknown' {
+  if (isMacBookmarkAliasHead(head)) return 'alias';
+  if (process.platform !== 'darwin') return 'clean';
+  if (!target || target.includes('\0')) return 'unknown';
+  try {
+    // 必须用字面伪路径；path.join 在部分平台上会错误规范化 `..namedfork`。
+    const rsrcPath = `${target}/..namedfork/rsrc`;
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(rsrcPath);
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? String((err as NodeJS.ErrnoException).code)
+        : '';
+      // 无 resource fork：普通文件。
+      if (code === 'ENOENT') return 'clean';
+      // 权限/IO 等：无法判定 → fail closed（不 open）。
+      return 'unknown';
+    }
+    if (!st.isFile()) return 'unknown';
+    if (st.size <= 0) return 'clean';
+    // 经典 alias 的 resource map 通常很小；上限内扫描 `alis` type code。
+    // 超大 fork 读不全且未找到 alis 时按 unknown 处理（不 open）。
+    const maxScan = 256 * 1024;
+    const rsrc = readFileHeadForOpenPolicy(rsrcPath, Math.min(st.size, maxScan));
+    if (!rsrc) return 'unknown';
+    if (bufferHasAsciiFourcc(rsrc, 'alis')) return 'alias';
+    if (st.size > maxScan) return 'unknown';
+    return 'clean';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * 廉价检测 macOS Finder 替身（防御纵深）。
+ * 真正检查 `target`：数据叉 bookmark 头 +（darwin）resource fork 中的 `alis`。
+ * 无法判定时视为可疑（true），调用方不得 mint open 令牌。
+ */
+function hasMacFinderAliasIndicator(target: string, head: Buffer): boolean {
+  const probe = probeMacFinderAlias(target, head);
+  return probe === 'alias' || probe === 'unknown';
 }
 
 type OpenFileDisposition =
@@ -920,13 +987,27 @@ type OpenFileDisposition =
   | { action: 'reveal' }
   | { action: 'refuse'; code: string; message: string };
 
+type OpenPolicyOpts = {
+  /**
+   * 仅符号 location / 主进程 ext: 句柄为 true；
+   * 任意 path 载荷必须为 false，目录最多 reveal。
+   */
+  allowDirectoryOpen?: boolean;
+  /**
+   * 文件 open 仅允许：主进程签发的 `ext:` 句柄所指向的、落在主控归档根内的目标。
+   * 渲染进程用配置派生 path 打开时必须为 false → 只 reveal，永不 shell.openPath。
+   * 主进程内部（如 pending 邮件路径）在已 containment 校验后可显式开启。
+   */
+  allowFileOpen?: boolean;
+};
+
 /**
- * @param allowDirectoryOpen 仅符号 location / 主进程 ext: 句柄为 true；
- *   任意 path 载荷必须为 false，目录最多 reveal。
+ * @param opts.allowDirectoryOpen 仅符号 location / 主进程 ext: 句柄为 true。
+ * @param opts.allowFileOpen 仅 ext: 句柄或主进程已校验归档路径为 true；其余文件只 reveal。
  */
 function dispositionForOpenTarget(
   target: string,
-  opts: { allowDirectoryOpen?: boolean } = {},
+  opts: OpenPolicyOpts = {},
 ): OpenFileDisposition {
   let st: fs.Stats;
   try {
@@ -991,13 +1072,18 @@ function dispositionForOpenTarget(
       // 读不到内容：不 mint open 令牌，最多 reveal（若仍存在）。
       return { action: 'reveal' };
     }
-    // 间接文件（替身 / .lnk / .url 等）：明确拒绝，而不是 launch。
-    if (isMacBookmarkAliasHead(head) || hasMacFinderAliasIndicator(target, head)) {
+    // macOS 替身：bookmark 头或经典 resource-fork `alis`。
+    // 确认 alias → refuse；无法判定 → reveal（不 open，也不谎称已打开）。
+    const aliasProbe = probeMacFinderAlias(target, head);
+    if (aliasProbe === 'alias') {
       return {
         action: 'refuse',
         code: 'path_alias_refused',
         message: '出于安全考虑，不能打开 macOS 替身（别名）文件。请打开真实的文档原件。',
       };
+    }
+    if (aliasProbe === 'unknown') {
+      return { action: 'reveal' };
     }
     if (isWindowsShellLinkHead(head) || isIniStylePointerHead(head)) {
       return {
@@ -1010,10 +1096,25 @@ function dispositionForOpenTarget(
       // 扩展名声称是文档，内容却不是 → 只 reveal，永不 open。
       return { action: 'reveal' };
     }
+    // 文件 open 仅限主控归档路径上的主进程句柄（或主进程内部已校验路径）。
+    if (opts.allowFileOpen !== true) return { action: 'reveal' };
     return { action: 'open' };
   }
   return { action: 'reveal' };
 }
+
+/**
+ * reveal 成功文案：shell.showItemInFolder 返回 void，我们只能确认「已发出请求」
+ * 且目标当时仍存在，不能断言文件管理器窗口一定出现。对用户说清楚实际做了什么。
+ */
+const REVEAL_REQUESTED_FILE_MSG =
+  '已请求在文件管理器中显示该文件。若未看到窗口，请到应用内对应文件夹查找。';
+const REVEAL_REQUESTED_LOCATION_MSG =
+  '已请求在文件管理器中显示该位置。若未看到窗口，请通过应用内的文件夹入口再试。';
+const REVEAL_REQUESTED_BUNDLE_MSG =
+  '已请求在文件管理器中显示该应用程序包（不会启动）。若未看到窗口，请手动在访达中查看。';
+const REVEAL_REQUESTED_UNSUITABLE_MSG =
+  '该文件不适合直接打开；已请求在文件管理器中显示。若未看到窗口，请到应用内对应文件夹查找。';
 
 /**
  * 按文件类型策略打开目标：允许则 open，否则 reveal 或拒绝。
@@ -1021,8 +1122,12 @@ function dispositionForOpenTarget(
  */
 async function openOrRevealByPolicy(
   target: string,
-  opts: { forceReveal?: boolean; allowDirectoryOpen?: boolean } = {},
+  opts: OpenPolicyOpts & { forceReveal?: boolean } = {},
 ): Promise<{ ok: boolean; error: string; code?: string; message?: string; revealed?: boolean }> {
+  const policyOpts: OpenPolicyOpts = {
+    allowDirectoryOpen: opts.allowDirectoryOpen === true,
+    allowFileOpen: opts.allowFileOpen === true,
+  };
   if (opts.forceReveal) {
     if (!fs.existsSync(target)) {
       return {
@@ -1032,7 +1137,7 @@ async function openOrRevealByPolicy(
         message: '目标位置不存在，无法在文件夹中显示。',
       };
     }
-    // forceReveal 仍拒绝把 bundle 当「打开」；只在文件夹中显示（不 launch）。
+    // forceReveal 仍拒绝把 bundle 当「打开」；只请求在文件夹中显示（不 launch）。
     const base = policyBaseName(target);
     try {
       const st = fs.statSync(target);
@@ -1044,7 +1149,7 @@ async function openOrRevealByPolicy(
             ok: false,
             error: '目标不存在。',
             code: 'path_missing',
-            message: '目标在显示前已消失，未能在文件夹中显示。',
+            message: '目标在显示前已消失，未能发出在文件夹中显示的请求。',
           };
         }
         return {
@@ -1052,7 +1157,7 @@ async function openOrRevealByPolicy(
           error: '',
           revealed: true,
           code: 'path_bundle_revealed',
-          message: '已在文件夹中显示该应用程序包（未启动）。',
+          message: REVEAL_REQUESTED_BUNDLE_MSG,
         };
       }
     } catch {
@@ -1071,14 +1176,18 @@ async function openOrRevealByPolicy(
         ok: false,
         error: '目标不存在。',
         code: 'path_missing',
-        message: '目标在显示前已消失，未能在文件夹中显示。',
+        message: '目标在显示前已消失，未能发出在文件夹中显示的请求。',
       };
     }
-    return { ok: true, error: '', revealed: true };
+    return {
+      ok: true,
+      error: '',
+      revealed: true,
+      code: 'path_revealed',
+      message: REVEAL_REQUESTED_FILE_MSG,
+    };
   }
-  const disposition = dispositionForOpenTarget(target, {
-    allowDirectoryOpen: opts.allowDirectoryOpen === true,
-  });
+  const disposition = dispositionForOpenTarget(target, policyOpts);
   if (disposition.action === 'refuse') {
     return {
       ok: false,
@@ -1103,7 +1212,7 @@ async function openOrRevealByPolicy(
         ok: false,
         error: '目标不存在。',
         code: 'path_missing',
-        message: '目标在显示前已消失，未能在文件夹中显示。',
+        message: '目标在显示前已消失，未能发出在文件夹中显示的请求。',
       };
     }
     return {
@@ -1111,16 +1220,16 @@ async function openOrRevealByPolicy(
       error: '',
       revealed: true,
       code: 'path_revealed',
-      message: opts.allowDirectoryOpen
-        ? '该文件类型不适合直接打开，已在文件夹中显示。'
-        : '已在文件夹中显示该位置（目录需通过应用内位置标识打开）。',
+      message: policyOpts.allowFileOpen || policyOpts.allowDirectoryOpen
+        ? REVEAL_REQUESTED_UNSUITABLE_MSG
+        : REVEAL_REQUESTED_LOCATION_MSG,
     };
   }
   // 唯一 shell.openPath 调用路径：仅在策略判定 action=open（含内容校验）后铸造令牌再打开。
-  // 打开前再确认仍是文件，避免 TOCTOU 换成目录/消失后仍报成功。
+  // 打开前再确认仍是文件，并在 mint 前立刻重跑内容/替身检查，尽量缩短 TOCTOU 窗口。
   try {
     const st = fs.statSync(target);
-    if (!st.isFile() && !(st.isDirectory() && opts.allowDirectoryOpen === true)) {
+    if (!st.isFile() && !(st.isDirectory() && policyOpts.allowDirectoryOpen === true)) {
       return {
         ok: false,
         error: '目标已不再是可打开的文件。',
@@ -1136,6 +1245,50 @@ async function openOrRevealByPolicy(
       message: '目标位置不存在，无法打开。请确认它仍然存在。',
     };
   }
+  // mint 前最后一次策略重检（含读头 + resource fork 替身探测）。
+  const recheck = dispositionForOpenTarget(target, policyOpts);
+  if (recheck.action === 'refuse') {
+    return {
+      ok: false,
+      error: recheck.message,
+      code: recheck.code,
+      message: recheck.message,
+    };
+  }
+  if (recheck.action !== 'open') {
+    if (!fs.existsSync(target)) {
+      return {
+        ok: false,
+        error: '目标不存在。',
+        code: 'path_missing',
+        message: '目标位置不存在，无法在文件夹中显示。',
+      };
+    }
+    showItemInFolderForUser(target);
+    if (!fs.existsSync(target)) {
+      return {
+        ok: false,
+        error: '目标不存在。',
+        code: 'path_missing',
+        message: '目标在显示前已消失，未能发出在文件夹中显示的请求。',
+      };
+    }
+    return {
+      ok: true,
+      error: '',
+      revealed: true,
+      code: 'path_revealed',
+      message: REVEAL_REQUESTED_UNSUITABLE_MSG,
+    };
+  }
+  // Residual pathname TOCTOU: content check closes its fd before shell.openPath, which
+  // only accepts a path string (Electron has no fd-based open). An attacker who can
+  // atomically replace the file between recheck and Launch Services' resolution could
+  // still win. Mitigations above shrink the window and require main-issued ext: handles
+  // (or main-internal archive paths) — never renderer-supplied config paths — for file
+  // open. Residual risk: the attacker must already have write access *inside* the user's
+  // own archive directory; anyone with that access can already replace invoice files
+  // directly, so the marginal gain from winning this race is small. Not fully fixed.
   const error = await shellOpenPathApproved(mintPolicyApprovedOpenPath(target));
   if (error) {
     return {
@@ -4779,10 +4932,11 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
         message: '该位置当前不在允许打开的范围内。',
       };
     }
-    // 符号 location：允许打开普通目录；bundle-like 仍由策略拒绝。
+    // 符号 location：允许打开普通目录；文件 open 不经 location；bundle-like 仍由策略拒绝。
     const result = await openOrRevealByPolicy(canon, {
       forceReveal: reveal,
       allowDirectoryOpen: true,
+      allowFileOpen: false,
     });
     if (!result.ok && result.code === 'path_open_failed') {
       return {
@@ -4812,17 +4966,20 @@ handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
   if (!resolved.ok) {
     return { ok: false, code: resolved.code, error: resolved.message, message: resolved.message };
   }
-  // 主进程签发的 opaque 句柄可打开目录；任意 renderer path 不得 open 目录。
+  // 文件/目录 open 仅主进程签发的 opaque `ext:` 句柄；renderer 提供的 path（含配置派生）
+  // 最多 reveal，绝不 shell.openPath——缩小 pathname TOCTOU 可达面。
   const isMainIssuedHandle = target.startsWith('ext:');
   if (reveal) {
     return openOrRevealByPolicy(resolved.path, {
       forceReveal: true,
       allowDirectoryOpen: isMainIssuedHandle,
+      allowFileOpen: false,
     });
   }
-  // S2：允许根校验之后，再按扩展名 / 目录来源约束可 open 的目标
+  // S2：允许根校验之后，再按扩展名 / 目录来源 / 句柄来源约束可 open 的目标
   return openOrRevealByPolicy(resolved.path, {
     allowDirectoryOpen: isMainIssuedHandle,
+    allowFileOpen: isMainIssuedHandle,
   });
 });
 
@@ -5007,9 +5164,13 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   /**
    * B2：所有桌面打开必须经 openOrRevealByPolicy（containment 之后的类型/目录/bundle 策略）。
    * 禁止在此直接 shell.openPath / 任何原始路径打开助手。
+   * 路径由主进程从 hash + 归档根解析（非 renderer 配置 path），故允许 file open。
    */
   const openResolvedMail = async (targetPath: string) => {
-    const result = await openOrRevealByPolicy(targetPath, { allowDirectoryOpen: false });
+    const result = await openOrRevealByPolicy(targetPath, {
+      allowDirectoryOpen: false,
+      allowFileOpen: true,
+    });
     if (result.ok && !result.revealed) {
       return {
         ok: true,
@@ -5023,7 +5184,7 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
         ok: true,
         opened: 'mail' as const,
         code: 'pending_mail_revealed',
-        message: '已在文件夹中显示原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+        message: '已请求在文件管理器中显示原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。若未看到窗口，请到「已保存邮件」中查找。',
       };
     }
     // 策略拒绝（可执行/bundle/替身/快捷方式等）：不得回退到无策略 open。
@@ -5056,7 +5217,7 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
       opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
       code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
       message: stillThere
-        ? '无法用默认应用打开原始邮件；已尝试在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
+        ? '无法用默认应用打开原始邮件；已请求在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
         : '无法打开原始邮件，且文件似乎已不存在。',
       error: result.error ? sanitizeText(result.error, { maxLength: 200 }) : undefined,
     };
@@ -5090,7 +5251,10 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
         : '没有找到这封邮件。',
     };
   }
-  const folderResult = await openOrRevealByPolicy(fallback.path, { allowDirectoryOpen: true });
+  const folderResult = await openOrRevealByPolicy(fallback.path, {
+    allowDirectoryOpen: true,
+    allowFileOpen: false,
+  });
   if (!folderResult.ok) {
     const refusedByPolicy = folderResult.code === 'path_bundle_refused'
       || folderResult.code === 'path_executable_refused'
@@ -5135,8 +5299,8 @@ handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
       opened: 'folder' as const,
       code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
       message: row
-        ? '没有找到原始邮件文件，已在文件管理器中显示邮件缓存位置，请手动查找后再到开票平台重新下载。'
-        : '没有找到这封邮件，已在文件管理器中显示邮件缓存位置。',
+        ? '没有找到原始邮件文件，已请求在文件管理器中显示邮件缓存位置，请手动查找后再到开票平台重新下载。若未看到窗口，请到「配置」核对邮件缓存路径。'
+        : '没有找到这封邮件，已请求在文件管理器中显示邮件缓存位置。若未看到窗口，请到「配置」核对邮件缓存路径。',
     };
   }
   // COPY-05：打开的是文件夹，不是原始邮件本身。
