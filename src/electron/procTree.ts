@@ -1,17 +1,20 @@
 import { spawnSync, type ChildProcess } from 'node:child_process';
 
 /**
- * 子进程树终止工具（APP-16）。
+ * 子进程树终止工具（APP-16 / ELEC-04）。
  *
  * Windows 上 `ChildProcess.kill('SIGTERM')` 不保证目标进程能执行 JS 清理逻辑，
  * CLI 里那个被 `unref()` 的 `efapiao serve` 孙进程会因此变成孤儿，继续占用端口
- * 并携带旧配置。所以 Windows 必须按 PID 精确终止整棵进程树。
+ * 并携带旧配置。所以 Windows 必须按 PID 精确终止整棵进程树（taskkill /T）。
+ *
+ * POSIX 上 CLI 以独立进程组启动（`detached: true`），这里对负 PGID 发信号，
+ * 才能连同 `efapiao serve` 孙进程一起终止。
  */
 
 export interface KillOutcome {
-  /** 整棵进程树是否确实被终止（Windows 上等价于 taskkill /T 成功）。 */
+  /** 已向整棵进程树发出终止信号（Windows taskkill /T 成功，或 POSIX 进程组信号成功）。 */
   treeTerminated: boolean;
-  /** 已向直接子进程发过信号（taskkill 失败后的降级路径）。 */
+  /** 已向直接子进程发过信号（taskkill / 进程组失败后的降级路径）。 */
   signalled: boolean;
   /** 失败原因，仅用于主进程日志/诊断，不直接进 UI。 */
   detail?: string;
@@ -49,6 +52,16 @@ function sendSignal(child: ChildProcess, signal: NodeJS.Signals): boolean {
   }
 }
 
+/** POSIX：向进程组发信号（要求 spawn 时 detached 以成为新组长）。 */
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function killProcessTree(child: ChildProcess): KillOutcome {
   const pid = child.pid;
   if (pid === undefined) return { treeTerminated: false, signalled: false, detail: '子进程没有 PID' };
@@ -64,14 +77,23 @@ export function killProcessTree(child: ChildProcess): KillOutcome {
     return { treeTerminated: false, signalled, ...(killed.detail ? { detail: killed.detail } : {}) };
   }
 
+  // POSIX：先对进程组发 SIGTERM（覆盖 CLI 与 unref 的 efapiao serve）。
+  if (signalProcessGroup(pid, 'SIGTERM')) {
+    return { treeTerminated: true, signalled: true };
+  }
+  // 进程组信号失败（例如未以 detached 启动）：降级到直接子进程。
   const signalled = sendSignal(child, 'SIGTERM');
-  return { treeTerminated: signalled, signalled };
+  return {
+    treeTerminated: false,
+    signalled,
+    detail: signalled ? '进程组信号失败，已降级为仅终止直接子进程' : '无法向子进程发送 SIGTERM',
+  };
 }
 
 export interface TerminateSummary {
   /** 仍然存活的直接子进程数量（0 表示全部已退出）。 */
   remaining: number;
-  /** 至少有一个进程树没能被完整终止（Windows taskkill 失败）。 */
+  /** 至少有一个进程树没能被完整终止（Windows taskkill 失败或 POSIX 进程组未清）。 */
   treeIncomplete: boolean;
   details: string[];
 }
@@ -92,8 +114,7 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
 
 /**
  * 终止全部 tracked 子进程并等待它们真正退出（app quit 路径使用）。
- * 超时后重试一次树终止再强制 kill，最后**验证**直接子进程是否确实退出，
- * 然后放行退出，避免应用永远无法关闭。
+ * 超时后重试一次树终止再强制 kill，最后**验证**直接子进程是否确实退出。
  */
 export async function terminateChildren(
   children: Iterable<ChildProcess>,
@@ -115,11 +136,17 @@ export async function terminateChildren(
   // 第二轮：仍然存活的再试一次树终止，然后强制 kill 并验证。
   const stillAlive = pending.filter(isAlive);
   for (const child of stillAlive) {
-    if (process.platform === 'win32' && child.pid !== undefined) {
-      const retry = runTaskkill(child.pid);
+    const pid = child.pid;
+    if (process.platform === 'win32' && pid !== undefined) {
+      const retry = runTaskkill(pid);
       if (!retry.ok && retry.detail) details.push(retry.detail);
+    } else if (pid !== undefined) {
+      if (!signalProcessGroup(pid, 'SIGKILL')) {
+        sendSignal(child, 'SIGKILL');
+      }
+    } else {
+      sendSignal(child, 'SIGKILL');
     }
-    sendSignal(child, 'SIGKILL');
   }
   await Promise.all(stillAlive.map((child) => waitForExit(child, 1000)));
 

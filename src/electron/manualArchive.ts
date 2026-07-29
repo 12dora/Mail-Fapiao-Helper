@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { csvCell, parseCsv } from '../util/csv.js';
 import { contentHash } from '../util/hash.js';
 import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, beginArchiveTransaction } from '../download/archiveJournal.js';
@@ -7,21 +8,11 @@ import { sanitizeText } from './sanitize.js';
 import { testFaultEnabled } from '../util/testFaults.js';
 
 /**
- * 「选择文件归档」的事务化实现（APP-04）。
+ * 「选择文件归档」的事务化实现（APP-04 / OCR-05 / ELEC-09 / ELEC-10）。
  *
- * 旧实现逐个 `copyFileSync` 到最终目录后直接重写 `pending.csv`，既不写归档台账
- * 也不写 `ocr-pending.csv`：UI 说归档成功，但「开始识别」认为没有文件，原待确认
- * 上下文却已经被删掉。
- *
- * 第一版改成了「内存快照 + try/catch 回滚」，但进程内 catch 不是事务：如果进程在
- * 台账已提交、OCR 队列未提交之间退出，就会留下「文件 + 台账已提交、队列未提交」的
- * 半成品，重试时又只按队列判重，于是再装一个新文件、台账保留旧文件名、队列写新
- * 文件名——身份互相矛盾还多出孤儿文件。
- *
- * 现在与自动归档共用**持久事务日志**（`src/download/archiveJournal.ts`）：
- * 校验格式 → 计算 contentHash → 规划最终文件名与 CSV 追加基线 → 开事务 →
- * 安装文件 → 追加台账 → 追加队列 → commit；任一步失败 `rollback()`，进程崩溃则
- * 由下次启动的 `recoverArchiveTransactions()` 回滚。
+ * 与自动归档共用持久事务日志：先写入同卷 staging，再 hard-link 安装到最终路径，
+ * journal 带 stagingPath 以便崩溃恢复能证明文件归属。同批 contentHash 去重；
+ * 读取前限制文件数与累计字节，避免主进程被超大批次拖垮。
  */
 
 export type ArchiveFormat = 'pdf' | 'ofd' | 'image';
@@ -65,6 +56,10 @@ export interface ManualArchiveResult {
 
 /** 单个文件的大小上限，避免误选超大文件把归档目录塞满。 */
 const MAX_FILE_BYTES = 64 * 1024 * 1024;
+/** 单批最多文件数（ELEC-10）。 */
+const MAX_BATCH_FILES = 32;
+/** 单批累计字节上限（ELEC-10）：约 256 MB。 */
+const MAX_BATCH_BYTES = 256 * 1024 * 1024;
 
 const LEDGER_HEADER = ['messageId', 'date', 'from', 'subject', 'filename', 'source', 'contentHash'];
 const QUEUE_HEADER = [
@@ -160,7 +155,7 @@ function ensureCsvHeader(file: string, header: string[]): void {
   if (fs.existsSync(file) && fs.statSync(file).size > 0) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   // UTF-8 BOM 与 CLI 写出的台账保持一致，Excel 才能正确显示中文。
-  fs.writeFileSync(file, `﻿${header.map(csvCell).join(',')}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(file, `\uFEFF${header.map(csvCell).join(',')}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
 function csvLine(values: string[]): string {
@@ -169,7 +164,7 @@ function csvLine(values: string[]): string {
 
 function bodyRows(file: string): string[][] {
   if (!fs.existsSync(file)) return [];
-  const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '');
+  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
   return parseCsv(text).slice(1);
 }
 
@@ -202,6 +197,14 @@ function planNumberedNames(dir: string, exts: string[]): string[] {
   return out;
 }
 
+function removeDirQuietly(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 interface StagedSource {
@@ -217,11 +220,17 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   if (input.sources.length === 0) {
     return { ...empty, code: 'manual_archive_no_files', message: '没有选择任何文件。' };
   }
+  if (input.sources.length > MAX_BATCH_FILES) {
+    return {
+      ...empty,
+      code: 'manual_archive_too_many_files',
+      message: `一次最多选择 ${MAX_BATCH_FILES} 个文件，请分批归档。`,
+    };
+  }
 
-  // 1) 先把全部候选读进内存并校验，任何一个不合格都不落盘（不产生部分副本）。
-  const staged: StagedSource[] = [];
+  // ELEC-10：读取前先 stat，限制累计字节，避免同步读入超大批次冻结主进程。
+  let totalBytes = 0;
   for (const source of input.sources) {
-    let data: Buffer;
     try {
       const stat = fs.statSync(source);
       if (!stat.isFile()) {
@@ -237,6 +246,29 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
           message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
         };
       }
+      totalBytes += stat.size;
+      if (totalBytes > MAX_BATCH_BYTES) {
+        return {
+          ...empty,
+          code: 'manual_archive_batch_too_large',
+          message: '所选文件合计超过 256 MB，请减少文件数量后分批归档。',
+        };
+      }
+    } catch (err) {
+      return {
+        ...empty,
+        code: 'manual_archive_unreadable',
+        message: `无法读取「${path.basename(source)}」，请确认文件仍然存在且可访问。`,
+        detail: sanitizeText(err instanceof Error ? err.message : String(err)),
+      };
+    }
+  }
+
+  // 1) 读入并校验格式；任何一个不合格都不落盘。
+  const staged: StagedSource[] = [];
+  for (const source of input.sources) {
+    let data: Buffer;
+    try {
       data = fs.readFileSync(source);
     } catch (err) {
       return {
@@ -264,6 +296,20 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     staged.push({ source, data, format: detected.format, ext: detected.ext, hash: contentHash(data) });
   }
 
+  // ELEC-09：同批按 contentHash 去重，只保留第一个来源。
+  const batchSeen = new Set<string>();
+  const uniqueStaged: StagedSource[] = [];
+  const batchDuplicates: string[] = [];
+  for (const item of staged) {
+    const key = `${input.hash}${SEP}${item.hash}`;
+    if (batchSeen.has(key)) {
+      batchDuplicates.push(path.basename(item.source));
+      continue;
+    }
+    batchSeen.add(key);
+    uniqueStaged.push(item);
+  }
+
   assertArchiveTransactionsRecovered(input.invoicesDir);
 
   // 2) 读取台账与队列现状，做去重与「半提交修复」判定。
@@ -279,22 +325,27 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   const from = pending.from ?? '';
   const subject = pending.subject ?? '';
 
-  const duplicates: string[] = [];
+  const duplicates: string[] = [...batchDuplicates];
   const toInstall: StagedSource[] = [];
   /** 台账已有、队列缺失：复用台账里的文件名补队列行，绝不再装一个新文件。 */
   const toReuse: { item: StagedSource; filename: string }[] = [];
+  /** 本批已决定安装/复用的 contentHash，防止同批后续再装一次。 */
+  const installSeen = new Set<string>();
 
-  for (const item of staged) {
-    if (queueSeen.has(`${input.hash}${SEP}${item.hash}`)) {
+  for (const item of uniqueStaged) {
+    const queueKey = `${input.hash}${SEP}${item.hash}`;
+    if (queueSeen.has(queueKey) || installSeen.has(queueKey)) {
       duplicates.push(path.basename(item.source));
       continue;
     }
     const ledgerFilename = ledgerFilenameByKey.get(`${messageId}${SEP}${item.hash}`);
     if (ledgerFilename && fs.existsSync(path.join(input.invoicesDir, ledgerFilename))) {
       toReuse.push({ item, filename: ledgerFilename });
+      installSeen.add(queueKey);
       continue;
     }
     toInstall.push(item);
+    installSeen.add(queueKey);
   }
 
   if (toInstall.length === 0 && toReuse.length === 0) {
@@ -308,10 +359,12 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     };
   }
 
-  // 3) 规划最终文件名与 CSV 追加基线，作为事务计划。
+  // 3) 规划最终文件名与 CSV 追加基线；先写 staging 再开 journal（OCR-05）。
   let plannedNames: string[];
   let ledgerBase: number;
   let queueBase: number;
+  let stagingDir: string;
+  const stagingPaths: string[] = [];
   try {
     fs.mkdirSync(input.invoicesDir, { recursive: true });
     plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
@@ -319,6 +372,20 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     ensureCsvHeader(input.ocrPendingCsv, QUEUE_HEADER);
     ledgerBase = fs.statSync(input.ledgerCsv).size;
     queueBase = fs.statSync(input.ocrPendingCsv).size;
+
+    stagingDir = path.join(
+      input.invoicesDir,
+      '.staging',
+      `manual-${input.hash.slice(0, 12)}-${process.pid.toString(36)}-${randomBytes(4).toString('hex')}`,
+    );
+    fs.mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
+    for (let i = 0; i < toInstall.length; i++) {
+      const item = toInstall[i];
+      if (!item) throw new Error('archive plan mismatch');
+      const stagingPath = path.join(stagingDir, `${i}.${item.ext}`);
+      fs.writeFileSync(stagingPath, item.data, { mode: 0o600 });
+      stagingPaths.push(stagingPath);
+    }
   } catch (err) {
     return {
       ...empty,
@@ -330,33 +397,38 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   }
 
   const plannedPaths = plannedNames.map((name) => path.join(input.invoicesDir, name));
+  const plannedFiles = plannedPaths.map((finalPath, i) => ({
+    path: finalPath,
+    stagingPath: stagingPaths[i],
+    stagingDir,
+  }));
+
   const tx = beginArchiveTransaction(input.invoicesDir, {
-    files: plannedPaths,
+    files: plannedFiles,
     csv: [
       { path: input.ledgerCsv, baseLength: ledgerBase },
       { path: input.ocrPendingCsv, baseLength: queueBase },
     ],
+    stagingDir,
   });
 
   const archived: ManualArchiveFile[] = [];
   try {
-    // 4) 安装文件：`wx` 独占创建，绝不覆盖已有文件。
+    // 4) hard-link 安装：与自动归档一致，prepared 阶段可用 inode 证明归属（OCR-05）。
     for (let i = 0; i < toInstall.length; i++) {
       const item = toInstall[i];
       const target = plannedPaths[i];
+      const stagingPath = stagingPaths[i];
       const name = plannedNames[i];
-      if (!item || !target || !name) throw new Error('archive plan mismatch');
-      fs.writeFileSync(target, item.data, { flag: 'wx', mode: 0o600 });
+      if (!item || !target || !stagingPath || !name) throw new Error('archive plan mismatch');
+      // 与自动归档一致：只用 hard-link。prepared 阶段恢复依赖 staging/final 同 inode
+      // 证明归属；copy 无法证明，故不回退（OCR-05）。
+      fs.linkSync(stagingPath, target);
       archived.push({ filename: name, contentHash: item.hash, format: item.format });
     }
     tx.markStage('files-installed');
 
-    // 5) 先追加 OCR 队列，再追加台账。
-    //
-    // 顺序是有意的：`recoverArchiveTransactions()` 把 `ledger-committed` 当作
-    // 「已完成」向前滚（只删 journal，不回滚文件）。因此台账必须是**最后**一步，
-    // 这样 `ledger-committed` 才真正等于「文件 + 队列 + 台账全部落盘」；若在此之前
-    // 崩溃，阶段仍是 `files-installed`，恢复时会删掉文件并把两个 CSV 一起截回基线。
+    // 5) 先追加 OCR 队列，再追加台账（台账最后 → ledger-committed 才表示全部完成）。
     const queueLines = [
       ...toInstall.map((item, i) => csvLine([
         input.hash, messageId, date, from, subject, plannedNames[i] ?? '',
@@ -380,12 +452,13 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     tx.markStage('ledger-committed');
     tx.commit();
   } catch (err) {
-    // 删除已安装文件并把两个 CSV 截断回 baseLength。
     try {
       tx.rollback();
     } catch (rollbackErr) {
       if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
       throw err;
+    } finally {
+      removeDirQuietly(stagingDir);
     }
     return {
       ...empty,

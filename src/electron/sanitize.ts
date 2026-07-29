@@ -2,12 +2,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 /**
- * 统一脱敏工具（COPY-01）。
+ * 统一脱敏工具（COPY-01 / ELEC-07）。
  *
  * 主进程的日志、IPC 事件和 GUI 历史都可能携带子进程原始 stderr、异常消息、
- * 完整签名 URL、本机绝对路径和邮件 hash。这些内容对普通用户没有意义，而且在
- * 截图、剪贴板和历史文件里会泄漏票据访问凭据与本机身份，因此在进入 log / IPC /
- * history 之前必须先经过这里。
+ * 完整签名 URL、本机绝对路径、邮箱地址和邮件 hash。这些内容对普通用户没有意义，
+ * 而且在截图、剪贴板和历史文件里会泄漏票据访问凭据与本机身份，因此在进入
+ * log / IPC / history 之前必须先经过这里。
  */
 
 /** 对外事件的统一错误形状：message 是简洁中文，detail 是已脱敏的技术信息。 */
@@ -29,6 +29,10 @@ const WINDOWS_PATH = /\b[A-Za-z]:\\[^\s"'<>|,;]+/g;
 const POSIX_PATH = /(?<![A-Za-z0-9])(?:\/[A-Za-z0-9._@+\-一-龥]+){2,}\/?/g;
 /** 至少 12 位、含字母的十六进制串（邮件 hash / contentHash），截断成短 ID。 */
 const LONG_HEX = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{12,}\b/gi;
+/** 邮箱地址：诊断文本中隐藏本地部分（ELEC-07）。 */
+const EMAIL_IN_TEXT = /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g;
+/** CLI 日志里的 subject="..." / from="..." 字段。 */
+const QUOTED_FIELD = /\b(subject|from|to)=("?)([^"\n]*?)\2(?=\s|$|reason=|date=)/gi;
 
 let managedRoots: { label: string; dir: string }[] = [];
 
@@ -85,9 +89,20 @@ export function shortId(value: string): string {
   return `${trimmed.slice(0, 8)}…`;
 }
 
+/** 邮箱脱敏：保留域名，本地部分只留首字符。 */
+export function redactEmail(raw: string): string {
+  const at = raw.lastIndexOf('@');
+  if (at <= 0) return '<邮箱已隐藏>';
+  const local = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  if (!domain) return '<邮箱已隐藏>';
+  const head = local.charAt(0) || '*';
+  return `${head}***@${domain}`;
+}
+
 /**
  * 对任意技术文本做统一脱敏：URL 去 query/fragment、绝对路径相对化、
- * 屏蔽 token 样式赋值、邮件 hash 截断。
+ * 屏蔽 token 样式赋值、邮箱、邮件主题字段、邮件 hash 截断。
  */
 export function sanitizeText(input: unknown, opts: { maxLength?: number } = {}): string {
   if (input === undefined || input === null) return '';
@@ -110,6 +125,14 @@ export function sanitizeText(input: unknown, opts: { maxLength?: number } = {}):
   text = text.replace(URL_IN_TEXT, (match) => keep(redactUrl(match)));
   text = text.replace(WINDOWS_PATH, (match) => keep(redactPath(match)));
   text = text.replace(POSIX_PATH, (match) => keep(redactPath(match)));
+  text = text.replace(EMAIL_IN_TEXT, (match) => keep(redactEmail(match)));
+  text = text.replace(QUOTED_FIELD, (_m, key: string, quote: string, value: string) => {
+    if (String(key).toLowerCase() === 'from') {
+      return `${key}=${quote}${redactEmail(value)}${quote}`;
+    }
+    // subject：不把报销主题送进 progress / history
+    return `${key}=${quote}<主题已隐藏>${quote}`;
+  });
   text = text.replace(SECRET_ASSIGN, (_m, key: string, sep: string) => `${key}${sep}***`);
   text = text.replace(LONG_HEX, (match) => shortId(match));
   text = text.replace(new RegExp(`${NUL}(\\d+)${NUL}`, 'g'), (_m, index: string) => kept[Number(index)] ?? '');
