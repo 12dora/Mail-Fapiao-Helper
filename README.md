@@ -321,6 +321,7 @@ macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitle
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 当前模块边界、事务、锁、schema v3
 - [docs/DESIGN.md](docs/DESIGN.md) — 产品目标、四类邮件对照、配置指引
 - [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) — main 必过检查（需 owner 配置）
+- [docs/SECURITY_NOTES.md](docs/SECURITY_NOTES.md) — 已知残留风险与接受理由
 - [docs/SECURITY_HISTORY_CLEANUP.md](docs/SECURITY_HISTORY_CLEANUP.md) — 历史隐私净化步骤（**未执行**，需人工批准）
 - [gui-design/README.md](gui-design/README.md) — 桌面界面静态预览；截图可用 `npm run screenshots`（需先本地静态服务器）
 - 过程性/历史文档已移至 `docs/archive/` 与 `docs/audit-2026-07-29/`，不作为现行规约
