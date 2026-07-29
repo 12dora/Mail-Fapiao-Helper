@@ -36,6 +36,9 @@ type ArtifactExt = 'pdf' | 'ofd' | 'png' | 'jpg' | 'jpeg' | 'gif' | 'webp' | 'bm
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
 
+/** 按「目录 + 扩展名」缓存编号 high-water，避免每次从 0001 同步扫描（OCR-14）。 */
+const numberedHighWater = new Map<string, number>();
+
 function isPosix(): boolean {
   return process.platform !== 'win32';
 }
@@ -107,14 +110,47 @@ function finalFilename(name: string, fallbackStem: string, ext: ArtifactExt): st
   return `${finalStem}.${ext}`;
 }
 
+function highWaterKey(dir: string, ext: ArtifactExt): string {
+  return `${path.resolve(dir)}\0${ext}`;
+}
+
+/**
+ * 首次使用某扩展名时扫描目录，找出当前最大编号；之后只从 high-water 向前走（OCR-14）。
+ * 碰到洞或外部新建文件时 existsSync 会向前校正。
+ */
+function initialHighWater(dir: string, ext: ArtifactExt): number {
+  let max = 0;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const re = new RegExp(`^(\\d{4,})\\.${ext}$`, 'i');
+  for (const name of entries) {
+    const m = name.match(re);
+    if (!m) continue;
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return max;
+}
+
 function nextNumberedPath(dir: string, ext: ArtifactExt, reserved: Set<string>): string {
-  let counter = 1;
+  const key = highWaterKey(dir, ext);
+  let counter = numberedHighWater.get(key);
+  if (counter === undefined) {
+    counter = initialHighWater(dir, ext);
+  }
+  // 从 high-water 的下一个开始；若撞 reserved/磁盘则继续向前。
+  counter = Math.max(0, counter) + 1;
   while (true) {
     const candidate = `${String(counter).padStart(4, '0')}.${ext}`;
     const candidatePath = path.join(dir, candidate);
-    const key = candidatePath.toLowerCase();
-    if (!reserved.has(key) && !fs.existsSync(candidatePath)) {
-      reserved.add(key);
+    const reservedKey = candidatePath.toLowerCase();
+    if (!reserved.has(reservedKey) && !fs.existsSync(candidatePath)) {
+      reserved.add(reservedKey);
+      numberedHighWater.set(key, counter);
       return candidatePath;
     }
     counter++;
@@ -170,6 +206,8 @@ interface StagedDocument {
 export interface ArchiveBatch {
   /** 本批次需要新建文件的文档数量（不含幂等复用的条目）。 */
   readonly pending: number;
+  /** 本批次 staging 目录绝对路径，应写入 journal 供崩溃恢复清理（OCR-07）。 */
+  readonly stagingDir: string;
   /** 规划全部最终文件路径，返回给 archive journal 持久化。 */
   plan(): ArchivePlannedFile[];
   /** 在 active journal 下独占创建最终文件；返回结果按输入顺序排列。 */
@@ -186,6 +224,62 @@ function removeStagingDir(stagingDir: string): void {
   } catch {
     // ignore
   }
+}
+
+function isContainedInDir(target: string, base: string): boolean {
+  const rel = path.relative(path.resolve(base), path.resolve(target));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * 幂等复用前校验：路径 containment、是普通文件、contentHash 仍匹配（OCR-08）。
+ * 不匹配时返回 null，调用方应按本次 artifact 重新归档。
+ */
+function tryReuseArchived(
+  invoicesDir: string,
+  existingName: string,
+  expectedHash: string,
+  log: Logger,
+): { path: string; filename: string } | null {
+  // basename + containment：legacy/恶意 CSV 不得逃出归档目录。
+  const leaf = path.basename(existingName);
+  if (!leaf || leaf === '.' || leaf === '..') return null;
+  const existingPath = path.join(invoicesDir, leaf);
+  if (!isContainedInDir(existingPath, invoicesDir)) return null;
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(existingPath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) {
+    log.warn(`Archived path is not a file, will re-archive: ${leaf}`);
+    return null;
+  }
+  // 与 MAX_DOC_BYTES 对齐的合理上界；过大视为损坏映射。
+  if (stat.size <= 0 || stat.size > 50 * 1024 * 1024) {
+    log.warn(`Archived file size unreasonable (${stat.size}), will re-archive: ${leaf}`);
+    return null;
+  }
+
+  let data: Buffer;
+  try {
+    data = fs.readFileSync(existingPath);
+  } catch (err) {
+    log.warn(`Failed to read archived file for hash check: ${leaf}: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (data.length !== stat.size) {
+    log.warn(`Archived file size changed during read, will re-archive: ${leaf}`);
+    return null;
+  }
+  const actual = contentHash(data);
+  if (actual !== expectedHash) {
+    log.warn(`Archived contentHash mismatch for ${leaf}: expected=${expectedHash} actual=${actual}; will re-archive`);
+    return null;
+  }
+  return { path: existingPath, filename: leaf };
 }
 
 export function stageDocuments(
@@ -219,13 +313,13 @@ export function stageDocuments(
 
       const existing = opts.alreadyArchived?.get(hash);
       if (existing) {
-        const existingPath = path.join(invoicesDir, existing);
-        if (fs.existsSync(existingPath)) {
-          log.debug(`Reusing archived document ${existing} for ${pdf.source}`);
+        const hit = tryReuseArchived(invoicesDir, existing, hash, log);
+        if (hit) {
+          log.debug(`Reusing archived document ${hit.filename} for ${pdf.source}`);
           reused.push({
             sourceIndex: i,
-            finalPath: existingPath,
-            filename: existing,
+            finalPath: hit.path,
+            filename: hit.filename,
             format: pdf.format ?? formatForExt(ext),
             documentType: pdf.documentType ?? 'invoice',
             requiresOcr: pdf.requiresOcr ?? true,
@@ -234,6 +328,7 @@ export function stageDocuments(
           });
           continue;
         }
+        // 映射损坏或不匹配：落入重新 staging/归档路径。
       }
 
       const stagingPath = path.join(stagingDir, `${i}.${ext}`);
@@ -288,7 +383,11 @@ export function stageDocuments(
         ? planNamed(path.join(invoicesDir, item.targetName), reserved)
         : planNumbered(invoicesDir, item.ext, reserved);
       item.finalPath = finalPath;
-      plannedPaths.push({ path: finalPath, stagingPath: item.stagingPath });
+      plannedPaths.push({
+        path: finalPath,
+        stagingPath: item.stagingPath,
+        stagingDir,
+      });
     }
     return plannedPaths.map((item) => ({ ...item }));
   };
@@ -336,6 +435,7 @@ export function stageDocuments(
 
   return {
     pending: staged.length,
+    stagingDir,
     plan,
     commit,
     rollback,

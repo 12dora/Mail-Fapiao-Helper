@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { testFaultEnabled } from '../util/testFaults.js';
+import { isSameProcessAlive, readProcessStartId } from '../util/dataDirLock.js';
 
 /**
  * 归档事务的持久化清单（APP-03）。
@@ -27,6 +28,8 @@ export interface ArchivePlannedFile {
   path: string;
   /** Optional staging file used to prove ownership before installed fingerprints are durable. */
   stagingPath?: string;
+  /** Staging 事务目录；恢复时按 containment 删除（OCR-07）。 */
+  stagingDir?: string;
   /** Internal marker for old journals that serialized `files` as plain strings. */
   legacy?: boolean;
 }
@@ -36,6 +39,8 @@ export interface ArchiveTxPlan {
   files: Array<string | ArchivePlannedFile>;
   /** 将要追加的 CSV：路径 + 追加前的字节长度（不存在时为 0）。 */
   csv: { path: string; baseLength: number }[];
+  /** 可选：整批共享的 staging 根目录，恢复时一并清理。 */
+  stagingDir?: string;
 }
 
 export interface ArchiveTransaction {
@@ -48,7 +53,7 @@ export interface ArchiveTransaction {
 }
 
 export class ArchiveRecoveryError extends Error {
-  readonly code = 'archive_recovery_failed';
+  readonly code = 'archive_journal_recovery_failed';
 
   constructor(cause: unknown) {
     super('archive_journal_recovery_failed');
@@ -66,6 +71,8 @@ interface InstalledFile {
 interface JournalRecord {
   txId: string;
   pid: number;
+  /** 进程出生标识，避免 PID 复用导致 journal 永久阻塞恢复（OCR-06）。 */
+  processStartId?: string;
   startedAtMs: number;
   stage: ArchiveStage;
   files: ArchivePlannedFile[];
@@ -74,6 +81,8 @@ interface JournalRecord {
   csvRollbackDisabled?: boolean;
   /** `files-installed` 阶段记录的实际文件指纹，恢复时用于保守校验。 */
   installed?: InstalledFile[];
+  /** 本事务的 staging 目录，恢复完成后删除（OCR-07）。 */
+  stagingDir?: string;
 }
 
 interface ArchiveRecoveryOptions {
@@ -81,6 +90,9 @@ interface ArchiveRecoveryOptions {
 }
 
 const JOURNAL_DIRNAME = '.journal';
+const STAGING_DIRNAME = '.staging';
+/** staging 目录宽限期：比它更年轻的活进程目录不清理。 */
+const STAGING_ORPHAN_GRACE_MS = 60_000;
 
 function journalDir(invoicesDir: string): string {
   return path.join(invoicesDir, JOURNAL_DIRNAME);
@@ -112,6 +124,40 @@ function writeRecord(recordPath: string, record: JournalRecord): void {
     }
   } catch {
     // Windows 不支持对目录 fsync，忽略。
+  }
+}
+
+/**
+ * 把内容追加到 CSV 并用 fsync 保证 durable（供 OCR-03 的 ledger-committed 顺序使用）。
+ * 本模块提供原语；调用方（pipeline）应在 markStage('ledger-committed') 之前调用。
+ */
+export function appendCsvBlockDurable(csvPath: string, header: string, lines: string[]): void {
+  if (lines.length === 0) return;
+  const dir = path.dirname(csvPath);
+  fs.mkdirSync(dir, { recursive: true, mode: isPosix() ? 0o700 : undefined });
+  const existed = fs.existsSync(csvPath);
+  const fd = fs.openSync(csvPath, 'a', isPosix() ? 0o600 : undefined);
+  try {
+    if (!existed) {
+      fs.writeFileSync(fd, `\uFEFF${header}\n`, 'utf8');
+    }
+    fs.writeFileSync(fd, lines.join(''), 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  // 新建文件时 fsync 父目录，保证目录项本身 durable。
+  if (!existed) {
+    try {
+      const dirFd = fs.openSync(dir, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+    } catch {
+      // Windows 等不支持目录 fsync 时忽略。
+    }
   }
 }
 
@@ -166,10 +212,83 @@ function truncateCsv(csvPath: string, baseLength: number): boolean {
 
 const LEGACY_PLACEHOLDER_MTIME_TOLERANCE_MS = 10_000;
 const ARCHIVED_EXT = /\.(pdf|ofd|png|jpe?g|gif|webp|bmp)$/i;
+/**
+ * staging 事务目录名（末两段固定为 pid36 + 8 位 hex）：
+ * - 管线：`${msgIdHash}-${pid36}-${randhex8}`
+ * - 手工：`manual-${hash12}-${pid36}-${randhex8}`
+ * 拒绝 `.staging` 根本身、`..`、以及任意非约定名。
+ */
+const STAGING_TX_DIR_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-z]+-[0-9a-f]{8}$/i;
 
-function isContainedPath(target: string, base: string): boolean {
+/**
+ * 词法 containment：`target` 必须是 `base` 的严格后代（不含 base 自身）。
+ * 用于最终归档文件等不必跟随 symlink 的路径校验。
+ */
+function isStrictChildPath(target: string, base: string): boolean {
   const rel = path.relative(path.resolve(base), path.resolve(target));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/** 兼容旧名：严格子路径（不再把 base 自身视为 contained）。 */
+function isContainedPath(target: string, base: string): boolean {
+  return isStrictChildPath(target, base);
+}
+
+/**
+ * 解析并校验「可删除的事务 staging 目录」（OCR-07 rework）：
+ * 1. 词法上必须是 `<invoices>/.staging` 的严格子目录（拒绝 staging 根本身）；
+ * 2. 目录名符合事务命名约定；
+ * 3. 路径上任何中间组件不得是 symlink（lstat）；
+ * 4. realpath 后仍落在 staging 根的 realpath 之下。
+ * 不满足则返回 null，调用方跳过删除。
+ */
+function resolveSafeStagingTxDir(candidate: string, invoicesDir: string): string | null {
+  const stagingRoot = path.resolve(invoicesDir, STAGING_DIRNAME);
+  const target = path.resolve(candidate);
+  if (!isStrictChildPath(target, stagingRoot)) return null;
+
+  const leaf = path.basename(target);
+  if (!leaf || leaf === '.' || leaf === '..') return null;
+  if (!STAGING_TX_DIR_RE.test(leaf)) return null;
+  // 事务目录必须是 staging 根的直接子目录，禁止 journal 指向深层/任意路径。
+  if (path.dirname(target) !== stagingRoot) return null;
+
+  // 逐段 lstat：拒绝中间 symlink 逃逸（path.resolve 不会展开 symlink）。
+  let cursor = stagingRoot;
+  // staging 根本身若是 symlink，realpath 后再比；根不存在则无法安全删除。
+  let realRoot: string;
+  try {
+    const rootStat = fs.lstatSync(stagingRoot);
+    if (rootStat.isSymbolicLink()) return null;
+    if (!rootStat.isDirectory()) return null;
+    realRoot = fs.realpathSync(stagingRoot);
+  } catch {
+    return null;
+  }
+
+  const relParts = path.relative(stagingRoot, target).split(path.sep).filter((p) => p && p !== '.');
+  for (const part of relParts) {
+    if (part === '..') return null;
+    cursor = path.join(cursor, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cursor);
+    } catch {
+      return null;
+    }
+    if (st.isSymbolicLink()) return null;
+  }
+  if (!fs.statSync(target).isDirectory()) return null;
+
+  let realTarget: string;
+  try {
+    realTarget = fs.realpathSync(target);
+  } catch {
+    return null;
+  }
+  const realRel = path.relative(realRoot, realTarget);
+  if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) return null;
+  return realTarget;
 }
 
 function isSafeLegacyPlaceholder(planned: ArchivePlannedFile, stat: fs.Stats, record: JournalRecord, invoicesDir: string): boolean {
@@ -221,6 +340,30 @@ function removePlannedFiles(record: JournalRecord, invoicesDir: string): { remov
   return { removed, unresolved };
 }
 
+/**
+ * 按严格 containment + 事务身份删除 staging 目录（OCR-07）。
+ * 损坏 journal 若把路径写成 `<invoices>/.staging` 本身或经 symlink 逃逸，
+ * 不得递归删除无关/在用的 staging。
+ */
+function removeTransactionStaging(record: JournalRecord, invoicesDir: string): void {
+  const candidates = new Set<string>();
+  if (record.stagingDir) candidates.add(record.stagingDir);
+  for (const planned of record.files) {
+    if (planned.stagingDir) candidates.add(planned.stagingDir);
+    // stagingPath 的父目录仅在仍能解析为合法事务目录时才采纳。
+    if (planned.stagingPath) candidates.add(path.dirname(planned.stagingPath));
+  }
+  for (const dir of candidates) {
+    const safe = resolveSafeStagingTxDir(dir, invoicesDir);
+    if (!safe) continue;
+    try {
+      fs.rmSync(safe, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 function disableCsvRollback(recordPath: string, record: JournalRecord): void {
   if (record.csvRollbackDisabled) return;
   if (testFaultEnabled('MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE')) {
@@ -235,22 +378,66 @@ function removeJournalOrThrow(recordPath: string): void {
   throw new ArchiveRecoveryError(new Error('archive_journal_remove_failed'));
 }
 
+/**
+ * TEST-10：测试专用 stage barrier。
+ *
+ * 仅在 `MFH_TEST_FAULT_TOKEN` + sentinel 文件 + `MFH_TEST_JOURNAL_HOLD_AT_STAGE=1`
+ * 同时满足时生效。写入 journal 并 fsync 到目标 stage 后：
+ *   1. 若设置了 `MFH_TEST_JOURNAL_HOLD_SENTINEL`，把 stage 名写入该文件；
+ *   2. 自旋等待直到被 SIGKILL（不是 throw，否则 journal 会走同进程 rollback）。
+ *
+ * 父测试在 sentinel 出现后强杀子进程，再用新进程调用 recover 验证 durable 边界。
+ */
+function maybeHoldAtJournalStage(stage: ArchiveStage): void {
+  if (!testFaultEnabled('MFH_TEST_JOURNAL_HOLD_AT_STAGE')) return;
+  if (process.env.MFH_TEST_JOURNAL_HOLD_STAGE !== stage) return;
+  const sentinel = process.env.MFH_TEST_JOURNAL_HOLD_SENTINEL;
+  if (sentinel && sentinel.length > 0) {
+    try {
+      fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+      fs.writeFileSync(sentinel, `${stage}\n`, 'utf8');
+    } catch {
+      // parent will time out if the sentinel never appears
+    }
+  }
+  // Busy-wait until the parent SIGKILLs this process. Do not throw: a throw would
+  // run in-process catch/rollback and defeat the durable-crash contract under test.
+  for (;;) {
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    } catch {
+      // spin
+    }
+  }
+}
+
 export function beginArchiveTransaction(invoicesDir: string, plan: ArchiveTxPlan): ArchiveTransaction {
   if (testFaultEnabled('MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION')) {
     throw new Error('forced_begin_archive_transaction_failure');
   }
   const txId = `${Date.now().toString(36)}-${process.pid.toString(36)}-${randomBytes(5).toString('hex')}`;
   const recordPath = path.join(journalDir(invoicesDir), `${txId}.json`);
+  const files = plan.files.map(normalizePlannedFile);
+  // 把共享 stagingDir 写进每条 planned file，恢复时不必依赖顶层字段。
+  if (plan.stagingDir) {
+    for (const f of files) {
+      if (!f.stagingDir) f.stagingDir = plan.stagingDir;
+    }
+  }
   const record: JournalRecord = {
     txId,
     pid: process.pid,
+    processStartId: readProcessStartId(process.pid),
     startedAtMs: Date.now(),
     stage: 'prepared',
-    files: plan.files.map(normalizePlannedFile),
+    files,
     csv: plan.csv.map((item) => ({ path: item.path, baseLength: item.baseLength })),
+    ...(plan.stagingDir ? { stagingDir: plan.stagingDir } : {}),
   };
   // 条目写入并 fsync 之后才允许开始安装文件。
   writeRecord(recordPath, record);
+  // prepared 已 durable：强杀后恢复必须按 prepared 回滚（TEST-10）。
+  maybeHoldAtJournalStage('prepared');
 
   return {
     txId,
@@ -268,15 +455,19 @@ export function beginArchiveTransaction(invoicesDir: string, plan: ArchiveTxPlan
         record.installed = installed;
       }
       writeRecord(recordPath, record);
+      maybeHoldAtJournalStage(stage);
     },
 
     commit(): void {
+      // 成功后清理 staging；journal 删除表示事务完成。
+      removeTransactionStaging(record, invoicesDir);
       removeFileQuietly(recordPath);
     },
 
     rollback(): void {
       try {
         const cleanup = removePlannedFiles(record, invoicesDir);
+        removeTransactionStaging(record, invoicesDir);
         if (cleanup.unresolved > 0) {
           disableCsvRollback(recordPath, record);
           throw new ArchiveRecoveryError(new Error('archive_rollback_unresolved_files'));
@@ -297,15 +488,75 @@ export function beginArchiveTransaction(invoicesDir: string, plan: ArchiveTxPlan
   };
 }
 
-function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+/**
+ * 启动时扫描 `.staging`，清理已死亡进程遗留且超过宽限期的目录（OCR-07）。
+ * 必须在持有 data-dir lock 的前提下调用（由 recoverArchiveTransactions 串联）。
+ */
+export function recoverOrphanStagingDirs(invoicesDir: string): { removed: number; skipped: number } {
+  const stagingRoot = path.join(invoicesDir, STAGING_DIRNAME);
+  let entries: fs.Dirent[];
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    // EPERM 表示进程存在但不属于当前用户。
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
+    entries = fs.readdirSync(stagingRoot, { withFileTypes: true });
+  } catch {
+    return { removed: 0, skipped: 0 };
   }
+
+  let removed = 0;
+  let skipped = 0;
+  const now = Date.now();
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    // 符号链接目录：resolveSafeStagingTxDir 会拒绝；这里直接跳过。
+    if (entry.isSymbolicLink()) {
+      skipped++;
+      continue;
+    }
+    const dirPath = path.join(stagingRoot, entry.name);
+    const safe = resolveSafeStagingTxDir(dirPath, invoicesDir);
+    if (!safe) {
+      skipped++;
+      continue;
+    }
+
+    // 命名约定：`${msgIdHash}-${pid36}-${randhex}`
+    const parts = entry.name.split('-');
+    let ownerPid = 0;
+    if (parts.length >= 3) {
+      const pidPart = parts[parts.length - 2] ?? '';
+      const parsed = Number.parseInt(pidPart, 36);
+      if (Number.isInteger(parsed) && parsed > 0) ownerPid = parsed;
+    }
+
+    let ageMs = 0;
+    try {
+      ageMs = now - fs.statSync(safe).mtimeMs;
+    } catch {
+      skipped++;
+      continue;
+    }
+
+    // 宽限期内一律跳过，避免误删仍在写入的 staging。
+    if (ageMs < STAGING_ORPHAN_GRACE_MS) {
+      skipped++;
+      continue;
+    }
+
+    // 能解析到 pid 且进程仍存活 → 跳过。
+    if (ownerPid > 0 && isSameProcessAlive(ownerPid, undefined)) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      fs.rmSync(safe, { recursive: true, force: true });
+      removed++;
+    } catch {
+      skipped++;
+    }
+  }
+
+  return { removed, skipped };
 }
 
 /**
@@ -318,7 +569,9 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
   try {
     entries = fs.readdirSync(dir);
   } catch {
-    return { rolledBack: 0, skipped: 0 };
+    // journal 不存在时仍尝试清理孤儿 staging。
+    const staging = recoverOrphanStagingDirs(invoicesDir);
+    return { rolledBack: 0, skipped: staging.skipped };
   }
 
   let rolledBack = 0;
@@ -346,7 +599,11 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
     record.files = record.files.map(normalizePlannedFile);
 
     // 另一个仍在运行的进程正持有这笔事务，不能替它回滚。
-    if (record.pid !== process.pid && isProcessAlive(record.pid)) {
+    // 使用 pid + processStartId，避免 PID 复用永久阻塞（OCR-06）。
+    if (
+      record.pid !== process.pid
+      && isSameProcessAlive(record.pid, record.processStartId)
+    ) {
       if (opts.strict) throw new ArchiveRecoveryError(new Error('archive_recovery_live_pid_journal'));
       skipped++;
       continue;
@@ -354,12 +611,14 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
 
     if (record.stage === 'ledger-committed') {
       // 文件与台账都已落盘，只是没来得及删 journal：按已完成处理。
+      removeTransactionStaging(record, invoicesDir);
       removeJournalOrThrow(recordPath);
       skipped++;
       continue;
     }
 
     const cleanup = removePlannedFiles(record, invoicesDir);
+    removeTransactionStaging(record, invoicesDir);
     if (cleanup.unresolved > 0) {
       disableCsvRollback(recordPath, record);
       skipped++;
@@ -380,6 +639,10 @@ export function recoverArchiveTransactions(invoicesDir: string, opts: ArchiveRec
       skipped++;
     }
   }
+
+  // journal 处理完后清孤儿 staging（无 journal 的崩溃窗口，OCR-07）。
+  const staging = recoverOrphanStagingDirs(invoicesDir);
+  skipped += staging.skipped;
 
   return { rolledBack, skipped };
 }
