@@ -6,19 +6,25 @@ import type { Config } from './config.js';
 import type { Logger } from './log.js';
 import type { State } from './state.js';
 import { contentHash as contentHashOf, msgIdHash as msgIdHashFn } from './util/hash.js';
-import { csvCell, parseCsv } from './util/csv.js';
+import { csvCell, ensureCsvSchema, parseCsv } from './util/csv.js';
 import { testFaultEnabled } from './util/testFaults.js';
 import {
-  assertPublicResponse,
   attemptDeadlineSignal,
   bufferedResponse,
   isTimeoutError,
   readCappedBuffer,
+  safeFetch,
 } from './util/net.js';
 import { extractors } from './extract/registry.js';
 import type { Ctx, ExtractIssue, PdfArtifact } from './extract/types.js';
+import { preferPdfOverDuplicateOfd } from './extract/documentIdentity.js';
 import { ensureSecureDir, stageDocuments } from './download/downloader.js';
-import { ArchiveRecoveryError, beginArchiveTransaction, assertArchiveTransactionsRecovered } from './download/archiveJournal.js';
+import {
+  ArchiveRecoveryError,
+  appendCsvBlockDurable,
+  beginArchiveTransaction,
+  assertArchiveTransactionsRecovered,
+} from './download/archiveJournal.js';
 import { supportingReason } from './extract/classify.js';
 
 interface CsvRow {
@@ -57,6 +63,8 @@ export interface ProcessMailResult {
 export interface ProcessMailOpts {
   force?: boolean;
   raw?: Buffer;
+  /** CORE-02：致命错误后协调者 abort，归档临界区入口必须再检查一次。 */
+  signal?: AbortSignal;
 }
 
 const INVOICE_CSV_HEADER = 'messageId,date,from,subject,filename,source,contentHash\n';
@@ -106,19 +114,16 @@ function withCsvRetry(fn: () => void): void {
 // ---------------------------------------------------------------------------
 
 /**
- * 一次性追加整批 CSV 行，并返回追加前的文件大小作为回滚标记。整批只做一次
- * `appendFileSync`，避免逐行追加在中途失败留下“半个批次”。
+ * 一次性追加整批 CSV 行。CORE-05：先 ensure schema（空文件写表头）；
+ * OCR-03 / WIRE-02：走 durable 原语（write + fsync，新建时 fsync 父目录）。
  */
 function appendCsvBlock(csvPath: string, header: string, lines: string[]): void {
   if (lines.length === 0) return;
   ensureDir(path.dirname(csvPath));
-  const body = lines.join('');
-  if (!fs.existsSync(csvPath)) {
-    withCsvRetry(() => fs.writeFileSync(csvPath, '﻿' + header + body, 'utf8'));
-    hardenFile(csvPath);
-    return;
-  }
-  withCsvRetry(() => fs.appendFileSync(csvPath, body, 'utf8'));
+  withCsvRetry(() => {
+    ensureCsvSchema(csvPath, header);
+    appendCsvBlockDurable(csvPath, header, lines);
+  });
   hardenFile(csvPath);
 }
 
@@ -335,6 +340,25 @@ function requestMethod(init: FetchInit): string {
 }
 
 /**
+ * CORE-08：日志与 pending reason 只保留 protocol + host + 截断 pathname，
+ * 删除 query / fragment / userinfo，避免签名 URL 落盘泄露。
+ */
+export function redactUrlForLog(url: string): string {
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 96 ? `${u.pathname.slice(0, 96)}…` : u.pathname;
+    return `${u.protocol}//${u.host}${path}`;
+  } catch {
+    return '[invalid-url]';
+  }
+}
+
+/** 错误串里若夹带 URL，同样脱敏后再写入日志 / pending。 */
+function redactErrorDetail(detail: string): string {
+  return detail.replace(/https?:\/\/[^\s"'<>\\]+/gi, (m) => redactUrlForLog(m));
+}
+
+/**
  * 这些失败与网络抖动无关，重试只会放大伤害/浪费时间，必须原样上抛：
  * - `blocked_url:` SSRF 判定（调用方按前缀区分并降级）
  * - `response_too_large:` 超出 50MB 硬上限
@@ -349,6 +373,7 @@ export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
   return (async (input: FetchInput, init?: FetchInit): Promise<Response> => {
     const attempts = cfg.network.retries + 1;
     const url = requestUrl(input);
+    const safeUrl = redactUrlForLog(url);
     const method = requestMethod(init);
     const timeoutMs = cfg.network.timeoutMs;
     let lastError = '';
@@ -361,21 +386,19 @@ export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
           ...(init ?? {}),
           signal: attemptDeadlineSignal(init?.signal, timeoutMs),
         } as FetchInit;
-        const response = await fetch(input, attemptInit);
+        // WIRE-01 / OCR-01：用 safeFetch 替代裸 fetch——逐跳校验 redirect 并 pin DNS。
+        const response = await safeFetch(input as string | URL | Request, attemptInit);
         if (isRetryableStatus(response.status)) {
           lastError = `http_${response.status}`;
           // Drain the discarded error body so undici can release the socket back to
           // the pool instead of leaking a connection on every retry.
           await response.body?.cancel().catch(() => {});
           if (attempt === attempts) {
-            throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
+            throw new Error(`network_retry_failed:${method}:${safeUrl}:${lastError}`);
           }
-          log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
+          log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${safeUrl}: ${lastError}`);
         } else {
-          // 读 body 之前先复核最终 URL：公网链接跳转到内网时绝不能消费 body。
-          await assertPublicResponse(response);
-          // 关键：body 的消费必须留在同一个 attempt 内，否则 deadline 虽然会中断
-          // body，超时却发生在重试器之外，永远不会按 network.retries 重试（APP-13）。
+          // safeFetch 已在每跳发出前校验；body 仍须在同一 attempt 内读完（APP-13）。
           const data = await readCappedBuffer(response);
           return bufferedResponse(response, data);
         }
@@ -390,11 +413,11 @@ export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
         // readCappedBuffer 转成 `response_timeout:*`，两者现在走同一条重试路径。
         lastError = isTimeoutError(err)
           ? `timeout_${timeoutMs}ms`
-          : (err instanceof Error ? err.message : String(err));
+          : redactErrorDetail(err instanceof Error ? err.message : String(err));
         if (attempt === attempts) {
-          throw new Error(`network_retry_failed:${method}:${url}:${lastError}`);
+          throw new Error(`network_retry_failed:${method}:${safeUrl}:${lastError}`);
         }
-        log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${url}: ${lastError}`);
+        log.warn(`network retry ${attempt}/${cfg.network.retries} ${method} ${safeUrl}: ${lastError}`);
       }
 
       if (cfg.network.retryDelayMs > 0) {
@@ -402,7 +425,7 @@ export function makeRetryingFetch(cfg: Config, log: Logger): typeof fetch {
       }
     }
 
-    throw new Error(`network_retry_failed:${method}:${url}:${lastError || 'unknown'}`);
+    throw new Error(`network_retry_failed:${method}:${safeUrl}:${lastError || 'unknown'}`);
   }) as typeof fetch;
 }
 
@@ -485,7 +508,10 @@ async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): Promise<
     }
   }
 
-  return { artifacts, issues, matched, notApplicable, skipped };
+  // EXT-07：跨来源（附件 / 直链 / 第三方）统一做 PDF-over-duplicate-OFD 去重。
+  // 各提取器内部的局部去重看不到另一路产物，聚合后才能避免双重归档。
+  const deduped = preferPdfOverDuplicateOfd(artifacts, ctx.log, mail.subject ?? undefined);
+  return { artifacts: deduped, issues, matched, notApplicable, skipped };
 }
 
 function summarizeReasons(reasons: string[]): string {
@@ -513,6 +539,7 @@ export async function processMail(
     mail.from?.text ?? '',
     mail.date?.toISOString() ?? '',
     mail.subject ?? '',
+    opts.raw,
   );
   const messageId = mail.messageId || hash;
   const date = mail.date?.toISOString() || '';
@@ -523,6 +550,10 @@ export async function processMail(
   if (!opts.force && state.processedHashes.includes(hash)) {
     log.debug(`Skip already processed ${hash}`);
     return { ...baseResult, outcome: 'skip', reason: 'already_processed' };
+  }
+
+  if (opts.signal?.aborted) {
+    return { ...baseResult, outcome: 'skip', reason: 'aborted' };
   }
 
   const ctx: Ctx = {
@@ -572,6 +603,11 @@ export async function processMail(
 
   let downloadsCount = 0;
   try {
+    // CORE-02：网络/提取 await 返回后、进入同步归档区之前，再检查一次致命中止。
+    if (opts.signal?.aborted) {
+      return { ...baseResult, outcome: 'skip', reason: 'aborted' };
+    }
+
     // 0) 崩溃恢复：先把上次强杀留下的半成品事务清掉，再开始本次归档。
     recoverArchiveTransactionsOnce(cfg.paths.invoices, log);
 
@@ -579,6 +615,9 @@ export async function processMail(
     assertWritableDir(cfg.paths.invoices);
     assertAppendableCsv(csvPath);
     assertAppendableCsv(ocrPendingCsvPath);
+    // CORE-05：空/缺失 CSV 先落好表头，避免首行数据被当成 header。
+    ensureCsvSchema(csvPath, INVOICE_CSV_HEADER);
+    ensureCsvSchema(ocrPendingCsvPath, OCR_CSV_HEADER);
 
     // 2) 幂等协调：`(messageId, source, contentHash)` 已归档且文件仍在则直接复用。
     const archived = readArchivedIndex(csvPath, messageId);
@@ -666,12 +705,13 @@ export async function processMail(
     }
 
     try {
+      // OCR-03 / WIRE-02：fsync 之后才能标 ledger-committed。
       appendCsvBlock(csvPath, INVOICE_CSV_HEADER, invoiceLines);
       if (testFaultEnabled('MFH_TEST_FAIL_AFTER_INVOICE_CSV')) {
         throw new Error('forced_after_invoice_csv_failure');
       }
       appendCsvBlock(ocrPendingCsvPath, OCR_CSV_HEADER, ocrLines);
-      // 台账已全部落盘：即使这之后被强杀，恢复也只会清理 journal 本身。
+      // 两个 CSV 均已 durable：即使这之后被强杀，恢复也只会清理 journal 本身。
       tx.markStage('ledger-committed');
     } catch (err) {
       // journal 同时负责删除本批次文件并把两个 CSV 截回追加前的长度。
