@@ -25,7 +25,10 @@
     "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",
     "test:browser": "node gui-design/tests/e2e-fixes.mjs && node gui-design/tests/e2e.mjs",
-    "test": "npm run build && npm run typecheck && npm run test:cli && npm run test:electron"
+    "test:core": "npm run build && npm run typecheck && npm run test:cli && npm run test:electron",
+    "test": "npm run test:core",
+    "test:all": "npm run test:core && npm run test:browser",
+    "screenshots": "node scripts/take-screenshots.mjs"
   },
   "engines": {
     "node": ">=20"

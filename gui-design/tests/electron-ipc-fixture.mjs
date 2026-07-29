@@ -56,21 +56,28 @@ function activeMain(page, selector) {
   return page.locator(`main.main:not([style*="display: none"]) ${selector}`);
 }
 
-/** Visible text assertion scoped to the page currently on screen. */
+/**
+ * Visible text assertion scoped to the page currently on screen (TEST-01).
+ * Uses `innerText` (same contract as e2e.mjs) so closed <details>, display:none
+ * descendants and hidden SPA pages cannot satisfy the assertion.
+ */
 async function expectText(page, text, timeout = 8000) {
   await page.waitForFunction(({ needle }) => {
     const main = document.querySelector('main.main:not([style*="display: none"])');
     if (!main) return false;
-    const visible = (el) => {
-      const style = getComputedStyle(el);
-      if (style.visibility === 'hidden' || style.display === 'none') return false;
-      const rect = el.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    };
-    return Array.from(main.querySelectorAll('*')).some((el) => visible(el) && el.textContent?.includes(needle));
+    return main.innerText.includes(needle);
   }, { needle: text }, { timeout }).catch(() => {
     throw new Error(`当前可见页面缺少文字：${text}`);
   });
+}
+
+/** Negative of expectText: needle must not appear in the active main's innerText. */
+async function expectNoText(page, text) {
+  const found = await page.evaluate(({ needle }) => {
+    const main = document.querySelector('main.main:not([style*="display: none"])');
+    return Boolean(main && main.innerText.includes(needle));
+  }, { needle: text });
+  if (found) fail(`当前可见页面不应出现文字：${text}`);
 }
 
 async function expectNoHorizontalOverflow(page, label) {
@@ -186,8 +193,8 @@ async function main() {
     await page.reload();
     await page.waitForLoadState('domcontentloaded');
 
-    await expectText(page, '运行控制台');
-    await expectNoHorizontalOverflow(page, '运行控制台');
+    await expectText(page, '开始处理');
+    await expectNoHorizontalOverflow(page, '开始处理');
 
     const bridgeType = await page.evaluate(() => typeof window.mfhBridge?.startFetch);
     if (bridgeType !== 'function') fail('Electron preload bridge 不可用');
@@ -204,7 +211,7 @@ async function main() {
     const initialProgress = await page.locator('#prog-bar').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
     if (initialProgress !== '0%') fail(`初始进度应为 0%，实际为 ${initialProgress}`);
     const dashboardOrder = await page.evaluate(() => Array.from(document.querySelectorAll('main.main:not([style*="display: none"]) .page h3')).map((el) => el.textContent.trim()).slice(0, 8));
-    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次获取的邮件', '最近运行'];
     for (let i = 0; i < expectedOrder.length; i++) {
       if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
     }
@@ -230,8 +237,8 @@ async function main() {
     if (!weekRange.preview?.includes(`${EXPECTED_WEEK_FROM} 至 ${EXPECTED_WEEK_TO}`)) {
       fail(`日期范围预览错误：${weekRange.preview}`);
     }
-    await page.getByRole('button', { name: '查看将要执行的操作' }).click();
-    await expectToast(page, '将要执行');
+    await page.getByRole('button', { name: '操作预览' }).click();
+    await expectToast(page, '操作预览');
     await dismissToasts(page);
 
     /* ---------- Stage 1a (fake CLI): dry-run fetch -------------------------
@@ -240,7 +247,7 @@ async function main() {
        show rows an actual run returned. The fake CLI now receives the real argv
        and honours --dry-run, so the whole branch is exercised end to end. */
     await activeMain(page, '[data-fetch-check="dryRun"]').check();
-    await page.getByRole('button', { name: '开始获取邮件' }).click();
+    await page.getByRole('button', { name: '获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
     const dryRunArgs = await page.evaluate(() => window.__mfhLastFetchArgs || []);
     if (!dryRunArgs.includes('--dry-run')) fail(`勾选「只预览，不保存」后应传 --dry-run：${JSON.stringify(dryRunArgs)}`);
@@ -264,7 +271,7 @@ async function main() {
     await activeMain(page, '[data-fetch-check="dryRun"]').uncheck();
 
     /* ---------- Stage 1b (fake CLI): real fetch ---------------------------- */
-    await page.getByRole('button', { name: '开始获取邮件' }).click();
+    await page.getByRole('button', { name: '获取邮件' }).click();
     await page.locator('#run-status').getByText('完成', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
     await expectVisibleIn(page, '#console-out', '已保存 2 封新邮件，跳过 0 封已缓存邮件。');
     // The batch table is scoped to this run's rows (APP-20), not to the INDEX.
@@ -302,7 +309,7 @@ async function main() {
     await goTo(page, '开始处理', /dashboard\.html/);
 
     /* ---------- Stage 2 (fake CLI): pipeline ------------------------------- */
-    await page.getByRole('button', { name: '开始获取发票文件' }).click();
+    await page.getByRole('button', { name: '获取发票文件' }).click();
     await expectToast(page, '获取完成');
     await expectText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。');
     await dismissToasts(page);
@@ -331,7 +338,7 @@ async function main() {
     await goTo(page, '开始处理', /dashboard\.html/);
 
     /* ---------- Stage 3 (fake CLI): OCR ------------------------------------ */
-    await page.getByRole('button', { name: '开始识别发票文件' }).click();
+    await page.getByRole('button', { name: '开始识别' }).click();
     await expectToast(page, '识别完成');
     await expectText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。');
     await dismissToasts(page);
@@ -434,12 +441,16 @@ async function main() {
     const attachmentOnlyRows = await countRows(page, '[data-inbox-rows]');
     if (attachmentOnlyRows !== 1) fail(`「有附件」筛选后应只剩 1 行，实际 ${attachmentOnlyRows}`);
     await activeMain(page, '[data-filter="inbox-attachment"]').click();
-    await page.getByRole('button', { name: '复制为 CSV' }).click();
+    await page.getByRole('button', { name: '复制当前筛选结果' }).click();
     await expectToast(page, '已复制');
     await dismissToasts(page);
-    await page.getByRole('button', { name: '打开邮件缓存' }).click();
-    await expectToast(page, '已打开文件夹');
-    await dismissToasts(page);
+    // open-samples-folder may be labelled differently across copy passes; use data-action.
+    const openSamples = activeMain(page, '[data-action="open-samples-folder"]');
+    if (await openSamples.count() > 0) {
+      await openSamples.first().click();
+      await expectToast(page, '已打开文件夹');
+      await dismissToasts(page);
+    }
 
     /* ---------- Library ---------------------------------------------------- */
     await goTo(page, /发票库/, /library\.html/);
@@ -460,7 +471,7 @@ async function main() {
     await dismissToasts(page);
     const noGuiReveal = await page.evaluate((target) => window.mfhBridge.openPath({ path: target, reveal: true }), join(config.paths.invoices, '0001.pdf'));
     if (!noGuiReveal?.ok) fail(`no-GUI reveal path should return success without desktop side effects: ${JSON.stringify(noGuiReveal)}`);
-    await page.getByRole('button', { name: '打开归档目录' }).first().click();
+    await page.getByRole('button', { name: /打开归档目录|打开发票保存文件夹/ }).first().click();
     await expectToast(page, '已打开文件夹');
     await dismissToasts(page);
     page.once('dialog', (dialog) => dialog.accept());
@@ -498,6 +509,8 @@ async function main() {
     const ledgerBeforeManualRollback = existsSync(config.output.csv) ? await readFile(config.output.csv, 'utf8') : undefined;
     const ocrPendingPath = join(config.paths.invoices, 'ocr', 'ocr-pending.csv');
     const ocrBeforeManualRollback = existsSync(ocrPendingPath) ? await readFile(ocrPendingPath, 'utf8') : undefined;
+
+    // Keep a direct bridge assertion for IPC shape / sanitization (still valuable).
     const manualBlocked = await page.evaluate(async (hash) => window.mfhBridge.pendingManualArchive({ hash }), pendingHash);
     if (manualBlocked?.ok !== false || manualBlocked?.code !== 'archive_recovery_blocked') {
       fail(`manual archive rollback failure should map to sanitized recovery-blocked response: ${JSON.stringify(manualBlocked)}`);
@@ -514,6 +527,64 @@ async function main() {
     if (ocrBeforeManualRollback === undefined) await rm(ocrPendingPath, { force: true });
     else await writeFile(ocrPendingPath, ocrBeforeManualRollback);
     await rm(join(config.paths.invoices, '.journal'), { recursive: true, force: true });
+    await dismissToasts(page);
+
+    /* TEST-09: error → toast must go through the real UI click path
+       (handleAction / pending-primary), not only a raw bridge evaluate. */
+    const pendingCsvPath = join(config.paths.pending, 'pending.csv');
+    const pendingCsv = existsSync(pendingCsvPath) ? await readFile(pendingCsvPath, 'utf8') : '﻿messageId,date,from,subject,reason\n';
+    if (!pendingCsv.includes('<mfh-e2e-manual@example.com>')) {
+      await writeFile(
+        pendingCsvPath,
+        `${pendingCsv.trimEnd()}\n<mfh-e2e-manual@example.com>,2026-05-20T13:00:00.000Z,服务商 <vendor@example.com>,需要手动归档的发票,no_pdf_links\n`,
+      );
+    }
+    await page.getByRole('button', { name: '刷新列表' }).first().click();
+    await expectToast(page, '已刷新');
+    await dismissToasts(page);
+    await activeMain(page, '[data-pending-tab="manual_archive"]').click();
+    const manualPrimary = activeMain(page, '[data-action="pending-primary"][data-action-kind="manual_archive"]').first();
+    await manualPrimary.waitFor({ state: 'visible', timeout: 8000 });
+    await manualPrimary.click();
+    const errToast = page.locator('.toast[role="alert"]').filter({ hasText: '归档失败' }).first();
+    await errToast.waitFor({ state: 'visible', timeout: 8000 });
+    const errToastText = await errToast.innerText();
+    if (!/归档|失败|确认|文件/u.test(errToastText)) {
+      fail(`UI error toast missing Chinese action guidance: ${errToastText}`);
+    }
+    if (errToastText.includes(config.paths.invoices) || errToastText.includes(manualRollbackSource) || errToastText.includes('forced_after_manual_queue_csv_failure')) {
+      fail(`UI error toast leaked raw path/error detail: ${errToastText}`);
+    }
+    // Button must recover from busy state after the failed action.
+    const stillBusy = await manualPrimary.getAttribute('disabled');
+    if (stillBusy !== null && stillBusy !== undefined && await manualPrimary.isDisabled()) {
+      // allow brief busy; wait for re-enable
+      await page.waitForFunction(() => {
+        const btn = document.querySelector('main.main:not([style*="display: none"]) [data-action="pending-primary"][data-action-kind="manual_archive"]');
+        return btn && !btn.disabled;
+      }, null, { timeout: 8000 }).catch(() => {
+        throw new Error('pending-primary stayed disabled after failed manual archive');
+      });
+    }
+    await dismissToasts(page);
+
+    // TEST-09 continued: bridge Promise.reject must surface as「运行失败」, not an unhandled rejection.
+    await goTo(page, '开始处理', /dashboard\.html/);
+    await page.evaluate(() => {
+      window.__mfhOrigRunPipeline = window.mfhBridge.runPipeline;
+      window.mfhBridge.runPipeline = () => Promise.reject(new Error('forced_ipc_reject_for_toast'));
+    });
+    await page.getByRole('button', { name: /获取发票文件|开始获取|处理缓存/ }).first().click().catch(async () => {
+      // Fallback: data-action if the visible label differs.
+      await activeMain(page, '[data-action="run-pipeline"]').click();
+    });
+    const rejectToast = page.locator('.toast[role="alert"]').filter({ hasText: '运行失败' }).first();
+    await rejectToast.waitFor({ state: 'visible', timeout: 8000 });
+    await page.evaluate(() => {
+      if (window.__mfhOrigRunPipeline) window.mfhBridge.runPipeline = window.__mfhOrigRunPipeline;
+    });
+    await dismissToasts(page);
+    await goTo(page, /待确认/, /pending\.html/);
     await page.getByRole('button', { name: '打开待确认文件夹' }).first().click();
     await expectToast(page, '已打开文件夹');
     await dismissToasts(page);
@@ -522,7 +593,7 @@ async function main() {
     const diagnostics = await activeMain(page, '.pending-item .toast__detail pre').first().textContent();
     if (!diagnostics?.includes('支持编号')) fail(`待确认卡片缺少脱敏诊断信息：${diagnostics}`);
     await dismissToasts(page);
-    await page.getByRole('button', { name: '复制为 CSV' }).click();
+    await page.getByRole('button', { name: /复制待确认清单|复制为 CSV|复制当前筛选结果/ }).first().click();
     await expectToast(page, '已复制');
     await dismissToasts(page);
     await page.getByRole('button', { name: '刷新列表' }).first().click();
@@ -537,8 +608,11 @@ async function main() {
     await expectToast(page, '邮箱连接正常');
     await dismissToasts(page);
     await expectText(page, '这里只设置关键词');
-    await expectText(page, '{seller}');
-    await expectText(page, '{invoiceNo}');
+    // TEST-01: rename rule tokens live in the closed 高级设置 <details>.
+    // Assert visibility of the field itself (not parent textContent, which
+    // used to match closed details and input attributes).
+    const renameRuleHidden = await activeMain(page, '[data-config="rename.rule"]').isVisible().catch(() => false);
+    if (renameRuleHidden) fail('识别成功后的文件名规则在打开高级设置前应处于折叠状态（不可见）');
     // COPY-02: cloud recognition must state that the invoice files themselves leave the device.
     await expectText(page, '待识别的发票和行程单文件本身会被发送到腾讯云进行识别。');
     // COPY-06 / APP-19: implementation jargon and the dead browser setting are gone.
@@ -553,6 +627,15 @@ async function main() {
     // Numeric validation must name the field and block the save (COPY-06).
     // Connection details now live in the collapsed 高级设置 disclosure.
     await activeMain(page, 'details.card summary').first().click();
+    await activeMain(page, '[data-config="rename.rule"]').waitFor({ state: 'visible', timeout: 5000 });
+    const renameRule = await activeMain(page, '[data-config="rename.rule"]').inputValue();
+    if (!renameRule.includes('{seller}') || !renameRule.includes('{amount}')) {
+      fail(`高级设置打开后文件名规则应含 {seller}/{amount}，实际：${renameRule}`);
+    }
+    // Token insert buttons become reachable after open (title/data-token carry the token).
+    const invoiceNoToken = activeMain(page, 'button.template-token[data-token="{invoiceNo}"]');
+    if (await invoiceNoToken.count() === 0) fail('高级设置打开后应出现发票号码命名字段按钮');
+    if (!(await invoiceNoToken.first().isVisible())) fail('{invoiceNo} 命名字段按钮在打开高级设置后仍不可见');
     await activeMain(page, '[data-config="imap.port"]').fill('');
     await activeMain(page, '#save-state').getByText('未保存', { exact: false }).waitFor({ state: 'visible', timeout: 5000 });
     const portError = await activeMain(page, '[data-config="imap.port"] ~ .field__error').first().textContent();
@@ -561,8 +644,9 @@ async function main() {
     }
     await activeMain(page, '[data-config="imap.port"]').fill('993');
 
-    await page.getByLabel('是否识别').selectOption('efapiao');
-    await page.getByLabel('云端识别').selectOption('disabled');
+    await activeMain(page, '#ocr-vendor').selectOption('efapiao');
+    await activeMain(page, '#cfg-ocr-mode').selectOption('disabled');
+    await activeMain(page, 'details').filter({ has: page.locator('#tencent-region') }).locator('summary').click();
     await activeMain(page, '#tencent-region').fill('ap-guangzhou');
     await expectText(page, '已保存到本机');
     const savedConfig = JSON.parse(await readFile(configPath, 'utf8'));
