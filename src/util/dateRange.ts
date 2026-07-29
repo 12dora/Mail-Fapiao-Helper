@@ -4,8 +4,9 @@
  * - date-only（`YYYY-MM-DD`）按**本地时区**解释：下界取当天本地午夜，上界取
  *   「本地日历下一天」的午夜（不含）。用日历加一天而不是固定 86_400_000ms，
  *   所以夏令时切换当天（23 小时 / 25 小时）也不会漏掉或多带邮件。
- * - 完整 ISO timestamp 必须通过严格解析（年月日/时分秒/offset 独立校验 +
- *   round-trip），绝不再委托宽松的 `Date.parse`（会把 2026-02-31 滚到 3 月）。
+ * - 完整 ISO timestamp：带时区走 UTC round-trip；**无时区**形式
+ *   （如 `2026-07-27T12:30`）按本地日历/时刻解释，并做严格 round-trip，
+ *   以拒绝不存在的 DST 空洞本地时间。绝不委托宽松的 `Date.parse`。
  *
  * IMAP 查询与客户端过滤必须共享同一个窗口对象，调用方只应通过
  * `resolveDateWindowFromFilter()` 计算一次并向下传递。
@@ -14,11 +15,19 @@
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /**
- * 严格 ISO 8601 timestamp（带时间；date-only 走另一条路径）：
+ * 带显式时区的 ISO 8601 timestamp：
  * `YYYY-MM-DDTHH:mm[:ss[.sss]][Z|±HH:mm|±HHmm]`
- * 不接受 `07/29/2026`、空格分隔、缺少时区的含糊形式。
  */
-const ISO_TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+const ISO_TIMESTAMP_ZONED_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
+
+/**
+ * 无时区 ISO timestamp（本地解释）：
+ * `YYYY-MM-DDTHH:mm[:ss[.sss]]`
+ * 与模块自身注释及历史用户输入兼容（CORE-07 回归修复）。
+ */
+const ISO_TIMESTAMP_LOCAL_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?$/;
 
 interface DateOnlyParts {
   y: number;
@@ -55,13 +64,15 @@ function isValidCalendarYmd(y: number, m: number, d: number): boolean {
   return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
 }
 
-/**
- * 严格解析完整 ISO timestamp 为 epoch ms。失败返回 undefined。
- * 不走 `Date.parse`，因此不存在日期不会被滚到下月。
- */
-function parseStrictIsoTimestamp(value: string): number | undefined {
-  const matched = ISO_TIMESTAMP_RE.exec(value.trim());
-  if (!matched) return undefined;
+function parseTimeParts(matched: RegExpExecArray): {
+  y: number;
+  mo: number;
+  d: number;
+  hh: number;
+  mm: number;
+  ss: number;
+  ms: number;
+} | undefined {
   const y = Number(matched[1]);
   const mo = Number(matched[2]);
   const d = Number(matched[3]);
@@ -69,25 +80,66 @@ function parseStrictIsoTimestamp(value: string): number | undefined {
   const mm = Number(matched[5]);
   const ss = matched[6] !== undefined ? Number(matched[6]) : 0;
   const frac = matched[7];
-  // 小数秒最多取到毫秒。
   const ms = frac !== undefined ? Number(frac.padEnd(3, '0').slice(0, 3)) : 0;
   if (!isValidCalendarYmd(y, mo, d)) return undefined;
   if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 || ms < 0 || ms > 999) {
     return undefined;
   }
+  return { y, mo, d, hh, mm, ss, ms };
+}
 
-  let offsetMin = 0;
-  if (matched[8] !== undefined) {
-    const sign = matched[8] === '-' ? -1 : 1;
-    const oh = Number(matched[9]);
-    const om = Number(matched[10]);
-    if (oh < 0 || oh > 23 || om < 0 || om > 59) return undefined;
-    offsetMin = sign * (oh * 60 + om);
+/**
+ * 严格解析完整 ISO timestamp 为 epoch ms。失败返回 undefined。
+ * - 带 Z/±offset：按绝对时刻
+ * - 无时区：按本地时刻 + round-trip（拒绝 DST 空洞）
+ * 不走 `Date.parse`，因此不存在日期不会被滚到下月。
+ */
+function parseStrictIsoTimestamp(value: string): number | undefined {
+  const trimmed = value.trim();
+
+  const zoned = ISO_TIMESTAMP_ZONED_RE.exec(trimmed);
+  if (zoned) {
+    const parts = parseTimeParts(zoned);
+    if (!parts) return undefined;
+    let offsetMin = 0;
+    // 分组 8 有值 ⇒ 显式 ±offset；否则匹配到的是 Z（offset 0）。
+    if (zoned[8] !== undefined) {
+      const sign = zoned[8] === '-' ? -1 : 1;
+      const oh = Number(zoned[9]);
+      const om = Number(zoned[10]);
+      if (oh < 0 || oh > 23 || om < 0 || om > 59) return undefined;
+      offsetMin = sign * (oh * 60 + om);
+    }
+    const utcMs = Date.UTC(parts.y, parts.mo - 1, parts.d, parts.hh, parts.mm, parts.ss, parts.ms)
+      - offsetMin * 60_000;
+    if (!Number.isFinite(utcMs)) return undefined;
+    return utcMs;
   }
-  // 无显式 offset 且不是 Z：上面正则要求 Z 或 ±offset，因此这里 offsetMin=0 表示 Z。
-  const utcMs = Date.UTC(y, mo - 1, d, hh, mm, ss, ms) - offsetMin * 60_000;
-  if (!Number.isFinite(utcMs)) return undefined;
-  return utcMs;
+
+  const local = ISO_TIMESTAMP_LOCAL_RE.exec(trimmed);
+  if (!local) return undefined;
+  const parts = parseTimeParts(local);
+  if (!parts) return undefined;
+
+  // 本地构造 + round-trip：DST 春季空洞会规范化到另一时刻，读回不一致则拒绝。
+  const probe = new Date(parts.y, parts.mo - 1, parts.d, parts.hh, parts.mm, parts.ss, parts.ms);
+  if (
+    probe.getFullYear() !== parts.y
+    || probe.getMonth() !== parts.mo - 1
+    || probe.getDate() !== parts.d
+    || probe.getHours() !== parts.hh
+    || probe.getMinutes() !== parts.mm
+    || probe.getSeconds() !== parts.ss
+  ) {
+    return undefined;
+  }
+  // 毫秒：部分运行时对 DST 边界的 ms 行为一致即可；主要防日历/时分秒空洞。
+  if (probe.getMilliseconds() !== parts.ms) {
+    // 若实现把 ms 夹住，仍以 epoch 是否有限为准；严格要求 ms 一致。
+    return undefined;
+  }
+  const t = probe.getTime();
+  return Number.isFinite(t) ? t : undefined;
 }
 
 /**

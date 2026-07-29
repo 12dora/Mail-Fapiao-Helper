@@ -30,9 +30,10 @@ import { msgIdHash } from '../util/hash.js';
 import { LineAssembler, LineRingBuffer } from './lineStream.js';
 import { OperationCoordinator, type OpKind, type OpLease, type RunningOp } from './opCoordinator.js';
 import { killProcessTree, terminateChildren } from './procTree.js';
-import { registerManagedRoots, redactPath, sanitizeText, type UiError } from './sanitize.js';
+import { registerManagedRoots, redactPath, sanitizeText, shortId, type UiError } from './sanitize.js';
 import { runManualArchive } from './manualArchive.js';
 import { ArchiveRecoveryError, assertArchiveTransactionsRecovered, recoverArchiveTransactions } from '../download/archiveJournal.js';
+import { dataDirLockPath } from '../util/dataDirLock.js';
 
 interface DateRangePayload {
   from?: string;
@@ -190,33 +191,287 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   });
-  // ELEC-01：拒绝导航到非本机 file 页面，并禁止任意 window.open。
+  // ELEC-01：只允许导航到本应用 gui-design/pages 下的 file: 页面，并禁止 window.open。
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('file:')) event.preventDefault();
+    if (!isCanonicalAppPageUrl(url)) event.preventDefault();
+  });
+  mainWindow.webContents.on('will-frame-navigate', (event) => {
+    // 子 frame 一律拒绝导航到站外；主 frame 同样只允许应用页面。
+    if (!isCanonicalAppPageUrl(event.url)) event.preventDefault();
   });
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   // 新窗口（含 macOS 从 Dock 重开）需要立刻知道是否已有任务在跑。
   mainWindow.webContents.once('did-finish-load', () => {
-    sendToRenderer('op-state', coordinator.state() as unknown as Record<string, unknown>);
+    sendToRenderer('op-state', sanitizeOpState(coordinator.state()) as unknown as Record<string, unknown>);
   });
   void mainWindow.loadFile(uiPath('pages', 'dashboard.html'));
 }
 
+/** 应用内页面根目录（gui-design/pages）。 */
+function appPagesRoot(): string {
+  return uiPath('pages');
+}
+
 /**
- * 只接受主窗口当前的 file: 页面作为 IPC 调用方（ELEC-01）。
- * 破坏性操作与写路径在 handler 内强制调用。
+ * 判定 URL 是否为本应用合法 GUI 页面（ELEC-01）。
+ * 必须是 file: 且 realpath 落在 gui-design/pages 下的 .html。
+ */
+function isCanonicalAppPageUrl(url: string): boolean {
+  if (typeof url !== 'string' || !url.startsWith('file:')) return false;
+  try {
+    const filePath = fileURLToPath(url.split('?')[0]!.split('#')[0]!);
+    let pagesRoot: string;
+    try {
+      pagesRoot = fs.realpathSync(appPagesRoot());
+    } catch {
+      pagesRoot = path.resolve(appPagesRoot());
+    }
+    let realFile: string;
+    try {
+      realFile = fs.realpathSync(filePath);
+    } catch {
+      // 页面文件必须真实存在；失败则拒绝。
+      return false;
+    }
+    const rel = path.relative(pagesRoot, realFile);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return false;
+    return rel.toLowerCase().endsWith('.html') && !rel.includes('..');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 只接受主窗口 mainFrame 当前加载的应用页面作为 IPC 调用方（ELEC-01）。
+ * - 要求 senderFrame === webContents.mainFrame（拒绝 iframe / 子 frame）
+ * - URL 必须是 canonical app page
+ * - 在任何 await dialog 之后必须重新调用本函数
  */
 function assertTrustedSender(event: ElectronAPI.IpcMainInvokeEvent): boolean {
   try {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return false;
-    if (event.sender.id !== mainWindow.webContents.id) return false;
     if (event.sender.isDestroyed()) return false;
-    const url = event.sender.getURL();
-    if (!url.startsWith('file:')) return false;
+    if (event.sender.id !== mainWindow.webContents.id) return false;
+    const mainFrame = event.sender.mainFrame;
+    if (!mainFrame || event.senderFrame == null || event.senderFrame !== mainFrame) return false;
+    const url = event.senderFrame.url || event.sender.getURL();
+    if (!isCanonicalAppPageUrl(url)) return false;
     return true;
   } catch {
     return false;
   }
+}
+
+const UNTRUSTED_SENDER = {
+  ok: false as const,
+  code: 'untrusted_sender',
+  message: '无权执行此操作。',
+  error: '无权执行此操作。',
+};
+
+/**
+ * 中央 IPC 入口：每个 handler 在执行前强制 trusted-sender 校验（ELEC-01）。
+ * 破坏性操作在 await dialog 之后还会再次调用 assertTrustedSender。
+ */
+function handleTrusted(
+  channel: string,
+  handler: (event: ElectronAPI.IpcMainInvokeEvent, ...args: unknown[]) => unknown | Promise<unknown>,
+): void {
+  ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+    if (!assertTrustedSender(event)) return { ...UNTRUSTED_SENDER };
+    return handler(event, ...args);
+  });
+}
+
+/** op-state 只暴露运行态枚举，不把锁文件路径/token 泄漏给 renderer（ELEC-07）。 */
+function sanitizeOpState(state: { running: RunningOp | null }): { running: RunningOp | null } {
+  if (!state.running) return { running: null };
+  return {
+    running: {
+      kind: state.running.kind,
+      jobId: state.running.jobId,
+      startedAt: state.running.startedAt,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 路径规范化与删除/打开 containment（ELEC-01 / ELEC-06）
+// ---------------------------------------------------------------------------
+
+/**
+ * 解析路径的真实位置：存在则 realpath；不存在则 realpath 最近已存在祖先再拼后缀。
+ * 任一环节失败返回 undefined（调用方必须 fail closed）。
+ */
+function resolveCanonicalPath(target: string): string | undefined {
+  const abs = path.resolve(target);
+  try {
+    return fs.realpathSync(abs);
+  } catch {
+    // 目标不存在：向上找最近存在的祖先并 realpath。
+    let cur = path.dirname(abs);
+    const parts: string[] = [path.basename(abs)];
+    while (true) {
+      try {
+        const realAncestor = fs.realpathSync(cur);
+        return path.join(realAncestor, ...parts.reverse());
+      } catch {
+        const parent = path.dirname(cur);
+        if (parent === cur) return undefined;
+        parts.push(path.basename(cur));
+        cur = parent;
+      }
+    }
+  }
+}
+
+/** 数据目录的 realpath；失败则 undefined（fail closed）。 */
+function realDataDir(): string | undefined {
+  try {
+    return fs.realpathSync(dataDir);
+  } catch {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      return fs.realpathSync(dataDir);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * 双方已 canonical 的路径段 containment 比较。
+ * 用「根 + 分隔符」前缀，避免 `/a/bc` 被当成 `/a/b` 的子路径；
+ * 也避免 `path.relative` 对 `..hidden` 这类段名误判。
+ * 任一侧为空则 false（fail closed）。
+ */
+function isPathSegmentInside(candidateCanon: string, rootCanon: string): boolean {
+  if (!candidateCanon || !rootCanon) return false;
+  const root = path.normalize(rootCanon);
+  const cand = path.normalize(candidateCanon);
+  if (process.platform === 'win32') {
+    const rootLower = root.toLowerCase();
+    const candLower = cand.toLowerCase();
+    if (candLower === rootLower) return true;
+    const prefix = rootLower.endsWith(path.sep) ? rootLower : rootLower + path.sep;
+    return candLower.startsWith(prefix);
+  }
+  if (cand === root) return true;
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  return cand.startsWith(prefix);
+}
+
+/**
+ * 判断 candidate 是否 canonically 位于 root 内部。
+ * 双方都用同一套 resolveCanonicalPath（realpath / 最近已存在祖先）；
+ * 规范化失败一律 false（fail closed）。macOS 上 `/var`→`/private/var` 两侧对称。
+ */
+function isCanonicallyInside(candidate: string, root: string): boolean {
+  const realRoot = resolveCanonicalPath(root);
+  const realCandidate = resolveCanonicalPath(candidate);
+  if (!realRoot || !realCandidate) return false;
+  return isPathSegmentInside(realCandidate, realRoot);
+}
+
+/**
+ * 不得作为 open-path 允许根的危险目录（即便配置文件里写成这些值也拒绝）。
+ * 家目录的子目录可以（用户常把发票放在 ~/Documents/...）；裸家目录本身不行。
+ */
+function isDangerousOpenRoot(canonPath: string): boolean {
+  if (!canonPath) return true;
+  const normalized = path.normalize(canonPath);
+  const root = path.parse(normalized).root;
+  // 文件系统根（`/` 或 `C:\`）
+  if (!root || normalized === root || normalized === path.sep) return true;
+
+  if (process.platform === 'win32') {
+    const lower = normalized.toLowerCase();
+    const winDir = path.resolve(process.env.SystemRoot || process.env.windir || 'C:\\Windows').toLowerCase();
+    const pf = path.resolve(process.env.ProgramFiles || 'C:\\Program Files').toLowerCase();
+    const pf86 = path.resolve(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)').toLowerCase();
+    if (lower === winDir || lower === pf || lower === pf86) return true;
+  } else {
+    const blocked = new Set([
+      '/etc',
+      '/usr',
+      '/bin',
+      '/sbin',
+      '/System',
+      '/Applications',
+      '/Library',
+      // macOS 上 /etc 常是 /private/etc 的 symlink，canonical 后落在 private 下
+      '/private/etc',
+    ]);
+    if (blocked.has(normalized)) return true;
+  }
+
+  try {
+    const home = fs.realpathSync(os.homedir());
+    if (process.platform === 'win32') {
+      if (normalized.toLowerCase() === home.toLowerCase()) return true;
+    } else if (normalized === home) {
+      return true;
+    }
+  } catch {
+    // homedir 解析失败时不因此放行危险根
+  }
+  return false;
+}
+
+/**
+ * ELEC-06：open-path 允许根仅由主进程从磁盘配置自行计算，绝不读 IPC payload。
+ * = canonical dataDir + 配置的 invoices/pending/samples + 输出 CSV 父目录。
+ * 规范化失败的根跳过；危险根（系统目录 / 裸家目录）跳过。
+ */
+function openPathAllowedRoots(): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const add = (raw: string | undefined): void => {
+    if (!raw) return;
+    const canon = resolveCanonicalPath(raw);
+    if (!canon) return;
+    if (isDangerousOpenRoot(canon)) return;
+    const key = process.platform === 'win32' ? canon.toLowerCase() : canon;
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push(canon);
+  };
+
+  add(realDataDir());
+  add(invoicesDirPath());
+  add(pendingDirPath());
+  add(samplesDirPath());
+  // 输出台账 CSV 的父目录（用户可能把它放到归档目录之外）
+  try {
+    add(path.dirname(ledgerCsvPath()));
+  } catch {
+    // ledger 路径解析失败则跳过
+  }
+  return roots;
+}
+
+/**
+ * 删除前的 containment 检查：目标及其最近祖先都必须落在真实数据目录内。
+ * 中间若有指向外部的 symlink/junction，realpath 会逃出，检查失败。
+ */
+function assertSafeToDeleteInsideDataDir(target: string): string | undefined {
+  const base = realDataDir();
+  if (!base) return undefined;
+  if (!isCanonicallyInside(target, base)) return undefined;
+  // 再校验最近已存在祖先也在数据目录内（防止删除时路径段穿越）。
+  let cur = path.resolve(target);
+  for (let i = 0; i < 64; i++) {
+    try {
+      const real = fs.realpathSync(cur);
+      if (!isCanonicallyInside(real, base)) return undefined;
+      break;
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return undefined;
+      cur = parent;
+    }
+  }
+  return resolveCanonicalPath(target);
 }
 
 async function openPathForUser(target: string): Promise<string> {
@@ -336,7 +591,7 @@ export interface SaveConfigOutcome {
   configPath: string;
   config?: Record<string, unknown>;
   fieldErrors?: { path: string; message: string }[];
-  configError?: { message: string; backupPath?: string };
+  configError?: { message: string; detail?: string; backupPath?: string };
   /** 显式修复损坏配置时，被隔离备份的旧文件（已脱敏）。 */
   repairedFrom?: string;
 }
@@ -367,7 +622,7 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
   } else if (!opts.repairCorrupt) {
     return {
       ok: false,
-      configPath,
+      configPath: redactPath(configPath),
       configError: { message: `配置文件已损坏，无法保存：${current.message}` },
     };
   } else {
@@ -382,7 +637,11 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
     try {
       base = JSON.parse(fs.readFileSync(bundledConfigPath, 'utf8')) as Record<string, unknown>;
     } catch {
-      return { ok: false, configPath, configError: { message: '内置示例配置不可读，无法修复配置文件。', ...(backupPath ? { backupPath } : {}) } };
+      return {
+        ok: false,
+        configPath: redactPath(configPath),
+        configError: { message: '内置示例配置不可读，无法修复配置文件。', ...(backupPath ? { backupPath } : {}) },
+      };
     }
   }
 
@@ -393,7 +652,7 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
 
   const validated = validateConfigCandidate(candidate);
   if (!validated.ok) {
-    return { ok: false, configPath, fieldErrors: validated.errors };
+    return { ok: false, configPath: redactPath(configPath), fieldErrors: validated.errors };
   }
 
   try {
@@ -401,27 +660,74 @@ function saveConfig(payload: unknown, opts: { repairCorrupt?: boolean } = {}): S
   } catch (err) {
     return {
       ok: false,
-      configPath,
+      // ELEC-07：不向 renderer 泄漏原始 configPath。
+      configPath: redactPath(configPath),
       configError: {
-        message: '无法写入配置文件，请确认数据目录可写。',
+        // COPY-10：配置写失败不等于「数据目录」问题；指向可见的设置操作。
+        message: '无法保存设置。请确认应用有写入权限后重试；若仍失败，请在「邮箱与保存」中检查保存位置。',
+        detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
         ...(backupPath ? { backupPath } : {}),
       },
     };
   }
-  return { ok: true, configPath, config: redactConfig(candidate), ...(backupPath ? { repairedFrom: backupPath } : {}) };
+  return {
+    ok: true,
+    configPath: redactPath(configPath),
+    config: redactConfig(candidate),
+    ...(backupPath ? { repairedFrom: backupPath } : {}),
+  };
 }
 
-/** 屏蔽所有 secret 形态的字段后再交给 renderer。 */
+/**
+ * 屏蔽 secret 与内部诊断路径后再交给 renderer（ELEC-07）。
+ *
+ * `paths.invoices/pending/samples` 与 `output.csv` 是用户可配置的「保存位置」：
+ * 配置表单要能回显并重新保存，且 shell 的 openPath({ path }) 要用真实路径打开。
+ * 打开时主进程仍只信任磁盘配置算出的 allow-list（ELEC-06），不会被 IPC 扩权。
+ * OCR resultsCsv / organizedDir 等内部路径继续脱敏。
+ */
 function redactConfig(raw: Record<string, unknown>): Record<string, unknown> {
   const isSecretKey = (k: string): boolean => /secret|key|token|pass/i.test(k);
+  const redactMaybePath = (value: unknown): unknown => {
+    if (typeof value !== 'string' || value.length === 0) return value;
+    // 绝对路径、盘符路径、UNC 一律脱敏；相对路径保留（便于 UI 展示配置）。
+    if (
+      path.isAbsolute(value)
+      || /^[A-Za-z]:[\\/]/.test(value)
+      || value.startsWith('\\\\')
+      || value.startsWith('//')
+    ) {
+      return redactPath(value);
+    }
+    return value;
+  };
   const imap = { ...asObject(raw.imap), pass: '' };
   const ocrSrc = asObject(raw.ocr);
   const creds = asObject(ocrSrc.credentials);
   const ocr = {
     ...ocrSrc,
+    resultsCsv: redactMaybePath(ocrSrc.resultsCsv),
     credentials: Object.fromEntries(Object.entries(creds).map(([k, v]) => [k, isSecretKey(k) ? '' : v])),
   };
-  return { ...raw, imap, ocr };
+  const pathsSrc = asObject(raw.paths);
+  // 用户保存位置：不脱敏，供配置表单回显/保存与 openPath({ path }) 使用。
+  const paths = {
+    ...pathsSrc,
+    samples: pathsSrc.samples,
+    invoices: pathsSrc.invoices,
+    pending: pathsSrc.pending,
+  };
+  const outputSrc = asObject(raw.output);
+  const output = {
+    ...outputSrc,
+    csv: outputSrc.csv,
+  };
+  const renameSrc = asObject(raw.rename);
+  const rename = {
+    ...renameSrc,
+    organizedDir: redactMaybePath(renameSrc.organizedDir),
+  };
+  return { ...raw, imap, ocr, paths, output, rename };
 }
 
 // ---------------------------------------------------------------------------
@@ -765,12 +1071,13 @@ function parseOcrLine(line: string, current: OcrProgressState, emit: ProgressSin
   });
 }
 
+/** FE-12：未知 total 时不发假 percent。 */
 function sendOcrPhase(message: string, emit: ProgressSink, current?: Partial<OcrProgressState>, kind = ''): void {
+  const total = current?.total ?? 0;
   emit({
     operation: 'ocr',
     phase: '准备识别',
-    percent: 3,
-    total: current?.total ?? 0,
+    ...(total > 0 ? { total, percent: 1 } : { total: 0 }),
     processed: current?.processed ?? 0,
     parsed: current?.parsed ?? 0,
     skipped: current?.skipped ?? 0,
@@ -869,10 +1176,13 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
   }
 
   if (MANUAL_MAIL_RE.test(text)) {
-    // 降级到待确认也算处理进度的一部分，但不增加 processed。
+    // 降级到待确认：计为进度完成的一部分，并推进 percent（FE-12）。
+    current.processed++;
+    const percent = fileProgressPercent(current);
     emit({
       operation: 'files',
       phase: '需要确认',
+      ...(percent !== undefined ? { percent } : {}),
       ...(current.total > 0 ? { total: current.total } : {}),
       processed: current.processed,
       skipped: current.skipped,
@@ -884,7 +1194,8 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
     return;
   }
 
-  // 未识别的原始 CLI 行不进普通进度（COPY-06 / ELEC-07）；只保留结构化消息。
+  // 未识别的原始 CLI 行不进普通进度（COPY-06 / ELEC-07）；只保留稳定 code。
+  // 原始内容只进诊断文件，不进 IPC（MUST-REWORK 8/9）。
   if (text.includes('[error]') || text.includes('[warn]')) {
     emit({
       operation: 'files',
@@ -893,19 +1204,22 @@ function parseFileLine(line: string, current: FileProgressState, emit: ProgressS
       processed: current.processed,
       skipped: current.skipped,
       failed: current.failed,
-      code: 'files_log',
-      message: logText(text),
+      code: text.includes('[error]') ? 'files_log_error' : 'files_log_warn',
+      message: text.includes('[error]')
+        ? '处理过程中出现错误，详情见技术诊断。'
+        : '处理过程中出现警告，详情见技术诊断。',
       kind: text.includes('[error]') ? 'err' : 'warn',
     });
   }
 }
 
+/** FE-12：未知 total 时不发 percent（不确定进度）；已知 total 时才带真实 percent。 */
 function sendFilePhase(message: string, emit: ProgressSink, current?: Partial<FileProgressState>, kind = ''): void {
+  const total = current?.total ?? 0;
   emit({
     operation: 'files',
     phase: '准备获取',
-    percent: 3,
-    ...(current?.total && current.total > 0 ? { total: current.total } : {}),
+    ...(total > 0 ? { total, percent: 1 } : {}),
     processed: current?.processed ?? 0,
     skipped: current?.skipped ?? 0,
     failed: current?.failed ?? 0,
@@ -1125,8 +1439,8 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
           skipped: ocrCurrent.skipped,
           failed: ocrCurrent.failed,
           code: 'ocr_failed',
-          // COPY-10
-          message: '无法完成识别。请确认磁盘空间充足，并在「邮箱与保存」中重新选择发票保存位置后重试。',
+          // COPY-10：识别失败原因多样（服务/凭据/解析），勿默认归咎磁盘。
+          message: '无法完成识别。请稍后重试；若连续失败，请到「设置」检查识别相关选项，并展开「查看技术详情」。',
           detail,
           kind: 'err',
           done: true,
@@ -1142,8 +1456,8 @@ function runCli(command: string, args: string[], opts: RunCliOptions = {}): Prom
           skipped: fileCurrent.skipped,
           failed: fileCurrent.failed,
           code: 'files_failed',
-          // COPY-10
-          message: '获取发票文件没有完成。请先重试；如果仍失败，请确认发票保存位置可用，再展开「查看技术详情」。',
+          // COPY-10：勿默认说成保存位置问题。
+          message: '获取发票文件没有完成。请先重试；若仍失败，请展开「查看技术详情」或检查网络与邮箱设置。',
           detail,
           kind: 'err',
           done: true,
@@ -1346,22 +1660,94 @@ function ledgerCsvPath(): string {
 
 const archiveRecoveryFailures = new Map<string, UiError>();
 
-function archiveRecoveryBlockedError(): UiError {
+/** journal 目录检查结果：缺席 / 有残留 / 无法判定（读错误）。 */
+type JournalPresence =
+  | { kind: 'absent' }
+  | { kind: 'residual'; names: string[] }
+  | { kind: 'unreadable'; detail: string };
+
+function archiveRecoveryBlockedError(extra?: string): UiError {
   return {
     code: 'archive_recovery_blocked',
-    // COPY-10：可执行动作，不用「台账 / 数据目录」等内部术语。
-    message: '上次保存发票时中断，当前无法继续。如有表格程序正在打开发票清单，请先关闭，然后重新打开应用再试。',
-    detail: '归档事务恢复未完成或仍有未解决的 journal，写入已停止。',
+    // COPY-10：可执行动作；并提供隔离恢复指引（OCR-05 rework）。
+    message: '上次保存发票时中断，当前无法继续修改。请先关闭可能占用发票清单的表格程序，然后重新打开应用。若仍无法继续，请在「设置 → 关于」查看数据位置，将其中 invoices 下的 .journal 文件夹改名为 .journal-quarantine 后再打开应用（改名前请勿删除）。',
+    detail: extra
+      ? sanitizeText(extra, { maxLength: 300 })
+      : '归档事务恢复未完成或仍有未解决的 journal，写入已停止。',
   };
 }
 
-/** OCR-05：恢复后若仍残留 journal，说明有 unresolved/损坏事务，必须阻断后续写入。 */
-function hasResidualArchiveJournals(invoicesDir: string): boolean {
+/**
+ * OCR-05 rework：journal 目录读错误 ≠ 无残留（fail closed）。
+ * 只有确认目录不存在（ENOENT）才算 absent。
+ */
+function inspectArchiveJournals(invoicesDir: string): JournalPresence {
   const dir = path.join(invoicesDir, '.journal');
   try {
-    return fs.readdirSync(dir).some((name) => name.endsWith('.json'));
-  } catch {
-    return false;
+    const names = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+    return names.length === 0 ? { kind: 'absent' } : { kind: 'residual', names };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { kind: 'absent' };
+    return {
+      kind: 'unreadable',
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * 仅隔离**确认损坏**（无法 JSON 解析）的 journal 条目，保留可解析条目供恢复。
+ * 整目录搬迁会丢掉仍可用于回滚的证据，故只挪损坏文件（OCR-05 rework）。
+ */
+function quarantineCorruptArchiveJournals(invoicesDir: string): {
+  quarantined: number;
+  remaining: number;
+  dest?: string;
+  detail?: string;
+} {
+  const dir = path.join(invoicesDir, '.journal');
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { quarantined: 0, remaining: 0 };
+    }
+    return {
+      quarantined: 0,
+      remaining: -1,
+      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
+    };
+  }
+  const corrupt: string[] = [];
+  for (const name of names) {
+    try {
+      JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+    } catch {
+      corrupt.push(name);
+    }
+  }
+  if (corrupt.length === 0) {
+    return { quarantined: 0, remaining: names.length };
+  }
+  const dest = path.join(invoicesDir, `.journal-quarantine-${Date.now()}`);
+  try {
+    fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+    for (const name of corrupt) {
+      fs.renameSync(path.join(dir, name), path.join(dest, name));
+    }
+    return {
+      quarantined: corrupt.length,
+      remaining: names.length - corrupt.length,
+      dest: redactPath(dest),
+    };
+  } catch (err) {
+    return {
+      quarantined: 0,
+      remaining: names.length,
+      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
+    };
   }
 }
 
@@ -1369,18 +1755,56 @@ function ensureArchiveRecoveryReady(): UiError | undefined {
   const key = path.resolve(invoicesDirPath());
   try {
     assertArchiveTransactionsRecovered(key);
-    if (hasResidualArchiveJournals(key)) {
-      const error = archiveRecoveryBlockedError();
-      archiveRecoveryFailures.set(key, error);
-      return error;
-    }
-    archiveRecoveryFailures.delete(key);
-    return undefined;
-  } catch {
-    const error = archiveRecoveryBlockedError();
+  } catch (err) {
+    const error = archiveRecoveryBlockedError(
+      err instanceof Error ? err.message : String(err),
+    );
     archiveRecoveryFailures.set(key, error);
     return error;
   }
+
+  const presence = inspectArchiveJournals(key);
+  if (presence.kind === 'unreadable') {
+    // fail closed：读错误 ≠ 无残留
+    const error = archiveRecoveryBlockedError(`无法读取归档恢复记录：${presence.detail}`);
+    archiveRecoveryFailures.set(key, error);
+    return error;
+  }
+  if (presence.kind === 'residual') {
+    // 先隔离确认损坏的条目，再重试恢复。
+    const q = quarantineCorruptArchiveJournals(key);
+    if (q.remaining < 0) {
+      const error = archiveRecoveryBlockedError(q.detail);
+      archiveRecoveryFailures.set(key, error);
+      return error;
+    }
+    try {
+      assertArchiveTransactionsRecovered(key);
+    } catch (err) {
+      const error = archiveRecoveryBlockedError(
+        err instanceof Error ? err.message : String(err),
+      );
+      archiveRecoveryFailures.set(key, error);
+      return error;
+    }
+    const again = inspectArchiveJournals(key);
+    if (again.kind === 'unreadable') {
+      const error = archiveRecoveryBlockedError(`无法读取归档恢复记录：${again.detail}`);
+      archiveRecoveryFailures.set(key, error);
+      return error;
+    }
+    if (again.kind === 'residual') {
+      // 仍有可解析但无法自动清理的 journal：阻断写入，指引人工隔离（不自动丢证据）。
+      const error = archiveRecoveryBlockedError(
+        `仍有 ${again.names.length} 条未解决的归档恢复记录`
+        + (q.dest ? `；已隔离 ${q.quarantined} 条损坏记录到 ${q.dest}` : ''),
+      );
+      archiveRecoveryFailures.set(key, error);
+      return error;
+    }
+  }
+  archiveRecoveryFailures.delete(key);
+  return undefined;
 }
 
 interface SummaryPageOptions {
@@ -1406,28 +1830,85 @@ function asSummaryOptions(value: unknown): SummaryPageOptions | undefined {
 }
 
 /**
- * 给 renderer 的可打开路径：优先 dataDir 相对路径（open-path 能 resolve）；
- * 位于可接受外部管理根下的保留绝对路径；其它绝对路径不外泄（ELEC-07）。
+ * 给 renderer 的可打开路径：dataDir 内用相对路径；配置允许根（如外部归档目录）
+ * 内也可用相对 dataDir 失败时的 opaque `ext:` 句柄（ELEC-06 / ELEC-07）。
+ * open-path 会用主进程磁盘配置的 allow-list 做 containment，不信任 renderer 扩权。
  */
 function rendererOpenablePath(abs: string): string {
   if (!abs) return '';
-  const resolved = path.resolve(abs);
-  const rel = path.relative(dataDir, resolved);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+  const canon = resolveCanonicalPath(abs);
+  if (!canon) return '';
+  const base = realDataDir();
+  if (base && isPathSegmentInside(canon, base)) {
+    const rel = path.relative(base, canon);
     return rel.split(path.sep).join('/') || '.';
   }
-  for (const root of openPathAllowedRoots()) {
-    const r = path.relative(root, resolved);
-    if (r === '' || (!r.startsWith('..') && !path.isAbsolute(r))) return resolved;
+  // dataDir 外：即便落在用户配置的 invoices 等根下，也不把绝对路径交给 renderer。
+  return registerExternalFileHandle(canon);
+}
+
+/** 主进程签发的外部文件 opaque 句柄（renderer 不可伪造路径）。 */
+const externalFileHandles = new Map<string, string>();
+
+function registerExternalFileHandle(canonicalPath: string): string {
+  for (const [id, p] of externalFileHandles) {
+    if (p === canonicalPath) return id;
   }
-  return '';
+  const id = `ext:${randomBytes(12).toString('hex')}`;
+  externalFileHandles.set(id, canonicalPath);
+  // 防止无限增长：超过 500 个时丢掉最旧的一半。
+  if (externalFileHandles.size > 500) {
+    const keys = Array.from(externalFileHandles.keys()).slice(0, 250);
+    for (const k of keys) externalFileHandles.delete(k);
+  }
+  return id;
+}
+
+function resolveExternalFileHandle(id: string): string | undefined {
+  if (typeof id !== 'string' || !id.startsWith('ext:')) return undefined;
+  return externalFileHandles.get(id);
 }
 
 /**
  * ELEC-07：摘要进 renderer 前脱敏内部 CSV 路径与原始错误；
- * filePath 改为可打开的安全形态，业务展示字段（发件人/主题）保留。
+ * filePath 改为可打开的安全形态；nested library.ocr 也必须脱敏。
  */
 function sanitizeAppSummary(summary: AppSummary): AppSummary {
+  const sanitizeOcrSummary = (ocr: AppSummary['library']['ocr']): AppSummary['library']['ocr'] => ({
+    ...ocr,
+    pendingCsv: ocr.pendingCsv ? redactPath(ocr.pendingCsv) : '',
+    resultsCsv: ocr.resultsCsv ? redactPath(ocr.resultsCsv) : '',
+    byDocumentType: (ocr.byDocumentType ?? []).map((g) => ({
+      ...g,
+      examples: (g.examples ?? []).map((ex) => ({
+        ...ex,
+        hash: ex.hash ? shortId(ex.hash) : ex.hash,
+        from: ex.from ? sanitizeText(ex.from, { maxLength: 80 }) : ex.from,
+        subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+        reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+      })),
+    })),
+    bySupportingReason: (ocr.bySupportingReason ?? []).map((g) => ({
+      ...g,
+      examples: (g.examples ?? []).map((ex) => ({
+        ...ex,
+        hash: ex.hash ? shortId(ex.hash) : ex.hash,
+        subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+        reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+      })),
+    })),
+    byFailureReason: (ocr.byFailureReason ?? []).map((g) => ({
+      ...g,
+      key: g.key ? sanitizeText(g.key, { maxLength: 80 }) : g.key,
+      examples: (g.examples ?? []).map((ex) => ({
+        ...ex,
+        hash: ex.hash ? shortId(ex.hash) : ex.hash,
+        subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+        reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+      })),
+    })),
+  });
+
   return {
     ...summary,
     configPath: redactPath(summary.configPath),
@@ -1441,7 +1922,7 @@ function sanitizeAppSummary(summary: AppSummary): AppSummary {
         filePath: row.filePath ? rendererOpenablePath(row.filePath) : '',
         error: row.error ? sanitizeText(row.error, { maxLength: 200 }) : row.error,
       })),
-      ocr: summary.library.ocr,
+      ocr: sanitizeOcrSummary(summary.library.ocr),
     },
     inbox: {
       ...summary.inbox,
@@ -1514,15 +1995,33 @@ function rewritePendingCsv(filter: (row: Record<string, string>) => boolean): { 
   return { removed, remaining };
 }
 
-function pendingRowHash(row: Record<string, string>): string {
+/**
+ * 取行上持久化的邮件身份（HASH-WIDTH / NEW-DEFECT 5）。
+ * 优先 `mailHash`（并发 agent 写入的 INDEX/pending/invoices 列），其次合法的 `hash` 列，
+ * 再次 messageId 本身已是裸 hash；旧行才回退到 msgIdHash 重算。
+ */
+function persistedMailHash(row: Record<string, string>): string | undefined {
+  for (const key of ['mailHash', 'hash'] as const) {
+    const raw = (row[key] ?? '').trim().toLowerCase();
+    if (BARE_MAIL_HASH_RE.test(raw)) return raw;
+  }
+  const mid = (row.messageId ?? '').trim().toLowerCase();
+  if (BARE_MAIL_HASH_RE.test(mid)) return mid;
+  return undefined;
+}
+
+function pendingRowHashLegacy(row: Record<string, string>): string {
   return msgIdHash(row.messageId || undefined, row.from ?? '', row.date ?? '', row.subject ?? '');
 }
 
-/** 行是否对应该 hash：重算 12 位、messageId 列即为裸 hash、或两者之一匹配（HASH-WIDTH）。 */
+/** 行是否对应该 hash：优先持久化字段，旧行才重算（HASH-WIDTH）。 */
 function pendingRowMatchesHash(row: Record<string, string>, hash: string): boolean {
-  if (pendingRowHash(row) === hash) return true;
-  const mid = (row.messageId ?? '').trim().toLowerCase();
-  if (mid === hash) return true;
+  const want = hash.trim().toLowerCase();
+  if (!BARE_MAIL_HASH_RE.test(want)) return false;
+  const persisted = persistedMailHash(row);
+  if (persisted) return persisted === want;
+  // 旧行无 mailHash/hash：仅对 12 位历史键做遗留重算，避免把 32 位键误配到 sha1 前缀。
+  if (want.length === 12 && pendingRowHashLegacy(row) === want) return true;
   return false;
 }
 
@@ -1535,16 +2034,21 @@ function findPendingRow(hash: string): Record<string, string> | undefined {
 }
 
 /**
- * 在 pending 目录内解析 `${hash}.eml`：先校验 hash 形态，再 resolve + 前缀包含性检查
- * （ELEC-06），禁止 `../` 路径穿越。
+ * 在 pending 目录内解析 `${hash}.eml`：先校验 hash 形态，再 canonical containment
+ * （ELEC-06），禁止 symlink 逃逸与 `../` 路径穿越。
  */
 function pendingEmlPathForHash(hash: string): string | undefined {
   if (!BARE_MAIL_HASH_RE.test(hash)) return undefined;
-  const root = path.resolve(pendingDirPath());
-  const candidate = path.resolve(root, `${hash}.eml`);
-  const rel = path.relative(root, candidate);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
-  return candidate;
+  // 文件名只允许裸 hash，杜绝路径段注入。
+  if (hash.includes('/') || hash.includes('\\') || hash.includes('..')) return undefined;
+  const root = pendingDirPath();
+  const candidate = path.join(root, `${hash}.eml`);
+  if (!isCanonicallyInside(candidate, root)) return undefined;
+  if (!isCanonicallyInside(candidate, dataDir) && !isCanonicallyInside(root, dataDir)) {
+    // pending 在 dataDir 外时，仍要求最终路径落在 pending 根内。
+    if (!isCanonicallyInside(candidate, root)) return undefined;
+  }
+  return resolveCanonicalPath(candidate) ?? candidate;
 }
 
 function ensureBaseDirectories(): void {
@@ -1569,39 +2073,154 @@ function ensureBaseDirectories(): void {
   fs.mkdirSync(tempRoot(), { recursive: true });
 }
 
-function isInsideDataDir(target: string): boolean {
-  const base = dataDir.endsWith(path.sep) ? dataDir : dataDir + path.sep;
-  return target.startsWith(base);
-}
-
 // ---------------------------------------------------------------------------
-// 「重新识别」的可恢复准备（APP-17）
+// 「重新识别」的可恢复准备（APP-17 / ELEC-03）
 // ---------------------------------------------------------------------------
 
 interface OcrRerunPlan {
-  /** 成功后丢弃备份。 */
+  /** 成功且 durable 验证后丢弃备份。 */
   discard(): void;
-  /** 失败时把结果 CSV 与队列恢复到重跑之前。 */
+  /** 失败时把结果 CSV 与队列恢复到重跑之前；失败会抛出。 */
   restore(): void;
   resultsCsv: string;
+  journalPath: string;
 }
 
 type PrepareRerunResult =
   | { ok: true; plan: OcrRerunPlan }
   | { ok: false; error: UiError };
 
+interface OcrRerunJournal {
+  version: 1;
+  stage: 'prepared' | 'committed' | 'rolled_back';
+  resultsCsv: string;
+  pendingCsv: string;
+  resultsBackup: string;
+  queueBackup: string;
+  resultsMoved: boolean;
+  queueMoved: boolean;
+  createdAt: number;
+  pid: number;
+}
+
+function ocrRerunJournalDir(): string {
+  return path.join(dataDir, '.mfh-cache', 'ocr-rerun');
+}
+
+function writeOcrRerunJournal(file: string, record: OcrRerunJournal): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.tmp-${process.pid}-${randomBytes(3).toString('hex')}`;
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(record)}\n`);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, file);
+  try {
+    const dirFd = fs.openSync(path.dirname(file), 'r');
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+  } catch {
+    // Windows 可能不支持目录 fsync。
+  }
+}
+
+function readOcrRerunJournal(file: string): OcrRerunJournal | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<OcrRerunJournal>;
+    if (raw.version !== 1) return undefined;
+    if (typeof raw.resultsCsv !== 'string' || typeof raw.resultsBackup !== 'string') return undefined;
+    return raw as OcrRerunJournal;
+  } catch {
+    return undefined;
+  }
+}
+
+function restoreFromOcrRerunJournal(journal: OcrRerunJournal): void {
+  const errors: string[] = [];
+  if (journal.resultsMoved && fs.existsSync(journal.resultsBackup)) {
+    try {
+      if (fs.existsSync(journal.resultsCsv)) fs.rmSync(journal.resultsCsv, { force: true });
+      fs.renameSync(journal.resultsBackup, journal.resultsCsv);
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (journal.queueMoved && fs.existsSync(journal.queueBackup)) {
+    try {
+      fs.copyFileSync(journal.queueBackup, journal.pendingCsv);
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (errors.length > 0) {
+    throw new Error(`ocr_rerun_restore_failed:${errors.join(';')}`);
+  }
+}
+
+/**
+ * 启动时恢复未完成的 OCR 重跑事务：有 journal 且非 committed → 回滚到备份。
+ */
+function recoverOcrRerunJournals(): void {
+  const dir = ocrRerunJournalDir();
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    // 读失败 fail closed：不静默吞掉，留给 ensure 路径处理。
+    return;
+  }
+  for (const name of entries) {
+    const file = path.join(dir, name);
+    const journal = readOcrRerunJournal(file);
+    if (!journal) continue;
+    if (journal.stage === 'committed' || journal.stage === 'rolled_back') {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+    try {
+      restoreFromOcrRerunJournal(journal);
+      journal.stage = 'rolled_back';
+      writeOcrRerunJournal(file, journal);
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // keep journal if delete fails
+      }
+      // 备份可在确认 restore 成功后删除。
+      for (const bak of [journal.resultsBackup, journal.queueBackup]) {
+        try {
+          if (bak && fs.existsSync(bak)) fs.rmSync(bak, { force: true });
+        } catch {
+          // best-effort
+        }
+      }
+    } catch {
+      // 保留 journal，阻断后续重跑直到人工处理。
+    }
+  }
+}
+
 /**
  * 先准备并校验全部替代物，再把旧结果「移动到备份」（而不是直接删除），最后原子
- * 安装新队列。任何一步失败都可以完整恢复。
+ * 安装新队列。全程写 durable journal；任何一步失败都可以完整恢复（ELEC-03）。
  */
 function prepareOcrRerun(): PrepareRerunResult {
   const resultsCsv = ocrResultsCsvPath();
   const pendingCsv = ocrPendingCsvPath();
 
-  // dataDir 之外的绝对 results 路径是**明确支持**的：旧实现会静默跳过删除却仍以
-  // `--force` 追加，让外部 CSV 不断堆积重复历史。这里改成「移动到同目录备份」，
-  // 既不静默跳过，也不会真正删除任何用户文件（失败时还能原样恢复）。唯一拒绝的
-  // 情况是配置指向了一个目录——那说明配置本身写错了。
+  // dataDir 之外的绝对 results 路径是**明确支持**的：改成「移动到同目录备份」，
+  // 既不静默跳过，也不会真正删除任何用户文件（失败时还能原样恢复）。
   if (fs.existsSync(resultsCsv) && !fs.statSync(resultsCsv).isFile()) {
     return {
       ok: false,
@@ -1659,17 +2278,37 @@ function prepareOcrRerun(): PrepareRerunResult {
   const stamp = `${Date.now()}-${randomBytes(3).toString('hex')}`;
   const resultsBackup = `${resultsCsv}.rerun-backup-${stamp}`;
   const queueBackup = `${pendingCsv}.rerun-backup-${stamp}`;
+  const journalPath = path.join(ocrRerunJournalDir(), `rerun-${stamp}.json`);
   let resultsMoved = false;
   let queueMoved = false;
 
+  const journal: OcrRerunJournal = {
+    version: 1,
+    stage: 'prepared',
+    resultsCsv,
+    pendingCsv,
+    resultsBackup,
+    queueBackup,
+    resultsMoved: false,
+    queueMoved: false,
+    createdAt: Date.now(),
+    pid: process.pid,
+  };
+
   try {
+    // 先落 journal（空操作意图），再移动文件。
+    writeOcrRerunJournal(journalPath, journal);
     if (fs.existsSync(resultsCsv)) {
       fs.renameSync(resultsCsv, resultsBackup);
       resultsMoved = true;
+      journal.resultsMoved = true;
+      writeOcrRerunJournal(journalPath, journal);
     }
     if (nextQueue !== undefined && fs.existsSync(pendingCsv)) {
       fs.copyFileSync(pendingCsv, queueBackup);
       queueMoved = true;
+      journal.queueMoved = true;
+      writeOcrRerunJournal(journalPath, journal);
     }
     if (nextQueue !== undefined) {
       const tmp = `${pendingCsv}.tmp-${stamp}`;
@@ -1677,17 +2316,27 @@ function prepareOcrRerun(): PrepareRerunResult {
       fs.renameSync(tmp, pendingCsv);
     }
   } catch (err) {
-    // 准备阶段失败：立即还原，旧结果一个都不丢。
+    // 准备阶段失败：立即还原，旧结果一个都不丢；还原失败必须上报。
     try {
-      if (resultsMoved) fs.renameSync(resultsBackup, resultsCsv);
-      if (queueMoved) fs.copyFileSync(queueBackup, pendingCsv);
-    } catch {
-      // best-effort
-    }
-    try {
-      fs.rmSync(queueBackup, { force: true });
-    } catch {
-      // best-effort
+      restoreFromOcrRerunJournal({ ...journal, resultsMoved, queueMoved });
+      journal.stage = 'rolled_back';
+      writeOcrRerunJournal(journalPath, journal);
+      try {
+        fs.rmSync(journalPath, { force: true });
+      } catch {
+        // keep
+      }
+    } catch (restoreErr) {
+      return {
+        ok: false,
+        error: {
+          code: 'ocr_rerun_restore_failed',
+          message: '重新识别准备失败，且无法自动恢复原有识别结果。请重新打开应用；若仍异常，请勿继续识别并保留备份文件。',
+          detail: sanitizeText(
+            `${err instanceof Error ? err.message : String(err)}; restore: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+          ),
+        },
+      };
     }
     return {
       ok: false,
@@ -1699,34 +2348,65 @@ function prepareOcrRerun(): PrepareRerunResult {
     };
   }
 
+  let discarded = false;
+  let restored = false;
+
   return {
     ok: true,
     plan: {
       resultsCsv,
+      journalPath,
       discard: () => {
+        if (discarded || restored) return;
+        // 提交前验证：备份仍在，结果路径可写——然后 durable 标记 committed。
+        try {
+          journal.stage = 'committed';
+          writeOcrRerunJournal(journalPath, journal);
+          for (const file of [resultsBackup, queueBackup]) {
+            try {
+              fs.rmSync(file, { force: true });
+            } catch {
+              // 备份删不掉不回滚成功态，但 journal 保留到删干净。
+            }
+          }
+          // 确认备份已不在后才删 journal。
+          const bakLeft = [resultsBackup, queueBackup].some((f) => {
+            try {
+              return fs.existsSync(f);
+            } catch {
+              return true;
+            }
+          });
+          if (!bakLeft) {
+            try {
+              fs.rmSync(journalPath, { force: true });
+            } catch {
+              // ignore
+            }
+          }
+          discarded = true;
+        } catch {
+          // discard 失败：保留 journal + 备份，下次启动可再处理。
+        }
+      },
+      restore: () => {
+        if (discarded || restored) return;
+        restoreFromOcrRerunJournal(journal);
+        journal.stage = 'rolled_back';
+        writeOcrRerunJournal(journalPath, journal);
         for (const file of [resultsBackup, queueBackup]) {
           try {
             fs.rmSync(file, { force: true });
           } catch {
-            // best-effort
+            // 备份删除失败时保留 journal
           }
         }
-      },
-      restore: () => {
         try {
-          if (resultsMoved) {
-            fs.rmSync(resultsCsv, { force: true });
-            fs.renameSync(resultsBackup, resultsCsv);
-          }
-          if (queueMoved) fs.copyFileSync(queueBackup, pendingCsv);
+          fs.rmSync(journalPath, { force: true });
         } catch {
-          // best-effort
+          // keep
         }
-        try {
-          fs.rmSync(queueBackup, { force: true });
-        } catch {
-          // best-effort
-        }
+        restored = true;
       },
     },
   };
@@ -1803,8 +2483,7 @@ const BATCH_ROW_LIMIT = 200;
 
 /**
  * 读 INDEX.csv 并按邮件身份 hash 建索引。
- * - 12 位：无 raw 的历史 msgIdHash（台账重算路径）
- * - 另按 messageId 建索引，便于 32 位 runtime hash 经 .eml 反查（HASH-WIDTH）
+ * 优先持久化 `mailHash` 列；旧行才遗留重算 12 位（HASH-WIDTH / NEW-DEFECT 5）。
  */
 function indexRowsByHash(): { byHash: Map<string, BatchRow>; byMessageId: Map<string, BatchRow> } {
   const byHash = new Map<string, BatchRow>();
@@ -1823,38 +2502,74 @@ function indexRowsByHash(): { byHash: Map<string, BatchRow>; byMessageId: Map<st
       hasAttachment: (row.hasAttachment ?? '') === '1',
       bodyLinkCount: Number(row.bodyLinkCount ?? 0) || 0,
     };
-    const hash = msgIdHash(messageId.length > 0 ? messageId : undefined, from, date, subject);
-    if (!byHash.has(hash)) byHash.set(hash, batchRow);
-    // messageId 列本身可能是裸 hash（mail.messageId || hash）
-    if (messageId && BARE_MAIL_HASH_RE.test(messageId.toLowerCase()) && !byHash.has(messageId.toLowerCase())) {
-      byHash.set(messageId.toLowerCase(), batchRow);
+    const persisted = persistedMailHash(row);
+    if (persisted && !byHash.has(persisted)) byHash.set(persisted, batchRow);
+    else if (!persisted) {
+      // 旧 INDEX 无 mailHash：仅用遗留 12 位算法。
+      const legacy = msgIdHash(messageId.length > 0 ? messageId : undefined, from, date, subject);
+      if (!byHash.has(legacy)) byHash.set(legacy, batchRow);
     }
     if (messageId && !byMessageId.has(messageId)) byMessageId.set(messageId, batchRow);
   }
   return { byHash, byMessageId };
 }
 
-/** 在 samples 目录下查找 `${hash}.eml`（HASH-WIDTH：12 或 32 位文件名）。 */
+/**
+ * 在 samples 目录下有界查找 `${hash}.eml`（HASH-WIDTH / NEW-DEFECT 5）。
+ * - 优先直接路径与一级子目录
+ * - 限制遍历文件数，避免主进程被大样本树拖垮
+ * - 读取 Message-Id 时只读前 16 KiB，且使用 open/read 同一句柄
+ */
 function findSampleEmlByHash(hash: string): string | undefined {
   if (!BARE_MAIL_HASH_RE.test(hash)) return undefined;
+  if (hash.includes('/') || hash.includes('\\') || hash.includes('..')) return undefined;
   const root = samplesDirPath();
   const direct = path.join(root, `${hash}.eml`);
-  if (fs.existsSync(direct)) return direct;
+  if (fs.existsSync(direct) && isCanonicallyInside(direct, root)) return direct;
+
+  const MAX_ENTRIES = 400;
+  let seen = 0;
   try {
-    const walk = (dir: string, depth: number): string | undefined => {
-      if (depth > 4) return undefined;
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isFile() && entry.name === `${hash}.eml`) return path.join(dir, entry.name);
-        if (entry.isDirectory() && !entry.name.startsWith('.')) {
-          const hit = walk(path.join(dir, entry.name), depth + 1);
-          if (hit) return hit;
+    // 仅扫 root 与一层子目录（常见按月/邮箱分桶），禁止无界递归。
+    const queue: string[] = [root];
+    let depth0 = true;
+    while (queue.length > 0 && seen < MAX_ENTRIES) {
+      const dir = queue.shift()!;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (seen >= MAX_ENTRIES) break;
+        seen++;
+        if (entry.name.startsWith('.')) continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name === `${hash}.eml`) {
+          if (isCanonicallyInside(full, root)) return full;
+        }
+        if (depth0 && entry.isDirectory()) {
+          queue.push(full);
         }
       }
-      return undefined;
-    };
-    return walk(root, 0);
+      depth0 = false;
+    }
   } catch {
     return undefined;
+  }
+  return undefined;
+}
+
+/** 只读 EML 文件头前 maxBytes 字节（同一 fd）。 */
+function readEmlHeader(emlPath: string, maxBytes = 16 * 1024): string {
+  const fd = fs.openSync(emlPath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -1866,14 +2581,17 @@ function batchFromHashes(hashes: string[]): RunBatch {
   if (hashes.length === 0) return { rows: [], total: 0 };
   const { byHash, byMessageId } = indexRowsByHash();
   const rows: BatchRow[] = [];
+  // 限制 fallback 扫描次数，防止主进程被拖垮。
+  let fallbackReads = 0;
+  const MAX_FALLBACK_READS = 32;
   for (const hash of hashes) {
     let row = byHash.get(hash);
-    if (!row) {
-      // 32 位 runtime hash：用 .eml 文件名命中缓存，再尝试从文件头取 Message-Id 反查 INDEX。
+    if (!row && fallbackReads < MAX_FALLBACK_READS) {
       const eml = findSampleEmlByHash(hash);
       if (eml) {
+        fallbackReads++;
         try {
-          const head = fs.readFileSync(eml, { encoding: 'utf8' }).slice(0, 16 * 1024);
+          const head = readEmlHeader(eml, 16 * 1024);
           const mid = /^message-id:\s*<?([^>\r\n]+)>?/im.exec(head)?.[1]?.trim();
           if (mid) row = byMessageId.get(mid) ?? byMessageId.get(`<${mid}>`);
         } catch {
@@ -1908,19 +2626,19 @@ function fetchArgs(payload: DateRangePayload): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// IPC
+// IPC（全部经 handleTrusted 中央校验，ELEC-01）
 // ---------------------------------------------------------------------------
 
-ipcMain.handle('mfh:get-summary', (_event, payload: unknown) => appSummary(asSummaryOptions(payload)));
+handleTrusted('mfh:get-summary', (_event, payload: unknown) => appSummary(asSummaryOptions(payload)));
 
-ipcMain.handle('mfh:get-op-state', () => coordinator.state());
+handleTrusted('mfh:get-op-state', () => sanitizeOpState(coordinator.state()));
 
 /**
  * About 页的版本与发布通道（COPY-07B）。全部由运行时真实数据推导：`app.getVersion()`
  * 取的是安装包/package.json 的版本，channel 由「是否已打包」和版本号里的预发布
  * 标识判定，不再是写死的「本地预览版 / v0.1.0」。
  */
-ipcMain.handle('mfh:get-app-info', () => {
+handleTrusted('mfh:get-app-info', () => {
   const version = app.getVersion();
   const prerelease = /^\d+\.\d+\.\d+-([0-9A-Za-z.-]+)$/.exec(version)?.[1];
   const major = Number(version.split('.')[0]);
@@ -1941,7 +2659,7 @@ ipcMain.handle('mfh:get-app-info', () => {
   };
 });
 
-ipcMain.handle('mfh:get-config', () => {
+handleTrusted('mfh:get-config', () => {
   const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
   // Redact secrets so they never reach the renderer process. We still report whether each
   // secret is populated so the UI can show "已保存（留空则不修改）" placeholders.
@@ -1967,13 +2685,13 @@ ipcMain.handle('mfh:get-config', () => {
   };
 });
 
-ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
+handleTrusted('mfh:save-config', (_event, payload: unknown) => {
   // ELEC-02：配置写入与 CLI 任务互斥，避免运行中改写 paths/ocr 造成交错。
   const begin = coordinator.begin('pipeline', { silent: true });
   if (!begin.ok) {
     return {
       ok: false,
-      configPath,
+      configPath: redactPath(configPath),
       configError: { message: begin.message },
     };
   }
@@ -1985,7 +2703,7 @@ ipcMain.handle('mfh:save-config', (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
+handleTrusted('mfh:start-fetch', async (_event, payload: unknown) => {
   const range = asDateRange(payload);
 
   // APP-20：不再悄悄把 matchSubject 恢复为 true；两个条件都关掉时如实拒绝。
@@ -2048,9 +2766,33 @@ ipcMain.handle('mfh:start-fetch', async (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
+handleTrusted('mfh:run-pipeline', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const concurrency = Number(raw.concurrency ?? 4);
+
+  // NEW-DEFECT 3：非空但非法的 onlyMail 必须拒绝，绝不能静默变成全量管线。
+  let onlyHash: string | undefined;
+  if (raw.onlyMail !== undefined && raw.onlyMail !== null && raw.onlyMail !== '') {
+    if (typeof raw.onlyMail !== 'string') {
+      return {
+        ok: false,
+        code: 'invalid_only_mail',
+        message: '单封邮件标识无效，请从待确认列表重新选择。',
+        normalizedFilter: normalizedFilterFrom(),
+        summary: appSummary(),
+      };
+    }
+    onlyHash = parseMailHash(raw.onlyMail);
+    if (!onlyHash) {
+      return {
+        ok: false,
+        code: 'invalid_only_mail',
+        message: '单封邮件标识无效，请从待确认列表重新选择。',
+        normalizedFilter: normalizedFilterFrom(),
+        summary: appSummary(),
+      };
+    }
+  }
 
   // ELEC-02：先占锁再写配置。
   const gate = acquireOperation('pipeline');
@@ -2078,14 +2820,10 @@ ipcMain.handle('mfh:run-pipeline', async (_event, payload: unknown) => {
       return { ok: false, ...recoveryError, normalizedFilter: normalizedFilterFrom(), summary: appSummary() };
     }
     const args = ['--config', configPath, '--state', statePath, '--concurrency', String(concurrency)];
-    // HASH-WIDTH：只接受合法 12/32 位 hash，防止 --only-mail 注入奇怪参数。
-    if (typeof raw.onlyMail === 'string') {
-      const onlyHash = parseMailHash(raw.onlyMail);
-      if (onlyHash) args.push('--only-mail', onlyHash);
-    }
+    if (onlyHash) args.push('--only-mail', onlyHash);
     if (raw.force === true) args.push('--force');
     const result = await runCli('run', args, { operation: 'files', jobId: gate.lease.jobId });
-    const warning = recordHistory('pipeline', raw.onlyMail ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
+    const warning = recordHistory('pipeline', onlyHash ? '重新处理单封邮件' : '处理缓存邮件', startedAt, result);
     // 本次运行真正处理掉的邮件：归档成功的 + 降级到待确认的。仅被跳过（此前已处理）
     // 的邮件不算，否则又变成「展示全量最近行」。
     const batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
@@ -2114,7 +2852,7 @@ function pendingOcrWorkCount(summary = appSummary()): number {
   return rows.filter((row) => row.status !== 'ignored' && row.documentType !== 'supporting').length;
 }
 
-ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
+handleTrusted('mfh:run-ocr', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const summary = appSummary();
   const pendingTotal = pendingOcrWorkCount(summary);
@@ -2180,11 +2918,21 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     try {
       ocrTemp = writeOcrRunConfig(concurrency);
     } catch (err) {
-      plan?.restore();
+      try {
+        plan?.restore();
+      } catch (restoreErr) {
+        const error: UiError = {
+          code: 'ocr_rerun_restore_failed',
+          message: '无法开始识别，且原有识别结果未能自动恢复。请重新打开应用后再试。',
+          detail: sanitizeText(restoreErr instanceof Error ? restoreErr.message : String(restoreErr)),
+        };
+        sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
+        return { ok: false, ...error, summary: appSummary() };
+      }
       const error: UiError = {
         code: 'ocr_config_write_failed',
-        // COPY-10
-        message: '无法开始识别。请确认磁盘空间充足，并在「邮箱与保存」中重新选择发票保存位置。',
+        // COPY-10：配置写失败不一定是磁盘问题。
+        message: '无法开始识别。请稍后重试；若仍失败，请到「设置」检查识别选项。',
         detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       };
       sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
@@ -2203,8 +2951,7 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     sendOperationProgress({
       operation: 'ocr',
       phase: '开始识别',
-      percent: 5,
-      total: pendingTotal,
+      ...(pendingTotal > 0 ? { percent: 5, total: pendingTotal } : { total: 0 }),
       processed: 0,
       parsed: 0,
       skipped: 0,
@@ -2215,12 +2962,25 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
 
     const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal, jobId });
     const stopped = ocrStopRequested.has(jobId) || result.code === 130;
+    // ELEC-03：`--allow-parse-failures` 可在部分解析失败时仍 exit 0。
+    // 只有「已启动 + exit 0 + 未停止 + 输出含 OCR complete 终态」才提交丢弃备份。
+    const ocrCompletedCleanly = result.started
+      && result.code === 0
+      && !stopped
+      && /OCR complete:\s*scanned=\d+/.test(`${result.stdout}\n${result.stderr}`);
 
     if (plan) {
-      // ELEC-03：只有完整成功才丢弃备份；停止或非零退出一律恢复整份旧结果，
-      // 绝不能用「新结果文件非空」当作事务成功判据。
-      if (result.started && result.code === 0 && !stopped) plan.discard();
-      else plan.restore();
+      try {
+        if (ocrCompletedCleanly) plan.discard();
+        else plan.restore();
+      } catch (txErr) {
+        const error: UiError = {
+          code: 'ocr_rerun_restore_failed',
+          message: '识别结束后无法可靠处理备份。请重新打开应用；若识别结果异常，请勿继续操作。',
+          detail: sanitizeText(txErr instanceof Error ? txErr.message : String(txErr)),
+        };
+        return { ok: false, ...error, jobId, summary: appSummary() };
+      }
     }
 
     const warning = recordHistory('ocr', raw.force === true ? '开始识别文件' : '识别文件', startedAt, result);
@@ -2238,12 +2998,13 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
     }
     const report = reportFor('ocr', jobId, result, { ok: 'ocr_done', failed: 'ocr_failed' });
     return {
-      ok: result.code === 0,
+      ok: ocrCompletedCleanly,
       ...report,
+      code: ocrCompletedCleanly ? report.code : (result.code === 0 ? 'ocr_incomplete' : report.code),
       jobId,
-      message: result.code === 0
+      message: ocrCompletedCleanly
         ? ocrRunMessage(result)
-        : '无法完成识别。请确认磁盘空间充足，并在「邮箱与保存」中重新选择发票保存位置后重试。',
+        : '无法完成识别。请稍后重试；若仍失败，请到「设置」检查识别选项并查看技术详情。',
       ...(warning ? { warning } : {}),
       summary: appSummary(),
     };
@@ -2256,7 +3017,7 @@ ipcMain.handle('mfh:run-ocr', async (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
+handleTrusted('mfh:organize', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const applyRename = raw.applyRename === true;
   const gate = acquireOperation('organize');
@@ -2296,7 +3057,7 @@ ipcMain.handle('mfh:organize', async (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:stop-ocr', () => {
+handleTrusted('mfh:stop-ocr', () => {
   if (ocrProcesses.size === 0) return { ok: false, code: 'ocr_not_running', message: '当前没有正在运行的识别任务。' };
   const details: string[] = [];
   let treeIncomplete = false;
@@ -2304,7 +3065,7 @@ ipcMain.handle('mfh:stop-ocr', () => {
     ocrStopRequested.add(jobId);
     // Windows 上必须终止整棵进程树，否则 efapiao serve 会继续占用端口（APP-16）。
     const outcome = killProcessTree(child);
-    if (!outcome.treeTerminated) treeIncomplete = true;
+    if (!outcome.treeSignalled) treeIncomplete = true;
     if (outcome.detail) details.push(outcome.detail);
   }
   if (treeIncomplete) {
@@ -2318,92 +3079,81 @@ ipcMain.handle('mfh:stop-ocr', () => {
   return { ok: true, code: 'ocr_stopping', message: '正在停止识别。' };
 });
 
-function isContainedPath(resolved: string, bases: string[]): boolean {
-  return bases.some((base) => {
-    const rel = path.relative(path.resolve(base), resolved);
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-  });
-}
-
 /**
- * ELEC-06：open-path 允许根只由主进程从当前配置推导，并拒绝文件系统根 / 用户主目录
- * 等过宽根。renderer 改写 paths.invoices=`/` 不能再打开任意路径。
+ * ELEC-06：解析 open-path 目标。
+ *
+ * 允许根由主进程从磁盘配置自行计算（dataDir + paths.invoices/pending/samples +
+ * 输出 CSV 父目录 + 主进程签发的 opaque `ext:…` 句柄），**绝不**采信 IPC payload
+ * 里的额外 root。两侧路径用同一套 resolveCanonicalPath 后再做路径段 containment。
+ * 规范化失败一律拒绝（fail closed）。
  */
-function isAcceptableManagedRoot(dir: string): boolean {
-  const resolved = path.resolve(dir);
-  const { root } = path.parse(resolved);
-  if (resolved === root) return false;
-  if (resolved === path.resolve(os.homedir())) return false;
-  const rel = path.relative(root, resolved);
-  if (!rel || rel === '') return false;
-  return true;
-}
-
-function openPathAllowedRoots(): string[] {
-  const roots = new Set<string>([path.resolve(dataDir)]);
-  for (const candidate of [invoicesDirPath(), pendingDirPath(), samplesDirPath(), diagnosticsDir()]) {
-    const resolved = path.resolve(candidate);
-    if (!isAcceptableManagedRoot(resolved)) continue;
-    roots.add(resolved);
+function resolveOpenTarget(target: string): { ok: true; path: string } | { ok: false; code: string; message: string } {
+  if (!target || target.includes('<') || target.includes('>') || target.includes('\0')) {
+    return { ok: false, code: 'path_invalid', message: '路径无效。' };
   }
-  return Array.from(roots);
-}
+  // 主进程签发的 opaque 外部句柄（renderer 不可伪造路径）
+  if (target.startsWith('ext:')) {
+    const external = resolveExternalFileHandle(target);
+    if (!external) {
+      return { ok: false, code: 'path_handle_unknown', message: '文件引用已失效，请刷新列表后重试。' };
+    }
+    const canon = resolveCanonicalPath(external);
+    if (!canon) {
+      return { ok: false, code: 'path_canonicalization_failed', message: '无法确认文件位置，已拒绝打开。' };
+    }
+    return { ok: true, path: canon };
+  }
 
-/** 解析真实路径（存在时 realpath，防符号链接逃逸）；不存在则解析父目录。 */
-function resolveForOpen(target: string): string {
-  const abs = path.resolve(dataDir, target);
-  try {
-    return fs.realpathSync(abs);
-  } catch {
-    try {
-      const parent = fs.realpathSync(path.dirname(abs));
-      return path.join(parent, path.basename(abs));
-    } catch {
-      return abs;
+  const allowed = openPathAllowedRoots();
+  if (allowed.length === 0) {
+    return { ok: false, code: 'path_canonicalization_failed', message: '无法确认数据目录，已拒绝打开。' };
+  }
+
+  // 相对路径锚定到 dataDir（若 dataDir 规范化失败则用模块级 dataDir 词法路径）
+  const base = realDataDir() ?? dataDir;
+  const abs = path.isAbsolute(target) ? path.resolve(target) : path.resolve(base, target);
+  const canon = resolveCanonicalPath(abs);
+  if (!canon) {
+    return { ok: false, code: 'path_canonicalization_failed', message: '无法确认文件位置，已拒绝打开。' };
+  }
+
+  // 目标与每一个允许根都已经过同一套 canonical 化；用路径段前缀比较。
+  for (const root of allowed) {
+    if (isPathSegmentInside(canon, root)) {
+      return { ok: true, path: canon };
     }
   }
+  return { ok: false, code: 'path_outside_data_dir', message: '路径不在允许的目录范围内。' };
 }
 
-ipcMain.handle('mfh:open-path', async (event, payload: unknown) => {
-  if (!assertTrustedSender(event)) {
-    return { ok: false, code: 'untrusted_sender', error: '无权打开该路径。', message: '无权打开该路径。' };
-  }
+handleTrusted('mfh:open-path', async (_event, payload: unknown) => {
   const raw = asObject(payload);
-  const target = typeof raw.path === 'string' ? raw.path : dataDir;
-  // 拒绝把占位脱敏串当路径打开。
-  if (target.includes('<') || target.includes('>')) {
-    return { ok: false, code: 'path_invalid', error: '路径无效。', message: '路径无效。' };
-  }
-  const resolved = resolveForOpen(target);
-  const allowedBases = openPathAllowedRoots().map((base) => {
-    try {
-      return fs.realpathSync(base);
-    } catch {
-      return path.resolve(base);
-    }
-  });
-  if (!isContainedPath(resolved, allowedBases)) {
-    return { ok: false, code: 'path_outside_data_dir', error: '路径不在允许的目录范围内。', message: '路径不在允许的目录范围内。' };
+  const target = typeof raw.path === 'string' ? raw.path : '.';
+  const resolved = resolveOpenTarget(target);
+  if (!resolved.ok) {
+    return { ok: false, code: resolved.code, error: resolved.message, message: resolved.message };
   }
   if (raw.reveal === true) {
-    // shell.showItemInFolder silently does nothing when the path is missing, which
-    // leaves the renderer thinking the operation succeeded. Verify first.
-    if (!fs.existsSync(resolved)) {
-      return { ok: false, code: 'path_missing', error: '文件已不存在，可能被移动或删除。请重新归档。', message: '文件已不存在，可能被移动或删除。请重新归档。' };
+    if (!fs.existsSync(resolved.path)) {
+      return {
+        ok: false,
+        code: 'path_missing',
+        error: '文件已不存在，可能被移动或删除。请重新归档。',
+        message: '文件已不存在，可能被移动或删除。请重新归档。',
+      };
     }
-    showItemInFolderForUser(resolved);
+    showItemInFolderForUser(resolved.path);
     return { ok: true, error: '' };
   }
-  const error = await openPathForUser(resolved);
+  const error = await openPathForUser(resolved.path);
   return {
     ok: !error,
-    // 保留 error 字段名，但内容脱敏后再交给 UI。
     error: error ? sanitizeText(error, { maxLength: 200 }) : '',
     ...(error ? { code: 'path_open_failed', message: '无法打开该文件，请确认它仍然存在且有对应的应用程序。' } : {}),
   };
 });
 
-ipcMain.handle('mfh:copy-text', (_event, payload: unknown) => {
+handleTrusted('mfh:copy-text', (_event, payload: unknown) => {
   const raw = asObject(payload);
   clipboard.writeText(typeof raw.text === 'string' ? raw.text : '');
   return { ok: true };
@@ -2435,7 +3185,7 @@ function imapParamsFor(payload: unknown, saved: boolean): {
   return { ok: true, host, port, user, pass, tls, mailbox: pick('mailbox') };
 }
 
-ipcMain.handle('mfh:test-connection', async (_event, payload: unknown) => {
+handleTrusted('mfh:test-connection', async (_event, payload: unknown) => {
   // ELEC-02：配置落盘必须占锁；忙时仍可用表单值测连，但不写盘。
   let saved = false;
   if (payload && typeof payload === 'object') {
@@ -2498,7 +3248,7 @@ ipcMain.handle('mfh:test-connection', async (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:list-mailboxes', async (_event, payload: unknown) => {
+handleTrusted('mfh:list-mailboxes', async (_event, payload: unknown) => {
   let saved = false;
   if (payload && typeof payload === 'object') {
     const begin = coordinator.begin('fetch', { silent: true });
@@ -2539,7 +3289,7 @@ ipcMain.handle('mfh:list-mailboxes', async (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:pending-ignore', (_event, payload: unknown) => {
+handleTrusted('mfh:pending-ignore', (_event, payload: unknown) => {
   const raw = asObject(payload);
   const hash = parseMailHash(raw.hash);
   if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少待忽略邮件的标识。' };
@@ -2568,22 +3318,50 @@ ipcMain.handle('mfh:pending-ignore', (_event, payload: unknown) => {
   }
 });
 
-ipcMain.handle('mfh:pending-refresh-link', async (_event, payload: unknown) => {
+handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   const raw = asObject(payload);
   const hash = parseMailHash(raw.hash);
   if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。' };
   const row = findPendingRow(hash);
   const emlPath = pendingEmlPathForHash(hash);
-  const fallback = samplesDirPath();
+  // ELEC-06：与 open-path 相同 containment；禁止直接 shell.openPath 绕过校验。
   if (emlPath && fs.existsSync(emlPath)) {
-    const error = await openPathForUser(emlPath);
+    const opened = resolveOpenTarget(emlPath);
+    if (!opened.ok) {
+      // 尝试 dataDir 相对路径
+      const base = realDataDir();
+      const rel = base ? path.relative(base, emlPath) : emlPath;
+      const openedRel = resolveOpenTarget(rel);
+      if (!openedRel.ok) {
+        return { ok: false, code: openedRel.code, message: openedRel.message };
+      }
+      const error = await openPathForUser(openedRel.path);
+      if (!error) {
+        return { ok: true, code: 'pending_mail_opened', message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
+      }
+      showItemInFolderForUser(openedRel.path);
+      return { ok: true, code: 'pending_mail_revealed', message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
+    }
+    const error = await openPathForUser(opened.path);
     if (!error) {
       return { ok: true, code: 'pending_mail_opened', message: '已尝试打开原始邮件，请在邮件中点击下载链接刷新授权后重新抓取。' };
     }
-    showItemInFolderForUser(emlPath);
+    showItemInFolderForUser(opened.path);
     return { ok: true, code: 'pending_mail_revealed', message: '已在文件管理器中定位原始邮件，请打开后刷新链接。' };
   }
-  const error = await openPathForUser(fallback);
+  // 回退：打开邮件缓存目录。与 open-path 共用 resolveOpenTarget（含用户配置的
+  // samples 根，不要求必须在 dataDir 内），禁止直接 shell.openPath 绕过。
+  const fallback = resolveOpenTarget(samplesDirPath());
+  if (!fallback.ok) {
+    return {
+      ok: false,
+      code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
+      message: row
+        ? '没有找到本地副本，且邮件缓存目录不在允许的打开范围内，无法自动打开。'
+        : '没有找到对应邮件。',
+    };
+  }
+  const error = await openPathForUser(fallback.path);
   return {
     ok: !error,
     code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
@@ -2594,10 +3372,7 @@ ipcMain.handle('mfh:pending-refresh-link', async (_event, payload: unknown) => {
   };
 });
 
-ipcMain.handle('mfh:pending-manual-archive', async (event, payload: unknown) => {
-  if (!assertTrustedSender(event)) {
-    return { ok: false, code: 'untrusted_sender', message: '无权执行归档。', canceled: false };
-  }
+handleTrusted('mfh:pending-manual-archive', async (event, payload: unknown) => {
   const raw = asObject(payload);
   const hash = parseMailHash(raw.hash);
   if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。', canceled: false };
@@ -2605,18 +3380,25 @@ ipcMain.handle('mfh:pending-manual-archive', async (event, payload: unknown) => 
   const testSources = !app.isPackaged && process.env.MFH_TEST_MANUAL_ARCHIVE_SOURCES
     ? process.env.MFH_TEST_MANUAL_ARCHIVE_SOURCES.split(path.delimiter).filter(Boolean)
     : undefined;
+  const dialogOpts = {
+    title: '选择要归档的发票文件',
+    properties: ['openFile', 'multiSelections'] as Array<'openFile' | 'multiSelections'>,
+    filters: [
+      // 不提供 zip：压缩包无法直接归档也无法识别，旧实现会把任意 PK 容器当成 OFD
+      // 塞进队列。用户仍可用「全部文件」选到压缩包，此时 runManualArchive 会明确拒绝。
+      { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg'] },
+      { name: '全部文件', extensions: ['*'] },
+    ],
+  };
   const dialogResult = testSources
     ? { canceled: false, filePaths: testSources }
-    : await dialog.showOpenDialog({
-      title: '选择要归档的发票文件',
-      properties: ['openFile', 'multiSelections'],
-      filters: [
-        // 不提供 zip：压缩包无法直接归档也无法识别，旧实现会把任意 PK 容器当成 OFD
-        // 塞进队列。用户仍可用「全部文件」选到压缩包，此时 runManualArchive 会明确拒绝。
-        { name: '发票文件', extensions: ['pdf', 'ofd', 'png', 'jpg', 'jpeg'] },
-        { name: '全部文件', extensions: ['*'] },
-      ],
-    });
+    : mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showOpenDialog(mainWindow, dialogOpts)
+      : await dialog.showOpenDialog(dialogOpts);
+  // ELEC-01：await dialog 后重新校验 sender。
+  if (!assertTrustedSender(event)) {
+    return { ok: false, code: 'untrusted_sender', message: '无权执行归档。', canceled: false };
+  }
   if (dialogResult.canceled || dialogResult.filePaths.length === 0) {
     return { ok: false, canceled: true, code: 'manual_archive_canceled', message: '已取消归档。' };
   }
@@ -2680,9 +3462,151 @@ ipcMain.handle('mfh:pending-manual-archive', async (event, payload: unknown) => 
 });
 
 /**
+ * 数据目录是否可证明为可丢弃的测试存储（E2E）。
+ * 仅当未打包且数据目录位于系统临时目录下时，才允许跳过确认对话框。
+ */
+function isDisposableTestStorage(): boolean {
+  if (app.isPackaged) return false;
+  if (process.env.MFH_E2E_ALLOW_DESTRUCTIVE === '1' && process.env.MFH_DATA_DIR) {
+    const base = realDataDir();
+    if (!base) return false;
+    try {
+      const tmp = fs.realpathSync(os.tmpdir());
+      return isCanonicallyInside(base, tmp);
+    } catch {
+      return false;
+    }
+  }
+  if (!e2eNoGuiMode() || !process.env.MFH_DATA_DIR) return false;
+  const base = realDataDir();
+  if (!base) return false;
+  try {
+    const tmp = fs.realpathSync(os.tmpdir());
+    return isCanonicallyInside(base, tmp);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 清空 `.mfh-cache` 的内容，但**保留**当前持有的数据目录锁与 recovery 相关文件
+ * （NEW-DEFECT 1 / ELEC-02），避免 reset 过程中其它实例抢锁并发写。
+ */
+function clearMfhCachePreservingLocks(): { removed: boolean; detail?: string } {
+  const cacheDir = path.join(dataDir, '.mfh-cache');
+  const lockPath = dataDirLockPath(dataDir);
+  const preserveNames = new Set<string>();
+  try {
+    const lockReal = resolveCanonicalPath(lockPath);
+    if (lockReal) preserveNames.add(path.basename(lockReal));
+  } catch {
+    preserveNames.add(path.basename(lockPath));
+  }
+  // recovery mutex、墓碑、心跳临时文件都带锁文件名前缀。
+  const lockBase = path.basename(lockPath);
+  try {
+    if (!fs.existsSync(cacheDir)) return { removed: false };
+    for (const entry of fs.readdirSync(cacheDir, { withFileTypes: true })) {
+      const name = entry.name;
+      if (
+        name === lockBase
+        || name.startsWith(`${lockBase}.`)
+        || name === `${lockBase}.recovery`
+        || name.startsWith(`${lockBase}.stale-`)
+        || name.startsWith(`${lockBase}.new-`)
+        || name.startsWith(`${lockBase}.rw-`)
+      ) {
+        continue;
+      }
+      const full = path.join(cacheDir, name);
+      const safe = assertSafeToDeleteInsideDataDir(full);
+      if (!safe) continue;
+      try {
+        fs.rmSync(safe, { recursive: true, force: true });
+      } catch {
+        // best-effort per entry
+      }
+    }
+    return { removed: true };
+  } catch (err) {
+    return {
+      removed: false,
+      detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
+    };
+  }
+}
+
+interface ResetDeletionPlan {
+  items: { label: string; target: string; relative: string }[];
+  skippedExternal: string[];
+  dataDirReal: string;
+  configPathReal: string | undefined;
+}
+
+/**
+ * 在持锁后冻结不可变的规范删除计划（ELEC-01 rework 2）。
+ * 路径全部 canonical；不在真实 dataDir 内的跳过。
+ */
+function freezeResetDeletionPlan(): ResetDeletionPlan | { error: UiError } {
+  const dataDirReal = realDataDir();
+  if (!dataDirReal) {
+    return {
+      error: {
+        code: 'reset_data_dir_unresolvable',
+        message: '无法确认数据目录的真实位置，已取消重置以保护文件。',
+      },
+    };
+  }
+  const configPathReal = resolveCanonicalPath(configPath);
+  const cfg = readConfigForPaths();
+  const paths = asObject(cfg.paths);
+  const output = asObject(cfg.output);
+  const ocr = asObject(cfg.ocr);
+  const rename = asObject(cfg.rename);
+  const candidates: { label: string; value: unknown; special?: 'mfh-cache' }[] = [
+    { label: '邮件缓存', value: paths.samples },
+    { label: '归档发票', value: paths.invoices },
+    { label: '待确认队列', value: paths.pending },
+    { label: '归档台账', value: output.csv },
+    { label: '识别结果', value: ocr.resultsCsv },
+    { label: '整理输出目录', value: rename.organizedDir },
+    { label: '运行状态', value: statePath },
+    { label: '运行记录', value: historyPath(dataDir) },
+    { label: '应用缓存', value: '.mfh-cache', special: 'mfh-cache' },
+  ];
+  const items: ResetDeletionPlan['items'] = [];
+  const skippedExternal: string[] = [];
+  for (const candidate of candidates) {
+    const value = candidate.value;
+    if (typeof value !== 'string' || value.length === 0) continue;
+    const target = path.resolve(dataDir, value);
+    const canon = resolveCanonicalPath(target);
+    if (!canon) {
+      skippedExternal.push(`${candidate.label}：无法确认路径，已跳过`);
+      continue;
+    }
+    if (canon === dataDirReal) continue;
+    if (configPathReal && canon === configPathReal) continue;
+    if (!isCanonicallyInside(canon, dataDirReal)) {
+      if (fs.existsSync(canon)) skippedExternal.push(`${candidate.label}：${redactPath(canon)}`);
+      continue;
+    }
+    // mfh-cache 特殊处理：删除时保留锁文件，用 relative 标记。
+    items.push({
+      label: candidate.label,
+      target: candidate.special === 'mfh-cache' ? '__mfh_cache_preserve_lock__' : canon,
+      relative: path.relative(dataDirReal, canon) || candidate.label,
+    });
+  }
+  return { items, skippedExternal, dataDirReal, configPathReal };
+}
+
+/**
  * ELEC-01：破坏性 reset 的授权在**主进程**用原生对话框完成。
- * renderer 侧 confirm 可被脚本绕过；此处无主进程确认则绝不删除。
- * 同时占操作锁（ELEC-02），busy 时拒绝而非边跑边删。
+ * - 先占锁并冻结删除计划，再弹确认（防止对话框期间 config IPC 改路径）
+ * - 确认后重新校验 sender 与计划
+ * - 删除使用 realpath containment
+ * - no-GUI 仅在可丢弃测试存储上跳过确认
  */
 async function performDeveloperReset(event: ElectronAPI.IpcMainInvokeEvent): Promise<Record<string, unknown>> {
   if (!assertTrustedSender(event)) {
@@ -2697,85 +3621,115 @@ async function performDeveloperReset(event: ElectronAPI.IpcMainInvokeEvent): Pro
       message: running
         ? `当前正在${running.kind === 'fetch' ? '获取邮件' : running.kind === 'pipeline' ? '处理邮件' : running.kind === 'ocr' ? '识别文件' : '整理文件'}，请等待完成后再重置。`
         : '当前有任务正在运行，请等待完成后再重置。',
-      running,
+      running: running ? { kind: running.kind, jobId: running.jobId, startedAt: running.startedAt } : null,
       removed: [],
       skippedExternal: [],
       summary: appSummary(),
     };
   }
 
-  if (!e2eNoGuiMode()) {
-    const first = await dialog.showMessageBox(mainWindow!, {
-      type: 'warning',
-      buttons: ['取消', '继续删除'],
-      defaultId: 0,
-      cancelId: 0,
-      title: '清空应用管理的数据',
-      message: '清空应用管理的数据（保留邮箱与保存设置）',
-      detail: [
-        '会永久删除应用内部保存的邮件、发票和行程单、待确认记录、识别结果及处理记录。',
-        '邮箱与保存设置不会删除；你另选文件夹中的文件也不会删除。',
-        '',
-        '此操作不能撤销。',
-      ].join('\n'),
-    });
-    if (first.response !== 1) {
-      return { ok: false, code: 'reset_cancelled', message: '已取消重置。', removed: [], skippedExternal: [] };
-    }
-    const second = await dialog.showMessageBox(mainWindow!, {
-      type: 'warning',
-      buttons: ['取消', '确定删除'],
-      defaultId: 0,
-      cancelId: 0,
-      title: '再次确认',
-      message: '再次确认：已归档的发票原件会被删除。',
-      detail: '请先自行备份需要保留的文件。确定要删除吗？',
-    });
-    if (second.response !== 1) {
-      return { ok: false, code: 'reset_cancelled', message: '已取消重置。', removed: [], skippedExternal: [] };
-    }
-  }
-
+  // MUST-REWORK 2：先占锁并冻结计划，再弹确认。
   const gate = acquireOperation('pipeline');
   if (!gate.ok) {
     return { ...gate.response, removed: [], skippedExternal: [] };
   }
 
   try {
-    const cfg = readConfigForPaths();
-    const paths = asObject(cfg.paths);
-    const output = asObject(cfg.output);
-    const ocr = asObject(cfg.ocr);
-    const rename = asObject(cfg.rename);
-    const candidates: { label: string; value: unknown }[] = [
-      { label: '邮件缓存', value: paths.samples },
-      { label: '归档发票', value: paths.invoices },
-      { label: '待确认队列', value: paths.pending },
-      { label: '归档台账', value: output.csv },
-      { label: '识别结果', value: ocr.resultsCsv },
-      { label: '整理输出目录', value: rename.organizedDir },
-      { label: '运行状态', value: statePath },
-      { label: '运行记录', value: historyPath(dataDir) },
-      { label: '应用缓存', value: '.mfh-cache' },
-    ];
+    const frozen = freezeResetDeletionPlan();
+    if ('error' in frozen) {
+      return { ok: false, ...frozen.error, removed: [], skippedExternal: [] };
+    }
+    const planSnapshot = JSON.stringify(frozen.items.map((i) => i.target).sort());
+
+    const skipConfirm = isDisposableTestStorage();
+    if (!skipConfirm) {
+      if (e2eNoGuiMode()) {
+        return {
+          ok: false,
+          code: 'reset_confirmation_required',
+          message: '无界面模式下拒绝清空数据：当前数据目录不是可证明的临时测试目录。',
+          removed: [],
+          skippedExternal: [],
+        };
+      }
+      const first = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning',
+        buttons: ['取消', '继续删除'],
+        defaultId: 0,
+        cancelId: 0,
+        title: '清空应用管理的数据',
+        message: '清空应用管理的数据（保留邮箱与保存设置）',
+        detail: [
+          '会永久删除应用内部保存的邮件、发票和行程单、待确认记录、识别结果及处理记录。',
+          '邮箱与保存设置不会删除；你另选文件夹中的文件也不会删除。',
+          '',
+          '此操作不能撤销。',
+        ].join('\n'),
+      });
+      // 对话框后重新校验 sender（ELEC-01）。
+      if (!assertTrustedSender(event)) {
+        return { ok: false, code: 'untrusted_sender', message: '无权执行重置。', removed: [], skippedExternal: [] };
+      }
+      if (first.response !== 1) {
+        return { ok: false, code: 'reset_cancelled', message: '已取消重置。', removed: [], skippedExternal: [] };
+      }
+      const second = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning',
+        buttons: ['取消', '确定删除'],
+        defaultId: 0,
+        cancelId: 0,
+        title: '再次确认',
+        message: '再次确认：已归档的发票原件会被删除。',
+        detail: '请先自行备份需要保留的文件。确定要删除吗？',
+      });
+      if (!assertTrustedSender(event)) {
+        return { ok: false, code: 'untrusted_sender', message: '无权执行重置。', removed: [], skippedExternal: [] };
+      }
+      if (second.response !== 1) {
+        return { ok: false, code: 'reset_cancelled', message: '已取消重置。', removed: [], skippedExternal: [] };
+      }
+    }
+
+    // 对话框期间 config 可能被改：重新冻结并与快照比对。
+    const revalidated = freezeResetDeletionPlan();
+    if ('error' in revalidated) {
+      return { ok: false, ...revalidated.error, removed: [], skippedExternal: [] };
+    }
+    const planNow = JSON.stringify(revalidated.items.map((i) => i.target).sort());
+    if (planNow !== planSnapshot) {
+      return {
+        ok: false,
+        code: 'reset_plan_changed',
+        message: '等待确认期间保存位置发生了变化，已取消重置以保护文件。请重新操作。',
+        removed: [],
+        skippedExternal: [],
+      };
+    }
+
     const removed: string[] = [];
-    // APP-21：位于 dataDir 之外的配置路径被保留，而且必须如实回报。
-    const skippedExternal: string[] = [];
-    for (const candidate of candidates) {
-      const value = candidate.value;
-      if (typeof value !== 'string' || value.length === 0) continue;
-      const target = path.resolve(dataDir, value);
-      if (target === dataDir) continue;
-      if (target === configPath) continue;
-      if (!isInsideDataDir(target)) {
-        if (fs.existsSync(target)) skippedExternal.push(`${candidate.label}：${redactPath(target)}`);
+    const skippedExternal = [...revalidated.skippedExternal];
+    for (const item of revalidated.items) {
+      if (item.target === '__mfh_cache_preserve_lock__') {
+        const cleared = clearMfhCachePreservingLocks();
+        if (cleared.removed) removed.push(item.relative);
+        else if (cleared.detail) skippedExternal.push(`${item.label}：清理失败`);
+        continue;
+      }
+      const safe = assertSafeToDeleteInsideDataDir(item.target);
+      if (!safe) {
+        skippedExternal.push(`${item.label}：路径校验失败，已跳过`);
+        continue;
+      }
+      // 再次确认仍在冻结的 dataDir 内。
+      if (!isCanonicallyInside(safe, revalidated.dataDirReal)) {
+        skippedExternal.push(`${item.label}：${redactPath(safe)}`);
         continue;
       }
       try {
-        fs.rmSync(target, { recursive: true, force: true });
-        removed.push(path.relative(dataDir, target) || target);
+        fs.rmSync(safe, { recursive: true, force: true });
+        removed.push(item.relative);
       } catch {
-        skippedExternal.push(`${candidate.label}：删除失败，请手动清理`);
+        skippedExternal.push(`${item.label}：删除失败，请手动清理`);
       }
     }
     ensureBaseDirectories();
@@ -2793,7 +3747,7 @@ async function performDeveloperReset(event: ElectronAPI.IpcMainInvokeEvent): Pro
   }
 }
 
-ipcMain.handle('mfh:developer-reset', async (event) => performDeveloperReset(event));
+handleTrusted('mfh:developer-reset', async (event) => performDeveloperReset(event));
 
 // ---------------------------------------------------------------------------
 // 应用生命周期
@@ -2825,7 +3779,7 @@ if (!hasSingleInstanceLock) {
 }
 
 coordinator.setBroadcast((payload) => {
-  sendToRenderer('op-state', payload as unknown as Record<string, unknown>);
+  sendToRenderer('op-state', sanitizeOpState(payload) as unknown as Record<string, unknown>);
 });
 
 /**
@@ -2837,6 +3791,11 @@ function recoverPendingArchives(): void {
     recoverArchiveTransactions(invoicesDirPath());
   } catch {
     // 启动恢复只做 best-effort；真正写入前会走 strict gate 并返回可见错误。
+  }
+  try {
+    recoverOcrRerunJournals();
+  } catch {
+    // OCR 重跑 journal 恢复失败时保留现场，写入前 ensure 会再处理。
   }
 }
 
@@ -2894,14 +3853,18 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   void terminateChildren(activeChildren).then((summary) => {
     activeChildren.clear();
-    // ELEC-04：仍有子进程存活时不得假装清理成功并释放数据锁。
-    if (summary.remaining > 0) {
+    // ELEC-04 / NEW-DEFECT 4：remaining>0 **或** treeIncomplete 都必须保留锁。
+    // 树级信号失败时孙进程（efapiao serve）可能仍存活，即使直接子进程已退出。
+    if (summary.remaining > 0 || summary.treeIncomplete) {
       preserveDataDirLockOnExit = true;
       try {
         if (!e2eNoGuiMode()) {
+          const detail = summary.remaining > 0
+            ? `仍有 ${summary.remaining} 个后台进程未退出。`
+            : '后台进程树可能未完全终止。';
           dialog.showErrorBox(
             '无法完全停止后台任务',
-            `仍有 ${summary.remaining} 个后台进程未退出。为保护数据，本次不会释放数据目录锁。请稍后重新打开应用。`,
+            `${detail}为保护数据，本次不会释放数据目录锁。请稍后重新打开应用。`,
           );
         }
       } catch {

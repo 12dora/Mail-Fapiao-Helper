@@ -85,30 +85,53 @@ function collectReferencedCids(mail: ParsedMail): Set<string> {
 }
 
 /**
- * 可靠识别为装饰资源的图片（签名 logo / 跟踪像素等）（EXT-04）。
- * `inline`  alone 不再构成丢弃理由——正文内嵌发票截图同样可能是 inline。
+ * 图片附件处置（EXT-04）。
+ *
+ * 只有「正文引用的 related CID」+「装饰性尺寸/文件名」组合证据才允许静默丢弃。
+ * 任一弱信号单独出现时保留图片并记 issue，避免小体积发票截图/命名像 logo 的真票消失。
+ * `inline`  alone 不再构成丢弃理由。
  */
-function isDecorativeImage(att: AttachmentMeta, referencedCids: Set<string>): boolean {
-  if (!isImageAttachment(att)) return false;
+type ImageDisposition =
+  | { action: 'discard' }
+  | { action: 'keep' }
+  | { action: 'keep_with_issue'; reason: string };
+
+function classifyImageAttachment(att: AttachmentMeta, referencedCids: Set<string>): ImageDisposition {
+  if (!isImageAttachment(att)) return { action: 'keep' };
 
   const size = att.content?.length ?? att.size ?? 0;
   const stem = filenameStem(att.filename);
-  if (stem && DECORATIVE_IMAGE_NAMES.has(stem)) return true;
-  if (size > 0 && size <= DECORATIVE_IMAGE_MAX_BYTES) return true;
+  const decorativeName = !!(stem && DECORATIVE_IMAGE_NAMES.has(stem));
+  const decorativeSize = size > 0 && size <= DECORATIVE_IMAGE_MAX_BYTES;
+  const cid = attachmentCid(att);
+  const referencedRelated = att.related === true && !!cid && referencedCids.has(cid);
 
-  // related + CID 被 HTML 引用：典型 multipart/related 签名图。
-  if (att.related === true) {
-    const cid = attachmentCid(att);
-    if (cid && referencedCids.has(cid)) return true;
+  // 组合证据：被正文引用的 related 部件，且尺寸/文件名也像装饰资源 → 可静默丢弃。
+  if (referencedRelated && (decorativeSize || decorativeName)) {
+    return { action: 'discard' };
   }
 
-  return false;
+  // 弱信号不足以丢弃：保留，但把不确定性上报，禁止静默“当装饰图跳过”。
+  if (referencedRelated || decorativeSize || decorativeName) {
+    const label = att.filename || att.cid || att.contentId || 'inline-image';
+    const signals: string[] = [];
+    if (referencedRelated) signals.push('cid_related');
+    if (decorativeSize) signals.push('small');
+    if (decorativeName) signals.push('name');
+    return {
+      action: 'keep_with_issue',
+      reason: `attachment:ambiguous_image:${signals.join('+')}:${label}`,
+    };
+  }
+
+  return { action: 'keep' };
 }
 
 /** An attachment that should make the attachment extractor claim the email. */
 function isArchivableAttachment(att: AttachmentMeta, referencedCids: Set<string>): boolean {
   if (isPdfAttachment(att) || isOfdAttachment(att) || isZipAttachment(att)) return true;
-  return isImageAttachment(att) && !isDecorativeImage(att, referencedCids);
+  if (!isImageAttachment(att)) return false;
+  return classifyImageAttachment(att, referencedCids).action !== 'discard';
 }
 
 function looksLikeItinerary(artifact: PdfArtifact): boolean {
@@ -238,10 +261,15 @@ const attachmentExtractor: Extractor = {
           ctx.log.warn(`Failed to extract ZIP ${zipName}: ${msg}`);
         }
       } else if (isImageAttachment(att)) {
-        // EXT-04：只自动过滤可可靠识别的装饰图；其余 inline 图片作为 image 归档。
-        if (isDecorativeImage(att, referencedCids)) {
+        // EXT-04：仅在组合证据下静默丢弃装饰图；弱信号保留并记 issue。
+        const disposition = classifyImageAttachment(att, referencedCids);
+        if (disposition.action === 'discard') {
           ctx.log.debug(`Skip decorative image ${att.filename || att.cid || 'inline-image'}`);
           continue;
+        }
+        if (disposition.action === 'keep_with_issue') {
+          issues.push({ reason: disposition.reason });
+          ctx.log.warn(`Keep ambiguous image with issue: ${disposition.reason}`);
         }
         const label = att.filename || 'unnamed-image';
         const validated = validateAttachmentBytes(att.content, 'image', label);

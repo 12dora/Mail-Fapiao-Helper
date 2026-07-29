@@ -4,7 +4,15 @@ import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from '.
 import { extractMailUrls } from './mailLinks.js';
 import { handlers } from '../sites/registry.js';
 import { preferPdfOverDuplicateOfd } from './documentIdentity.js';
-import { assertDocumentResponse, detectDocumentKind, type DocumentKind } from '../sites/common.js';
+import {
+  assertDocumentResponse,
+  detectDocumentKind,
+  documentsFromZip,
+  looksLikeOfdPackage,
+  redactErrorDetail,
+  redactUrlForLog,
+  type DocumentKind,
+} from '../sites/common.js';
 import { assertPublicUrl, readCappedBuffer } from '../util/net.js';
 
 function isPdfUrl(url: string): boolean {
@@ -20,6 +28,24 @@ function isOfdUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     return parsed.pathname.toLowerCase().endsWith('.ofd');
+  } catch {
+    return false;
+  }
+}
+
+function isZipUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.toLowerCase().endsWith('.zip');
+  } catch {
+    return false;
+  }
+}
+
+function isImageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(parsed.pathname);
   } catch {
     return false;
   }
@@ -97,14 +123,30 @@ function invoiceProbeScore(url: string): number {
   return score;
 }
 
+/**
+ * 直链图片是否有「真是发票」的独立证据（NEW-DEFECT 2）。
+ * 普通营销/跟踪图不得仅因 magic 是 image 就被归档成财务发票。
+ */
+function linkedImageHasInvoiceEvidence(url: string): boolean {
+  if (/\d{20}/.test(url)) return true;
+  const lower = url.toLowerCase();
+  if (/(invoice|fapiao|einvoice|dzfp|fpjf|vat|发票|行程单|itinerary|e-?ticket)/i.test(lower)) {
+    return true;
+  }
+  // host/path 发票语义足够强时也放行（score 的 +40 档）。
+  return invoiceProbeScore(url) >= 40;
+}
+
 /** magic-byte 探测时只读前 2 KiB，避免把完整文档拉下来。 */
 const PROBE_BYTE_CAP = 2048;
 
 /**
  * 判断响应是否像发票文档（EXT-02 / EXT-08）。
  * HEAD 不可靠时用 Range/限字节 GET 核对 magic bytes。
+ * 图片必须另有发票语义证据，否则不算候选（NEW-DEFECT 2）。
  */
 async function probeIsDocument(url: string, ctx: Ctx): Promise<boolean> {
+  const safeUrl = redactUrlForLog(url);
   await assertPublicUrl(url);
 
   // 1) HEAD：仅当明确返回 PDF/OFD/ZIP 相关 content-type 时才信任为候选。
@@ -118,6 +160,9 @@ async function probeIsDocument(url: string, ctx: Ctx): Promise<boolean> {
           || contentType.includes('application/vnd.ofd')
           || contentType.includes('application/zip')) {
         return true;
+      }
+      if (contentType.startsWith('image/')) {
+        return linkedImageHasInvoiceEvidence(url);
       }
       // HEAD 200 但无类型 / 通用类型：落到 magic 探测，不直接判否。
       const ambiguous = !contentType
@@ -133,7 +178,7 @@ async function probeIsDocument(url: string, ctx: Ctx): Promise<boolean> {
     if (err instanceof Error && err.message.includes('network_retry_failed')) {
       throw err;
     }
-    ctx.log.debug(`HEAD probe inconclusive for ${url}: ${err}`);
+    ctx.log.debug(`HEAD probe inconclusive for ${safeUrl}: ${err}`);
   }
 
   // 2) Range / 限字节 GET：用 magic bytes 判定（应对 405、无 Content-Type、假 MIME）。
@@ -147,29 +192,34 @@ async function probeIsDocument(url: string, ctx: Ctx): Promise<boolean> {
       },
     });
     if (!response.ok && response.status !== 206) {
-      ctx.log.debug(`GET probe ${url} status ${response.status}`);
+      ctx.log.debug(`GET probe ${safeUrl} status ${response.status}`);
       return false;
     }
     const data = await readCappedBuffer(response, PROBE_BYTE_CAP);
     const kind = detectDocumentKind(data);
-    return kind === 'pdf' || kind === 'archive' || kind === 'image';
+    if (kind === 'pdf' || kind === 'archive') return true;
+    if (kind === 'image') return linkedImageHasInvoiceEvidence(url);
+    return false;
   } catch (err) {
     if (err instanceof Error && err.message.includes('network_retry_failed')) {
       throw err;
     }
-    ctx.log.debug(`GET magic probe failed for ${url}: ${err}`);
+    ctx.log.debug(`GET magic probe failed for ${safeUrl}: ${err}`);
     return false;
   }
 }
 
 /** 下载结果：拿到字节，或一个“不是发票”的软拒绝原因（不构成失败）。 */
-type DownloadOutcome = { data: Buffer; kind: DocumentKind } | { rejected: string };
+type DownloadOutcome =
+  | { data: Buffer; kind: DocumentKind }
+  | { rejected: string };
 
 async function downloadDocument(url: string, ctx: Ctx): Promise<DownloadOutcome> {
+  const safeUrl = redactUrlForLog(url);
   try {
     await assertPublicUrl(url);
   } catch (err) {
-    ctx.log.warn(`Blocked unsafe URL ${url}: ${err instanceof Error ? err.message : String(err)}`);
+    ctx.log.warn(`Blocked unsafe URL ${safeUrl}: ${err instanceof Error ? err.message : String(err)}`);
     return { rejected: 'blocked_url' };
   }
   let response: Response;
@@ -181,24 +231,24 @@ async function downloadDocument(url: string, ctx: Ctx): Promise<DownloadOutcome>
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.startsWith('blocked_url:')) {
-      ctx.log.warn(`Blocked unsafe redirect ${url}: ${msg}`);
+      ctx.log.warn(`Blocked unsafe redirect ${safeUrl}: ${redactErrorDetail(msg)}`);
       return { rejected: 'blocked_url' };
     }
     if (msg.startsWith('response_too_large:')) {
-      ctx.log.warn(`GET ${url} body rejected: ${msg}`);
+      ctx.log.warn(`GET ${safeUrl} body rejected: ${redactErrorDetail(msg)}`);
       return { rejected: msg };
     }
     throw err; // network_retry_failed etc. propagate to the caller's retry accounting
   }
   if (!response.ok) {
-    ctx.log.debug(`GET ${url} failed: ${response.status}`);
+    ctx.log.debug(`GET ${safeUrl} failed: ${response.status}`);
     return { rejected: `http_${response.status}` };
   }
   let data: Buffer;
   try {
     data = await readCappedBuffer(response);
   } catch (err) {
-    ctx.log.warn(`GET ${url} body rejected: ${err instanceof Error ? err.message : String(err)}`);
+    ctx.log.warn(`GET ${safeUrl} body rejected: ${err instanceof Error ? err.message : String(err)}`);
     return { rejected: 'body_rejected' };
   }
   const contentType = response.headers.get('content-type') ?? '';
@@ -210,10 +260,15 @@ async function downloadDocument(url: string, ctx: Ctx): Promise<DownloadOutcome>
       label: 'directLink',
       allow: ['pdf', 'archive', 'image'],
     });
+    // NEW-DEFECT 2：通用图片不得仅凭 magic 入库。
+    if (kind === 'image' && !linkedImageHasInvoiceEvidence(url)) {
+      ctx.log.debug(`GET ${safeUrl} image lacks invoice evidence, rejecting`);
+      return { rejected: 'image_no_invoice_evidence' };
+    }
     return { data, kind };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    ctx.log.debug(`GET ${url} was not a document: ${msg}`);
+    ctx.log.debug(`GET ${safeUrl} was not a document: ${redactErrorDetail(msg)}`);
     return { rejected: 'not_a_document' };
   }
 }
@@ -223,7 +278,7 @@ function suggestFilename(url: string): string {
     const parsed = new URL(url);
     const segments = parsed.pathname.split('/');
     const lastSegment = segments[segments.length - 1];
-    if (lastSegment && /\.(pdf|ofd)$/i.test(lastSegment)) {
+    if (lastSegment && /\.(pdf|ofd|zip)$/i.test(lastSegment)) {
       return decodeURIComponent(lastSegment);
     }
   } catch {
@@ -236,19 +291,79 @@ function pdfContentKey(pdf: Buffer): string {
   return createHash('sha1').update(pdf).digest('hex');
 }
 
-function documentFormat(kind: DocumentKind, source: string): 'pdf' | 'ofd' | 'image' {
-  if (kind === 'pdf') return 'pdf';
-  if (kind === 'image') return 'image';
-  // archive：OFD 与 ZIP 都是 PK 头；按 URL/文件名区分，默认 ofd（直链常见为 ofd）。
-  if (isOfdUrl(source) || source.toLowerCase().includes('/ofd/') || source.toLowerCase().endsWith('.ofd')) {
-    return 'ofd';
+/**
+ * 将下载结果转为 artifact 列表。
+ * - PDF / 有发票证据的图片：直接归档
+ * - PK 容器：若是 OFD 包则整包归档；否则解出内部发票条目，禁止把 ZIP 当 OFD（NEW-DEFECT 1）
+ */
+function artifactsFromDownload(
+  data: Buffer,
+  kind: DocumentKind,
+  url: string,
+  ctx: Ctx,
+): { artifacts: PdfArtifact[]; issues: ExtractIssue[] } {
+  const issues: ExtractIssue[] = [];
+  const safeUrl = redactUrlForLog(url);
+
+  if (kind === 'pdf') {
+    return {
+      artifacts: [{
+        data,
+        source: url,
+        suggestedName: suggestFilename(url) || undefined,
+        format: 'pdf',
+        requiresOcr: false,
+      }],
+      issues,
+    };
   }
-  if (source.toLowerCase().endsWith('.zip')) {
-    // ZIP 包应走站点 handler / 附件解包；此处保守当 ofd 会让后续 OCR 失败，
-    // 但 directLink 历史上把 PK 当 ofd。保持兼容：非 .zip 的 PK 视为 ofd。
-    return 'ofd';
+
+  if (kind === 'image') {
+    return {
+      artifacts: [{
+        data,
+        source: url,
+        suggestedName: suggestFilename(url) || undefined,
+        format: 'image',
+        requiresOcr: true,
+      }],
+      issues,
+    };
   }
-  return 'ofd';
+
+  // kind === 'archive'：OFD 与 ZIP 同为 PK 头。
+  // 仅当包内存在 OFD.xml 时整包当 OFD；否则必须解出发票条目，禁止把 ZIP 标成 OFD（NEW-DEFECT 1）。
+  if (looksLikeOfdPackage(data)) {
+    return {
+      artifacts: [{
+        data,
+        source: url,
+        suggestedName: suggestFilename(url) || undefined,
+        format: 'ofd',
+        requiresOcr: true,
+      }],
+      issues,
+    };
+  }
+
+  try {
+    const { documents, skipped } = documentsFromZip(data, url);
+    for (const item of skipped) {
+      issues.push({ reason: `directLink:zip_entry_skipped:${redactErrorDetail(item)}` });
+      ctx.log.warn(`directLink ZIP entry skipped: ${redactErrorDetail(item)}`);
+    }
+    if (documents.length === 0) {
+      issues.push({ reason: 'directLink:zip_no_invoice_entries' });
+      ctx.log.warn(`directLink ZIP ${safeUrl} had no extractable invoice entries`);
+      return { artifacts: [], issues };
+    }
+    return { artifacts: documents, issues };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    issues.push({ reason: `directLink:zip_failed:${redactErrorDetail(msg)}` });
+    ctx.log.warn(`directLink ZIP extract failed for ${safeUrl}: ${redactErrorDetail(msg)}`);
+    return { artifacts: [], issues };
+  }
 }
 
 /** 没有强 PDF 特征的链接最多探测这么多个，避免营销邮件把 run 拖成线性等待。 */
@@ -307,8 +422,13 @@ const directLinkExtractor: Extractor = {
     const probeTargets: string[] = [];
 
     for (const link of links) {
-      if (isPdfUrl(link) || isOfdUrl(link)) {
+      if (isPdfUrl(link) || isOfdUrl(link) || isZipUrl(link)) {
         strongCandidates.push(link);
+        continue;
+      }
+
+      // 明确的图片后缀：没有发票语义证据时不要进入候选，避免营销图被当发票（NEW-DEFECT 2）。
+      if (isImageUrl(link) && !linkedImageHasInvoiceEvidence(link)) {
         continue;
       }
 
@@ -345,20 +465,22 @@ const directLinkExtractor: Extractor = {
     const issues: ExtractIssue[] = [];
 
     // 预算外的候选必须变成可见 issue，不能静默 not_applicable（EXT-02）。
+    // CORE-08：只持久化类型化原因码 + 数量，禁止写入原始 signed URL。
     if (unprobedLinks.length > 0) {
       issues.push({
-        reason: `directLink:probe_budget_exceeded:${unprobedLinks.length}:${unprobedLinks.slice(0, 3).join('|')}`,
+        reason: `directLink:probe_budget_exceeded:count=${unprobedLinks.length}`,
       });
     }
 
     const probed = await mapWithConcurrency(probedLinks, PROBE_CONCURRENCY, async (link) => {
+      const safeUrl = redactUrlForLog(link);
       try {
         return await probeIsDocument(link, ctx) ? link : null;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
         probeFailures.push(msg);
         issues.push({ reason: `directLink:probe_failed:${msg}`, retryable: true });
-        ctx.log.warn(`PDF probe failed after retries for ${link}: ${msg}`);
+        ctx.log.warn(`PDF probe failed after retries for ${safeUrl}: ${msg}`);
         return null;
       }
     });
@@ -386,36 +508,39 @@ const directLinkExtractor: Extractor = {
     let rejectedCandidates = 0;
 
     for (const url of uniquePdfCandidates) {
+      const safeUrl = redactUrlForLog(url);
       let outcome: DownloadOutcome;
       try {
         outcome = await downloadDocument(url, ctx);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
         networkFailures.push(msg);
         issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true });
-        ctx.log.warn(`PDF download failed after retries for ${url}: ${msg}`);
+        ctx.log.warn(`PDF download failed after retries for ${safeUrl}: ${msg}`);
         continue;
       }
       if (!('data' in outcome)) {
         rejectedCandidates++;
         issues.push({ reason: `directLink:download_rejected:${outcome.rejected}` });
-        ctx.log.warn(`Failed to download ${url}: ${outcome.rejected}`);
+        ctx.log.warn(`Failed to download ${safeUrl}: ${outcome.rejected}`);
         continue;
       }
 
       const { data, kind } = outcome;
-      const key = pdfContentKey(data);
-      if (seenPdfs.has(key)) continue;
-      seenPdfs.add(key);
+      const converted = artifactsFromDownload(data, kind, url, ctx);
+      for (const issue of converted.issues) issues.push(issue);
+      if (converted.artifacts.length === 0) {
+        // ZIP 解不出条目等：已记 issue，算作该候选未产出文档。
+        rejectedCandidates++;
+        continue;
+      }
 
-      const format = documentFormat(kind, url);
-      pdfs.push({
-        data,
-        source: url,
-        suggestedName: suggestFilename(url),
-        format,
-        requiresOcr: format !== 'pdf',
-      });
+      for (const artifact of converted.artifacts) {
+        const key = pdfContentKey(artifact.data);
+        if (seenPdfs.has(key)) continue;
+        seenPdfs.add(key);
+        pdfs.push(artifact);
+      }
     }
 
     if (pdfs.length === 0) {

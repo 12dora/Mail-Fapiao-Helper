@@ -5,6 +5,7 @@ import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from '.
 import { extractMailUrls } from './mailLinks.js';
 import { handlers } from '../sites/registry.js';
 import type { SiteHandleResult, SiteHandler } from '../sites/types.js';
+import { redactErrorDetail, redactUrlForLog } from '../sites/common.js';
 
 function pdfContentKey(pdf: PdfArtifact): string {
   return createHash('sha1').update(pdf.data).digest('hex');
@@ -38,6 +39,7 @@ async function handleWithRetry(
   page: Page | undefined,
 ): Promise<SiteHandleResult> {
   const attempts = ctx.cfg.network.retries + 1;
+  const safeUrl = redactUrlForLog(link);
   let lastError = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -47,11 +49,12 @@ async function handleWithRetry(
       if (!isRetryableSiteError(err)) {
         throw err;
       }
-      lastError = msg;
+      lastError = redactErrorDetail(msg);
       if (attempt === attempts) {
-        throw new Error(`network_retry_failed:siteHandler:${handler.name}:${link}:${lastError}`);
+        // CORE-08：pending / 异常串只保留 handler 名 + 类型化错误，不嵌入原始 signed URL。
+        throw new Error(`network_retry_failed:siteHandler:${handler.name}:${lastError}`);
       }
-      ctx.log.warn(`network retry ${attempt}/${ctx.cfg.network.retries} siteHandler ${handler.name} ${link}: ${msg}`);
+      ctx.log.warn(`network retry ${attempt}/${ctx.cfg.network.retries} siteHandler ${handler.name} ${safeUrl}: ${lastError}`);
       if (ctx.cfg.network.retryDelayMs > 0) {
         await sleep(ctx.cfg.network.retryDelayMs * attempt);
       }
@@ -93,35 +96,40 @@ const thirdPartyExtractor: Extractor = {
       const issues: ExtractIssue[] = [];
 
       for (const { link, handler } of matched) {
+        const safeUrl = redactUrlForLog(link);
         // 逐链接隔离：一个过期/损坏的站点链接不再丢掉已取得和后续的好链接（APP-01）。
         let handled: SiteHandleResult;
         try {
           handled = await handleWithRetry(handler, link, ctx, page);
         } catch (err) {
-          const msg = errorMessage(err);
+          const msg = redactErrorDetail(errorMessage(err));
           issues.push({
             reason: `thirdParty:${handler.name}:${msg}`,
             retryable: msg.startsWith('network_retry_failed:'),
           });
-          ctx.log.warn(`Site handler ${handler.name} failed for ${link}: ${msg}`);
+          ctx.log.warn(`Site handler ${handler.name} failed for ${safeUrl}: ${msg}`);
           continue;
         }
 
         if (handled.issues && handled.issues.length > 0) {
           for (const issue of handled.issues) {
-            issues.push({
-              reason: issue.reason.startsWith('thirdParty:')
+            const reason = redactErrorDetail(
+              issue.reason.startsWith('thirdParty:')
                 ? issue.reason
                 : `thirdParty:${handler.name}:${issue.reason}`,
+            );
+            issues.push({
+              reason,
               retryable: issue.retryable,
             });
           }
         }
 
         // EXT-03：匹配链接若既无 artifact 也无 issue，强制补一条，禁止静默空成功。
+        // CORE-08：原因码不嵌入原始 URL。
         if (handled.artifacts.length === 0 && (!handled.issues || handled.issues.length === 0)) {
-          issues.push({ reason: `thirdParty:${handler.name}:empty_result:${link}` });
-          ctx.log.warn(`Site handler ${handler.name} returned empty result for ${link}`);
+          issues.push({ reason: `thirdParty:${handler.name}:empty_result` });
+          ctx.log.warn(`Site handler ${handler.name} returned empty result for ${safeUrl}`);
         }
 
         for (const pdf of handled.artifacts) {

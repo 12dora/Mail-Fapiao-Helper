@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.js';
 import { readCsvRows } from '../util/csv.js';
-import { msgIdHash } from '../util/hash.js';
+import { isMailHash, msgIdHash } from '../util/hash.js';
 
 export type PendingAction = 'retry' | 'refresh_link' | 'manual_archive' | 'ignore';
 
@@ -68,14 +68,30 @@ function sanitizeMachineReason(reason: string): string {
   return redacted.length > 300 ? `${redacted.slice(0, 300)}…` : redacted;
 }
 
+/**
+ * PENDING-HASH：优先读显式 `mailHash` 列（pipeline 写入的 12/32 位身份），
+ * 绝不能在无 raw 时重算 msgIdHash——那会得到 legacy 12 位，与
+ * `pending/<32-char>.eml` 文件名对不上。
+ */
 function rowFromRaw(raw: Record<string, string>): PendingRow {
   const messageId = raw.messageId ?? '';
   const date = raw.date ?? '';
   const from = raw.from ?? '';
   const subject = raw.subject ?? '';
   const machineReason = sanitizeMachineReason(raw.reason ?? '');
+  const explicit = (raw.mailHash ?? raw.hash ?? '').trim();
+  let hash: string;
+  if (explicit && isMailHash(explicit)) {
+    hash = explicit.toLowerCase();
+  } else if (messageId && isMailHash(messageId)) {
+    // 超大邮件等路径可能把 hash 写在 messageId 位。
+    hash = messageId.toLowerCase();
+  } else {
+    // 仅旧行无 mailHash 列时的最后回退（legacy 12 位）。
+    hash = msgIdHash(messageId || undefined, from, date, subject);
+  }
   return {
-    hash: msgIdHash(messageId || undefined, from, date, subject),
+    hash,
     messageId,
     date,
     from,

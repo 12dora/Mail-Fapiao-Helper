@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const isWindows = process.platform === 'win32';
+
 /**
  * True when a cell would be interpreted as a formula by Excel / LibreOffice /
  * Google Sheets when the CSV is opened directly. We guard `= + @` and control
@@ -112,17 +114,80 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+function normalizeHeaderLine(header: string): string {
+  return header.replace(/^\uFEFF/, '').replace(/\r?\n$/, '').trim();
+}
+
+function fsyncDir(dir: string): void {
+  try {
+    const dirFd = fs.openSync(dir, 'r');
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
+  } catch {
+    // Windows 等不支持目录 fsync 时忽略。
+  }
+}
+
+function hardenCsvMode(file: string): void {
+  if (isWindows) return;
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // best-effort：网络盘 / 非 POSIX 忽略。
+  }
+}
+
 /**
- * CORE-05：保证 CSV 具备期望表头。
- * - 不存在或 size=0：原子写 BOM + header
- * - 非空：解析首行并严格比对，不匹配则抛错（禁止向未知 schema 盲目追加）
- *
- * `expectedHeader` 可以带或不带尾部换行；比较时忽略 BOM 与空白差异。
+ * 原子写入 CSV 内容（BOM + 全文），fsync 文件与父目录，POSIX 下 mode 0600。
+ * 供 schema 创建与 legacy 升级共用，保证 OCR-03 的 durability。
  */
-export function ensureCsvSchema(csvPath: string, expectedHeader: string): void {
-  const headerLine = expectedHeader.replace(/^\uFEFF/, '').replace(/\r?\n$/, '');
+function writeCsvAtomic(csvPath: string, body: string): void {
   const dir = path.dirname(csvPath);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: isWindows ? undefined : 0o700 });
+  const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  const fd = fs.openSync(tmp, 'w', isWindows ? undefined : 0o600);
+  try {
+    fs.writeFileSync(fd, body, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  fs.renameSync(tmp, csvPath);
+  hardenCsvMode(csvPath);
+  fsyncDir(dir);
+}
+
+export interface EnsureCsvSchemaOptions {
+  /**
+   * 已知可升级的旧表头（不含 BOM、可带或不带尾部换行）。
+   * 命中时按列名映射重写为 expectedHeader，缺失列填空；幂等且崩溃安全（原子替换）。
+   */
+  upgradeFrom?: string[];
+  /**
+   * 升级每一行时的钩子：可按旧列填充新列（例如补 mailHash）。
+   * 返回的对象会按 expectedHeader 列序写出。
+   */
+  upgradeRow?: (row: Record<string, string>) => Record<string, string>;
+}
+
+/**
+ * CORE-05 / OCR-03 / 敏感文件 mode：
+ * - 不存在或 size=0：原子写 BOM + header，fsync 文件与父目录，mode 0600
+ * - 非空且表头匹配：通过
+ * - 非空且表头属于 upgradeFrom：按列名迁移后原子重写
+ * - 其余：抛错，禁止向未知 schema 盲目追加
+ */
+export function ensureCsvSchema(
+  csvPath: string,
+  expectedHeader: string,
+  opts: EnsureCsvSchemaOptions = {},
+): void {
+  const headerLine = normalizeHeaderLine(expectedHeader);
+  const dir = path.dirname(csvPath);
+  fs.mkdirSync(dir, { recursive: true, mode: isWindows ? undefined : 0o700 });
 
   let st: fs.Stats | undefined;
   try {
@@ -133,30 +198,44 @@ export function ensureCsvSchema(csvPath: string, expectedHeader: string): void {
   }
 
   if (!st || st.size === 0) {
-    const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-    fs.writeFileSync(tmp, `\uFEFF${headerLine}\n`, 'utf8');
-    fs.renameSync(tmp, csvPath);
+    writeCsvAtomic(csvPath, `\uFEFF${headerLine}\n`);
     return;
   }
 
-  // 只读出足够判定表头的前缀，避免大文件全量加载。
-  const fd = fs.openSync(csvPath, 'r');
-  try {
-    const buf = Buffer.alloc(Math.min(st.size, 64 * 1024));
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    const text = buf.subarray(0, n).toString('utf8').replace(/^\uFEFF/, '');
-    // 在 quote 外找首行结束；表头本身不应含换行。
-    const nl = text.search(/\r?\n/);
-    const firstLine = (nl >= 0 ? text.slice(0, nl) : text).trim();
-    const expected = headerLine.trim();
-    if (firstLine !== expected) {
-      throw new Error(
-        `csv_schema_mismatch:${csvPath}: expected header ${JSON.stringify(expected)}, got ${JSON.stringify(firstLine)}`,
-      );
-    }
-  } finally {
-    fs.closeSync(fd);
+  const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+  const records = parseCsv(text);
+  const firstLine = (records[0] ?? []).join(',').trim();
+  // 也接受用 parseCsvLine 语义比对（与 join 在无特殊字符表头时等价）。
+  const expected = headerLine.trim();
+  if (firstLine === expected) {
+    hardenCsvMode(csvPath);
+    return;
   }
+
+  const legacy = (opts.upgradeFrom ?? []).map(normalizeHeaderLine);
+  if (legacy.includes(firstLine)) {
+    const oldHeader = records[0] ?? [];
+    const newHeader = parseCsvLine(headerLine);
+    const upgradeRow = opts.upgradeRow;
+    const lines: string[] = [headerLine];
+    for (let i = 1; i < records.length; i++) {
+      const cols = records[i] ?? [];
+      const row: Record<string, string> = {};
+      for (let c = 0; c < oldHeader.length; c++) {
+        const key = oldHeader[c];
+        if (!key) continue;
+        row[key] = cols[c] ?? '';
+      }
+      const out = upgradeRow ? upgradeRow(row) : row;
+      lines.push(newHeader.map((k) => csvCell(out[k] ?? '')).join(','));
+    }
+    writeCsvAtomic(csvPath, `\uFEFF${lines.join('\n')}\n`);
+    return;
+  }
+
+  throw new Error(
+    `csv_schema_mismatch:${csvPath}: expected header ${JSON.stringify(expected)}, got ${JSON.stringify(firstLine)}`,
+  );
 }
 
 export function readCsvRows(csvPath: string): Record<string, string>[] {

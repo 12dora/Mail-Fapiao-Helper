@@ -1,4 +1,4 @@
-import { ImapFlow, type SearchObject } from 'imapflow';
+import { ImapFlow, type SearchObject, type FetchMessageObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import type { Config } from '../config.js';
 import type { Logger } from '../log.js';
@@ -151,6 +151,81 @@ function countLinks(html: string | false | undefined, text: string | undefined):
   return n;
 }
 
+/**
+ * 将单条 IMAP 消息转成 RawMail；解析失败时按 envelope 降级，绝不静默丢票。
+ * 返回 null 表示该 UID 应跳过（无可用日期 / 非发票排除），已打日志。
+ */
+async function materializeRawMail(
+  mailbox: string,
+  msg: Pick<FetchMessageObject, 'uid' | 'source' | 'envelope' | 'internalDate'>,
+  source: Buffer | Uint8Array | string,
+  win: DateWindow,
+  log: Logger,
+): Promise<RawMail | null> {
+  const raw = Buffer.isBuffer(source) ? source : Buffer.from(source);
+  let parsed: Awaited<ReturnType<typeof simpleParser>> | undefined;
+  try {
+    parsed = await parseMailWithGuards(raw);
+  } catch (e) {
+    // Degrade instead of dropping: the raw bytes and envelope are still in
+    // hand, so cache the .eml (it can be reprocessed later) rather than
+    // losing a real invoice email to a MIME-parse failure.
+    // 超限/超时同样走这条降级路径：邮件仍会落到缓存并由 pending 流程接手，
+    // 但绝不把不可信正文交给解析器（APP-09）。
+    log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}, falling back to envelope: ${(e as Error).message}`);
+    parsed = undefined;
+  }
+  const env = msg.envelope;
+  const from = parsed?.from?.text
+    ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
+  const subject = parsed?.subject ?? env?.subject ?? '';
+  // 有效日期：优先真实 Date header，缺失/非法时回退服务器 INTERNALDATE。
+  // 存储和过滤必须用**同一个** effectiveDate（APP-07）：旧代码只在 headerDate
+  // 存在时才过滤，于是没有合法 header date 的邮件既不受精确 since 下界约束，
+  // 也完全绕过 until 上界；而 IMAP 查询有意不发 before，客户端是唯一的上界。
+  const headerDate = validDate(parsed?.date) ?? validDate(env?.date);
+  const internalDate = validDate(msg.internalDate);
+  const effectiveDate = headerDate ?? internalDate;
+  if (!effectiveDate) {
+    // 两个来源都不可用：不静默放行，也不再退化成 epoch(1970)（那会把邮件
+    // 归档到 1970 月份目录并绕开窗口）。记一条可见告警后跳过。
+    log.warn(`skip mailbox="${mailbox}" uid=${msg.uid} reason=no_usable_date subject="${subject}"`);
+    return null;
+  }
+  const date = effectiveDate;
+  const messageId = parsed?.messageId ?? env?.messageId ?? undefined;
+  const hasAttachment = (parsed?.attachments?.length ?? 0) > 0;
+  const bodyLinkCount = parsed ? countLinks(parsed.html, parsed.text) : 0;
+  const excludeReason = nonInvoiceReason({ from, subject });
+  if (excludeReason) {
+    log.info(`exclude mailbox="${mailbox}" uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
+    return null;
+  }
+
+  // 无条件用同一个 [since, before) 窗口过滤：不能因为缺 header date 就放行。
+  // 日期来源在日志里标出，便于排查 INTERNALDATE 与 header 不一致的服务器。
+  const dateSource = headerDate ? 'header' : 'internal';
+  if (!withinWindow(effectiveDate, win)) {
+    const bound = effectiveDate.getTime() < win.since.getTime()
+      ? `< since=${win.since.toISOString()}`
+      : `>= before=${win.before ? win.before.toISOString() : ''}`;
+    log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${effectiveDate.toISOString()}(${dateSource}) ${bound}`);
+    return null;
+  }
+
+  return {
+    mailbox,
+    uid: msg.uid,
+    raw,
+    messageId,
+    from,
+    date,
+    subject,
+    hasAttachment,
+    bodyLinkCount,
+  };
+}
+
 export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMail> {
   const missing = missingImapCredentials(cfg);
   if (missing.length > 0) {
@@ -175,6 +250,10 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
       : await listAllMailboxPaths(client);
     log.info(`IMAP mailboxes: ${JSON.stringify(mailboxes)}`);
 
+    // EXT-11：跨邮箱累计「请求了 source 仍取不到」的 UID；全部抓完后若仍有未解析项，
+    // 必须显式失败，禁止 silent success。
+    const unresolvedSources: Array<{ mailbox: string; uid: number }> = [];
+
     for (const mailbox of mailboxes) {
       let lock;
       try {
@@ -195,87 +274,45 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
         }
         log.info(`IMAP SEARCH mailbox="${mailbox}": ${uids.length} matches`);
 
+        // EXT-11：ImapFlow 规定在 `fetch()` 异步迭代器仍活跃时不能再发其它 IMAP 命令
+        // （含 `fetchOne`），否则死锁。空 source 的 UID 只收集，等迭代器结束后再重试。
+        const emptySourceUids: number[] = [];
+
         for await (const msg of client.fetch(uids, { source: true, envelope: true, internalDate: true }, { uid: true })) {
-          // EXT-11：请求了 source 却为空时不得静默跳过——先单 UID 重取一次，仍空则记 warn。
-          let source = msg.source;
-          if (!source) {
-            log.warn(`IMAP mailbox="${mailbox}" uid=${msg.uid}: empty source on first fetch, retrying once`);
-            try {
-              const retry = await client.fetchOne(String(msg.uid), { source: true }, { uid: true });
-              if (retry && retry.source) source = retry.source;
-            } catch (retryErr) {
-              log.warn(
-                `IMAP mailbox="${mailbox}" uid=${msg.uid}: source re-fetch failed: `
-                + `${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
-              );
-            }
-          }
-          if (!source) {
-            log.warn(`IMAP mailbox="${mailbox}" uid=${msg.uid}: missing source after retry, skipping message`);
+          if (!msg.source) {
+            emptySourceUids.push(msg.uid);
+            log.warn(`IMAP mailbox="${mailbox}" uid=${msg.uid}: empty source on first fetch, will retry after iterator`);
             continue;
           }
-          const raw = Buffer.isBuffer(source) ? source : Buffer.from(source);
-          let parsed: Awaited<ReturnType<typeof simpleParser>> | undefined;
+          const mail = await materializeRawMail(mailbox, msg, msg.source, win, log);
+          if (mail) yield mail;
+        }
+
+        // 迭代器已结束：对首次空 source 的 UID 单独 fetchOne（安全）。
+        for (const uid of emptySourceUids) {
+          let source: Buffer | Uint8Array | string | undefined;
+          let retryMsg: FetchMessageObject | false | undefined;
           try {
-            parsed = await parseMailWithGuards(raw);
-          } catch (e) {
-            // Degrade instead of dropping: the raw bytes and envelope are still in
-            // hand, so cache the .eml (it can be reprocessed later) rather than
-            // losing a real invoice email to a MIME-parse failure.
-            // 超限/超时同样走这条降级路径：邮件仍会落到缓存并由 pending 流程接手，
-            // 但绝不把不可信正文交给解析器（APP-09）。
-            log.warn(`parse failed for mailbox="${mailbox}" uid=${msg.uid}, falling back to envelope: ${(e as Error).message}`);
-            parsed = undefined;
+            log.warn(`IMAP mailbox="${mailbox}" uid=${uid}: retrying source fetch once`);
+            retryMsg = await client.fetchOne(String(uid), {
+              source: true,
+              envelope: true,
+              internalDate: true,
+            }, { uid: true });
+            if (retryMsg && retryMsg.source) source = retryMsg.source;
+          } catch (retryErr) {
+            log.warn(
+              `IMAP mailbox="${mailbox}" uid=${uid}: source re-fetch failed: `
+              + `${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+            );
           }
-          const env = msg.envelope;
-          const from = parsed?.from?.text
-            ?? (env?.from?.map((a) => a.address ?? '').join(',') ?? '');
-          const subject = parsed?.subject ?? env?.subject ?? '';
-          // 有效日期：优先真实 Date header，缺失/非法时回退服务器 INTERNALDATE。
-          // 存储和过滤必须用**同一个** effectiveDate（APP-07）：旧代码只在 headerDate
-          // 存在时才过滤，于是没有合法 header date 的邮件既不受精确 since 下界约束，
-          // 也完全绕过 until 上界；而 IMAP 查询有意不发 before，客户端是唯一的上界。
-          const headerDate = validDate(parsed?.date) ?? validDate(env?.date);
-          const internalDate = validDate(msg.internalDate);
-          const effectiveDate = headerDate ?? internalDate;
-          if (!effectiveDate) {
-            // 两个来源都不可用：不静默放行，也不再退化成 epoch(1970)（那会把邮件
-            // 归档到 1970 月份目录并绕开窗口）。记一条可见告警后跳过。
-            log.warn(`skip mailbox="${mailbox}" uid=${msg.uid} reason=no_usable_date subject="${subject}"`);
+          if (!source || !retryMsg) {
+            log.warn(`IMAP mailbox="${mailbox}" uid=${uid}: missing source after retry`);
+            unresolvedSources.push({ mailbox, uid });
             continue;
           }
-          const date = effectiveDate;
-          const messageId = parsed?.messageId ?? env?.messageId ?? undefined;
-          const hasAttachment = (parsed?.attachments?.length ?? 0) > 0;
-          const bodyLinkCount = parsed ? countLinks(parsed.html, parsed.text) : 0;
-          const excludeReason = nonInvoiceReason({ from, subject });
-          if (excludeReason) {
-            log.info(`exclude mailbox="${mailbox}" uid=${msg.uid} reason=${excludeReason} subject="${subject}"`);
-            continue;
-          }
-
-          // 无条件用同一个 [since, before) 窗口过滤：不能因为缺 header date 就放行。
-          // 日期来源在日志里标出，便于排查 INTERNALDATE 与 header 不一致的服务器。
-          const dateSource = headerDate ? 'header' : 'internal';
-          if (!withinWindow(effectiveDate, win)) {
-            const bound = effectiveDate.getTime() < win.since.getTime()
-              ? `< since=${win.since.toISOString()}`
-              : `>= before=${win.before ? win.before.toISOString() : ''}`;
-            log.info(`skip mailbox="${mailbox}" uid=${msg.uid} date=${effectiveDate.toISOString()}(${dateSource}) ${bound}`);
-            continue;
-          }
-
-          yield {
-            mailbox,
-            uid: msg.uid,
-            raw,
-            messageId,
-            from,
-            date,
-            subject,
-            hasAttachment,
-            bodyLinkCount,
-          };
+          const mail = await materializeRawMail(mailbox, retryMsg, source, win, log);
+          if (mail) yield mail;
         }
       } catch (e) {
         // A SELECT/SEARCH/FETCH failure scoped to one folder must not abort the
@@ -285,6 +322,18 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
       } finally {
         lock.release();
       }
+    }
+
+    // 未解析 UID 必须让整次 fetch 显式 partial/失败，绝不能 silent success（EXT-11）。
+    if (unresolvedSources.length > 0) {
+      const sample = unresolvedSources
+        .slice(0, 12)
+        .map((item) => `${item.mailbox}:${item.uid}`)
+        .join(',');
+      throw new Error(
+        `imap_source_missing:${unresolvedSources.length}`
+        + (sample ? `:${sample}` : ''),
+      );
     }
   } finally {
     await client.logout().catch(() => undefined);

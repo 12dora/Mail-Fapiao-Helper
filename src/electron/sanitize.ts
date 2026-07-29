@@ -25,14 +25,21 @@ const SECRET_ASSIGN = /\b(token|secret|secretid|secretkey|apikey|api_key|key|sig
 
 const URL_IN_TEXT = /\bhttps?:\/\/[^\s"'<>）)\]，。；]+/gi;
 const WINDOWS_PATH = /\b[A-Za-z]:\\[^\s"'<>|,;]+/g;
+/** UNC 路径：\\server\share\... 或 //server/share/... */
+const UNC_PATH = /(?:\\\\|\/\/)[^\s"'<>|,;]+/g;
 // 只匹配「真正以 / 开头」的绝对路径；前面紧跟字母数字时（例如 2026/05/21）不匹配。
 const POSIX_PATH = /(?<![A-Za-z0-9])(?:\/[A-Za-z0-9._@+\-一-龥]+){2,}\/?/g;
-/** 至少 12 位、含字母的十六进制串（邮件 hash / contentHash），截断成短 ID。 */
-const LONG_HEX = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{12,}\b/gi;
+/**
+ * 至少 12 位的十六进制串（邮件 hash / contentHash），含纯数字（全 decimal 合法 hex）。
+ * 截断成短 ID。
+ */
+const LONG_HEX = /\b[0-9a-f]{12,}\b/gi;
 /** 邮箱地址：诊断文本中隐藏本地部分（ELEC-07）。 */
 const EMAIL_IN_TEXT = /\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/g;
 /** CLI 日志里的 subject="..." / from="..." 字段。 */
 const QUOTED_FIELD = /\b(subject|from|to)=("?)([^"\n]*?)\2(?=\s|$|reason=|date=)/gi;
+/** 非结构化主题泄漏：Subject: ... / 主题：... / 邮件主题：... */
+const SUBJECT_LINE = /(?:^|[\s,;，；])((?:subject|主题|邮件主题)\s*[:：]\s*)([^\n\r,;；]{3,})/gi;
 
 let managedRoots: { label: string; dir: string }[] = [];
 
@@ -47,7 +54,9 @@ export function registerManagedRoots(roots: { dataDir: string; appRoot: string }
     { label: '<用户目录>', dir: os.homedir() },
   ].filter((entry) => typeof entry.dir === 'string' && entry.dir.length > 0);
   // 长路径优先替换，避免 <用户目录> 抢先吃掉位于其下的 dataDir。
-  managedRoots = entries.sort((a, b) => b.dir.length - a.dir.length);
+  managedRoots = entries
+    .map((entry) => ({ label: entry.label, dir: path.resolve(entry.dir) }))
+    .sort((a, b) => b.dir.length - a.dir.length);
 }
 
 function escapeRegExp(value: string): string {
@@ -72,8 +81,13 @@ export function redactUrl(raw: string): string {
 export function redactPath(raw: string): string {
   const normalized = raw.trim();
   if (normalized.length === 0) return normalized;
+  // UNC：不尝试相对化，只保留最后一段。
+  if (normalized.startsWith('\\\\') || normalized.startsWith('//')) {
+    const parts = normalized.replace(/^[\\/]+/, '').split(/[\\/]/).filter(Boolean);
+    return parts.length > 0 ? `…/${parts[parts.length - 1]}` : '…/<网络路径>';
+  }
   for (const root of managedRoots) {
-    const rel = path.relative(root.dir, normalized);
+    const rel = path.relative(root.dir, path.resolve(normalized));
     if (rel === '') return root.label;
     if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
       return `${root.label}/${rel.split(path.sep).join('/')}`;
@@ -123,6 +137,7 @@ export function sanitizeText(input: unknown, opts: { maxLength?: number } = {}):
     text = text.replace(new RegExp(`${escapeRegExp(root.dir)}(?![A-Za-z0-9._/\\\\-])`, 'g'), () => keep(root.label));
   }
   text = text.replace(URL_IN_TEXT, (match) => keep(redactUrl(match)));
+  text = text.replace(UNC_PATH, (match) => keep(redactPath(match)));
   text = text.replace(WINDOWS_PATH, (match) => keep(redactPath(match)));
   text = text.replace(POSIX_PATH, (match) => keep(redactPath(match)));
   text = text.replace(EMAIL_IN_TEXT, (match) => keep(redactEmail(match)));
@@ -133,6 +148,7 @@ export function sanitizeText(input: unknown, opts: { maxLength?: number } = {}):
     // subject：不把报销主题送进 progress / history
     return `${key}=${quote}<主题已隐藏>${quote}`;
   });
+  text = text.replace(SUBJECT_LINE, (_m, label: string) => `${label}<主题已隐藏>`);
   text = text.replace(SECRET_ASSIGN, (_m, key: string, sep: string) => `${key}${sep}***`);
   text = text.replace(LONG_HEX, (match) => shortId(match));
   text = text.replace(new RegExp(`${NUL}(\\d+)${NUL}`, 'g'), (_m, index: string) => kept[Number(index)] ?? '');

@@ -439,16 +439,30 @@ export class ConfigVersionTooNewError extends Error {
   }
 }
 
+/**
+ * CORE-10：schemaVersion 已提供但不是正整数（如 `2.5`、`0`、`"999"`）。
+ * 只有**缺省**才能隐含为 v1；非法值必须拒绝，不得静默回退再盖章为当前版本。
+ */
+export class ConfigSchemaVersionInvalidError extends Error {
+  readonly code = 'config_schema_version_invalid';
+  readonly value: unknown;
+
+  constructor(value: unknown) {
+    super(
+      `config_schema_version_invalid: schemaVersion 必须是正整数（当前配置为 ${JSON.stringify(value)}）；`
+      + `仅在完全省略该字段时才按 v1 迁移。`,
+    );
+    this.name = 'ConfigSchemaVersionInvalidError';
+    this.value = value;
+  }
+}
+
 function readDeclaredSchemaVersion(raw: Record<string, unknown>): number {
   const v = raw.schemaVersion;
+  // 仅 ABSENT（undefined / null / 空串）可隐含 v1。
   if (v === undefined || v === null || v === '') return 1;
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
-    // 非正整数：交给校验阶段报字段错误；迁移路径先按 1 处理会不安全，
-    // 这里对「明显过大的非整数」也拒绝。小数等非法值在 validate 里再报。
-    if (typeof v === 'number' && Number.isFinite(v) && v > CONFIG_SCHEMA_VERSION) {
-      throw new ConfigVersionTooNewError(Math.floor(v), CONFIG_SCHEMA_VERSION);
-    }
-    return 1;
+    throw new ConfigSchemaVersionInvalidError(v);
   }
   if (v > CONFIG_SCHEMA_VERSION) {
     throw new ConfigVersionTooNewError(v, CONFIG_SCHEMA_VERSION);
@@ -516,8 +530,8 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
   try {
     migrated = migrateRawConfig(raw).raw;
   } catch (err) {
-    // CORE-10：未来版本配置不得被旧程序打开或回写。
-    if (err instanceof ConfigVersionTooNewError) {
+    // CORE-10：未来版本或非法 schemaVersion 不得被静默盖章。
+    if (err instanceof ConfigVersionTooNewError || err instanceof ConfigSchemaVersionInvalidError) {
       return {
         ok: false,
         errors: [{ path: 'schemaVersion', message: err.message }],

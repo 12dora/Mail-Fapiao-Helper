@@ -275,12 +275,36 @@ export class StateStore {
     return this.fetched.has(hash);
   }
 
+  /** CORE-03：primary / legacy 任一命中即视为已处理。 */
+  hasProcessedAny(hashes: readonly string[]): boolean {
+    for (const h of hashes) {
+      if (h.length > 0 && this.processed.has(h)) return true;
+    }
+    return false;
+  }
+
+  /** CORE-03：primary / legacy 任一命中即视为已抓取。 */
+  hasFetchedAny(hashes: readonly string[]): boolean {
+    for (const h of hashes) {
+      if (h.length > 0 && this.fetched.has(h)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 写入**一条** processed 身份（CORE-03 非对称读写：写 primary，读 aliases）。
+   * 调用方应传入 `identity.primary`，禁止把全部别名灌进集合。
+   */
   addProcessed(hash: string): void {
     if (hash.length === 0 || this.processed.has(hash)) return;
     this.processed.add(hash);
     this.markChanged();
   }
 
+  /**
+   * 写入**一条** fetched 身份（CORE-03 非对称读写：写 primary，读 aliases）。
+   * 调用方应传入 `identity.primary`，禁止把全部别名灌进集合。
+   */
   addFetched(hash: string): void {
     if (hash.length === 0 || this.fetched.has(hash)) return;
     this.fetched.add(hash);
