@@ -114,7 +114,12 @@ function buildConfig(dataDir) {
 async function mfh(args, env = {}) {
   const { stdout, stderr } = await execFileAsync('node', ['dist/index.js', ...args], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: {
+      ...process.env,
+      // MOCK-OCR-GATE: mock provider requires an explicit test-only env flag.
+      MFH_ALLOW_MOCK_OCR: '1',
+      ...env,
+    },
     maxBuffer: 8 * 1024 * 1024,
   });
   return `${stdout}\n${stderr}`;

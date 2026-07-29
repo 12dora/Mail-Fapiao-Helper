@@ -70,7 +70,7 @@ async function main() {
     const visible = await browserWindow.evaluate((win) => win.isVisible());
     if (visible) fail('MFH_E2E_NO_GUI=1 should keep the Electron BrowserWindow hidden');
     await page.waitForLoadState('domcontentloaded');
-    await activeMain(page, '.toolbar__title').getByText('运行控制台', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
+    await activeMain(page, '.toolbar__title').getByText('开始处理', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
     await page.waitForURL(/dashboard\.html/);
 
     const bridge = await page.evaluate(() => ({
@@ -93,10 +93,11 @@ async function main() {
     if (fileProgress !== '0%') fail(`发票文件进度条不应启动，实际为 ${fileProgress}`);
 
     // Empty data dir → the OCR run must report "no work", not pretend to succeed.
-    await page.getByRole('button', { name: '开始识别发票文件' }).click();
-    await activeMain(page, '[data-ocr-log]').getByText('没有待识别文件', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
+    await page.getByRole('button', { name: '开始识别' }).click();
+    // Copy now uses「没有等待识别的文件」(was「没有待识别文件」).
+    await activeMain(page, '[data-ocr-log]').getByText('没有等待识别的文件', { exact: false }).waitFor({ state: 'visible', timeout: 15000 });
     const ocrProgress = await activeMain(page, '[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
-    if (ocrProgress !== '100%') fail(`没有待识别文件时识别进度应结束，实际为 ${ocrProgress}`);
+    if (ocrProgress !== '100%') fail(`没有等待识别的文件时识别进度应结束，实际为 ${ocrProgress}`);
 
     // COPY-07B: the sidebar version pill must render app.getVersion(), never a
     // hardcoded literal.
@@ -132,6 +133,8 @@ async function main() {
     if (saveButtonCount !== 0) fail('Electron 配置页不应再显示“保存并应用”按钮');
 
     await activeMain(page, '#ocr-vendor').selectOption('efapiao');
+    // Region lives under a collapsed “查看技术详情” disclosure next to the field.
+    await activeMain(page, 'details').filter({ has: page.locator('#tencent-region') }).locator('summary').click();
     await activeMain(page, '#tencent-region').fill('ap-shanghai');
     await activeMain(page, '#save-state').getByText('已保存到本机', { exact: false }).waitFor({ state: 'visible', timeout: 8000 });
     // The pill is not proof: the value must be on disk.

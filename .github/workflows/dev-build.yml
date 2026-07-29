@@ -88,8 +88,14 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
 
-      - name: Test
-        run: npm test
+      - name: Test (core)
+        run: npm run test:core
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Test (browser)
+        run: npm run test:browser
 
       # No signing secrets are referenced here at all — a development build must
       # never accidentally consume a production certificate.

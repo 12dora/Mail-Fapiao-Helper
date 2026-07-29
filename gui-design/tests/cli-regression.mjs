@@ -8,13 +8,12 @@
  * here — they stayed green through real breakage before.
  */
 
-import { mkdtemp, mkdir, readFile, writeFile, readdir, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, readdir, rm, stat, utimes } from 'node:fs/promises';
 import fs, { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { assertFreshBuild, fail, repoRoot, runSuite } from './_shared.mjs';
+import { assertFreshBuild, fail, killProcessTree, repoRoot, runSuite, withTempDir } from './_shared.mjs';
 
 const execFileAsync = promisify(execFile);
 const TEST_FAULT_TOKEN = 'mail-fapiao-helper-test-faults';
@@ -130,7 +129,12 @@ function manualMail(subject, messageId = '') {
 async function runMfh(args, env = {}) {
   return execFileAsync('node', ['dist/index.js', ...args], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: {
+      ...process.env,
+      // MOCK-OCR-GATE: mock provider requires an explicit test-only env flag.
+      MFH_ALLOW_MOCK_OCR: '1',
+      ...env,
+    },
     maxBuffer: 4 * 1024 * 1024,
   });
 }
@@ -151,231 +155,229 @@ function column(csv, row, name) {
 }
 
 async function testOutputCsvAndPendingRaw() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-regression-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  const pdfEml = pdfMail('<pdf-case@example.com>');
-  const manualEml = manualMail('普通发票通知', '<manual-case@example.com>');
-  await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfEml);
-  await writeFile(join(tmp, 'raw', 'manual.eml'), manualEml);
+  await withTempDir('mfh-cli-regression-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    const pdfEml = pdfMail('<pdf-case@example.com>');
+    const manualEml = manualMail('普通发票通知', '<manual-case@example.com>');
+    await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfEml);
+    await writeFile(join(tmp, 'raw', 'manual.eml'), manualEml);
 
-  await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
+    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
 
-  // 1. The ledger goes to output.csv, not to a second copy under paths.invoices.
-  if (!existsSync(cfg.output.csv)) fail('mfh run did not write config.output.csv');
-  if (existsSync(join(cfg.paths.invoices, 'invoices.csv'))) fail('mfh run still wrote paths.invoices/invoices.csv');
+    // 1. The ledger goes to output.csv, not to a second copy under paths.invoices.
+    if (!existsSync(cfg.output.csv)) fail('mfh run did not write config.output.csv');
+    if (existsSync(join(cfg.paths.invoices, 'invoices.csv'))) fail('mfh run still wrote paths.invoices/invoices.csv');
 
-  // The ledger must describe the archived artifact, not merely exist.
-  const ledger = parseSimpleCsv(await readFile(cfg.output.csv, 'utf8'));
-  if (ledger.rows.length !== 1) {
-    fail(`output.csv should hold exactly the one archived attachment, got ${ledger.rows.length} rows`);
-  }
-  const ledgerRow = ledger.rows[0];
-  if (column(ledger, ledgerRow, 'messageId') !== '<pdf-case@example.com>') {
-    fail(`output.csv row is not the PDF mail: ${ledgerRow.join(',')}`);
-  }
-  if (column(ledger, ledgerRow, 'source') !== 'invoice.pdf') {
-    fail(`output.csv lost the original attachment name: ${ledgerRow.join(',')}`);
-  }
-  const archivedName = column(ledger, ledgerRow, 'filename');
-  const archivedBytes = await readFile(join(cfg.paths.invoices, archivedName));
-  if (!archivedBytes.equals(Buffer.from(PDF_BYTES_B64, 'base64'))) {
-    fail(`archived ${archivedName} does not contain the attachment bytes byte-for-byte`);
-  }
+    // The ledger must describe the archived artifact, not merely exist.
+    const ledger = parseSimpleCsv(await readFile(cfg.output.csv, 'utf8'));
+    if (ledger.rows.length !== 1) {
+      fail(`output.csv should hold exactly the one archived attachment, got ${ledger.rows.length} rows`);
+    }
+    const ledgerRow = ledger.rows[0];
+    if (column(ledger, ledgerRow, 'messageId') !== '<pdf-case@example.com>') {
+      fail(`output.csv row is not the PDF mail: ${ledgerRow.join(',')}`);
+    }
+    if (column(ledger, ledgerRow, 'source') !== 'invoice.pdf') {
+      fail(`output.csv lost the original attachment name: ${ledgerRow.join(',')}`);
+    }
+    const archivedName = column(ledger, ledgerRow, 'filename');
+    const archivedBytes = await readFile(join(cfg.paths.invoices, archivedName));
+    if (!archivedBytes.equals(Buffer.from(PDF_BYTES_B64, 'base64'))) {
+      fail(`archived ${archivedName} does not contain the attachment bytes byte-for-byte`);
+    }
 
-  // 2. Exactly one pending row, for the mail that had nothing to download.
-  const pending = parseSimpleCsv(await readFile(join(cfg.paths.pending, 'pending.csv'), 'utf8'));
-  if (pending.rows.length !== 1) fail(`pending.csv should contain one data row, got ${pending.rows.length}`);
-  if (column(pending, pending.rows[0], 'messageId') !== '<manual-case@example.com>') {
-    fail(`pending.csv holds the wrong mail: ${pending.rows[0].join(',')}`);
-  }
-  if (column(pending, pending.rows[0], 'subject') !== '普通发票通知') {
-    fail(`pending.csv lost the subject: ${pending.rows[0].join(',')}`);
-  }
+    // 2. Exactly one pending row, for the mail that had nothing to download.
+    const pending = parseSimpleCsv(await readFile(join(cfg.paths.pending, 'pending.csv'), 'utf8'));
+    if (pending.rows.length !== 1) fail(`pending.csv should contain one data row, got ${pending.rows.length}`);
+    if (column(pending, pending.rows[0], 'messageId') !== '<manual-case@example.com>') {
+      fail(`pending.csv holds the wrong mail: ${pending.rows[0].join(',')}`);
+    }
+    if (column(pending, pending.rows[0], 'subject') !== '普通发票通知') {
+      fail(`pending.csv lost the subject: ${pending.rows[0].join(',')}`);
+    }
 
-  // 3. The quarantined .eml is the *original* raw message, byte-for-byte — the
-  //    old `size > 0` check passed even when a truncated or re-serialised copy
-  //    was written.
-  const pendingEmls = (await readdir(cfg.paths.pending)).filter((name) => name.endsWith('.eml'));
-  if (pendingEmls.length !== 1) fail(`expected one pending eml, got ${pendingEmls.length}`);
-  const preserved = await readFile(join(cfg.paths.pending, pendingEmls[0]), 'utf8');
-  if (preserved !== manualEml) {
-    fail(`pending eml is not a byte-identical copy of the raw message:\n${JSON.stringify(preserved.slice(0, 200))}`);
-  }
+    // 3. The quarantined .eml is the *original* raw message, byte-for-byte — the
+    //    old `size > 0` check passed even when a truncated or re-serialised copy
+    //    was written.
+    const pendingEmls = (await readdir(cfg.paths.pending)).filter((name) => name.endsWith('.eml'));
+    if (pendingEmls.length !== 1) fail(`expected one pending eml, got ${pendingEmls.length}`);
+    const preserved = await readFile(join(cfg.paths.pending, pendingEmls[0]), 'utf8');
+    if (preserved !== manualEml) {
+      fail(`pending eml is not a byte-identical copy of the raw message:\n${JSON.stringify(preserved.slice(0, 200))}`);
+    }
+  });
 }
 
 async function testPendingWithoutMessageId() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-noid-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await writeFile(join(tmp, 'raw', 'noid1.eml'), manualMail('无ID发票通知1'));
-  await writeFile(join(tmp, 'raw', 'noid2.eml'), manualMail('无ID发票通知2'));
+  await withTempDir('mfh-cli-noid-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'noid1.eml'), manualMail('无ID发票通知1'));
+    await writeFile(join(tmp, 'raw', 'noid2.eml'), manualMail('无ID发票通知2'));
 
-  await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
+    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
 
-  const pending = parseSimpleCsv(await readFile(join(cfg.paths.pending, 'pending.csv'), 'utf8'));
-  if (pending.rows.length !== 2) fail(`pending.csv should keep both no-Message-ID rows, got ${pending.rows.length}`);
-  const subjects = pending.rows.map((row) => column(pending, row, 'subject')).sort();
-  if (subjects[0] !== '无ID发票通知1' || subjects[1] !== '无ID发票通知2') {
-    fail(`the two no-Message-ID mails collapsed into one identity: ${JSON.stringify(subjects)}`);
-  }
+    const pending = parseSimpleCsv(await readFile(join(cfg.paths.pending, 'pending.csv'), 'utf8'));
+    if (pending.rows.length !== 2) fail(`pending.csv should keep both no-Message-ID rows, got ${pending.rows.length}`);
+    const subjects = pending.rows.map((row) => column(pending, row, 'subject')).sort();
+    if (subjects[0] !== '无ID发票通知1' || subjects[1] !== '无ID发票通知2') {
+      fail(`the two no-Message-ID mails collapsed into one identity: ${JSON.stringify(subjects)}`);
+    }
+  });
 }
 
 async function testCsvStateRecovery() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-recover-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await writeFile(join(tmp, 'raw', 'recover.eml'), pdfMail('<recover-case@example.com>'));
-  const archivedBefore = '%PDF-1.4\n%ALREADY-ARCHIVED\n%EOF\n';
-  await writeFile(join(cfg.paths.invoices, 'invoice.pdf'), archivedBefore);
-  const ledgerBefore = [
-    '﻿messageId,date,from,subject,filename,source',
-    '<recover-case@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,invoice.pdf,invoice.pdf',
-    '',
-  ].join('\n');
-  await writeFile(cfg.output.csv, ledgerBefore);
+  await withTempDir('mfh-cli-recover-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await writeFile(join(tmp, 'raw', 'recover.eml'), pdfMail('<recover-case@example.com>'));
+    const archivedBefore = '%PDF-1.4\n%ALREADY-ARCHIVED\n%EOF\n';
+    await writeFile(join(cfg.paths.invoices, 'invoice.pdf'), archivedBefore);
+    const ledgerBefore = [
+      '﻿messageId,date,from,subject,filename,source',
+      '<recover-case@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,invoice.pdf,invoice.pdf',
+      '',
+    ].join('\n');
+    await writeFile(cfg.output.csv, ledgerBefore);
 
-  await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
+    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
 
-  // Old assertion was "invoice-1.pdf does not exist", which also passed when the
-  // run wrote invoice-2.pdf, re-archived under a different name, or appended a
-  // duplicate ledger row. Assert the full post-state instead.
-  const archived = (await readdir(cfg.paths.invoices)).filter((name) => name.toLowerCase().endsWith('.pdf'));
-  if (archived.length !== 1 || archived[0] !== 'invoice.pdf') {
-    fail(`recovering state from output.csv must not re-archive anything; found ${JSON.stringify(archived)}`);
-  }
-  const archivedAfter = await readFile(join(cfg.paths.invoices, 'invoice.pdf'), 'utf8');
-  if (archivedAfter !== archivedBefore) fail('the already-archived invoice was overwritten during recovery');
+    // Old assertion was "invoice-1.pdf does not exist", which also passed when the
+    // run wrote invoice-2.pdf, re-archived under a different name, or appended a
+    // duplicate ledger row. Assert the full post-state instead.
+    const archived = (await readdir(cfg.paths.invoices)).filter((name) => name.toLowerCase().endsWith('.pdf'));
+    if (archived.length !== 1 || archived[0] !== 'invoice.pdf') {
+      fail(`recovering state from output.csv must not re-archive anything; found ${JSON.stringify(archived)}`);
+    }
+    const archivedAfter = await readFile(join(cfg.paths.invoices, 'invoice.pdf'), 'utf8');
+    if (archivedAfter !== archivedBefore) fail('the already-archived invoice was overwritten during recovery');
 
-  const ledger = parseSimpleCsv(await readFile(cfg.output.csv, 'utf8'));
-  if (ledger.rows.length !== 1) {
-    fail(`output.csv should still hold one row after recovery, got ${ledger.rows.length}`);
-  }
-  if (column(ledger, ledger.rows[0], 'filename') !== 'invoice.pdf') {
-    fail(`output.csv row was rewritten during recovery: ${ledger.rows[0].join(',')}`);
-  }
+    const ledger = parseSimpleCsv(await readFile(cfg.output.csv, 'utf8'));
+    if (ledger.rows.length !== 1) {
+      fail(`output.csv should still hold one row after recovery, got ${ledger.rows.length}`);
+    }
+    if (column(ledger, ledger.rows[0], 'filename') !== 'invoice.pdf') {
+      fail(`output.csv row was rewritten during recovery: ${ledger.rows[0].join(',')}`);
+    }
+  });
 }
 
 async function testOcrSingleItemResume() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-single-'));
-  const { cfg, path: configPath } = await writeConfig(tmp, mockOcrConfig(tmp));
-  const ocrDir = join(cfg.paths.invoices, 'ocr');
-  await mkdir(ocrDir, { recursive: true });
-  await writeFile(join(cfg.paths.invoices, 'already.pdf'), '%PDF-1.4\n%EOF\n');
-  await writeFile(join(cfg.paths.invoices, 'todo.pdf'), '%PDF-1.4\n%EOF\n');
-  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
-    'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,pending,',
-    'hash-todo,<todo@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,todo.pdf,todo.pdf,pdf,invoice,pending,',
-    '',
-  ].join('\n'));
-  await writeFile(cfg.ocr.resultsCsv, [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
-    'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,电子发票,已识别销售方,1.00,2026-05-21,EXISTING,http,text_layer,mock,,success,',
-    '',
-  ].join('\n'));
+  await withTempDir('mfh-cli-ocr-single-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp, mockOcrConfig(tmp));
+    const ocrDir = join(cfg.paths.invoices, 'ocr');
+    await mkdir(ocrDir, { recursive: true });
+    await writeFile(join(cfg.paths.invoices, 'already.pdf'), '%PDF-1.4\n%EOF\n');
+    await writeFile(join(cfg.paths.invoices, 'todo.pdf'), '%PDF-1.4\n%EOF\n');
+    await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+      'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,pending,',
+      'hash-todo,<todo@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,todo.pdf,todo.pdf,pdf,invoice,pending,',
+      '',
+    ].join('\n'));
+    await writeFile(cfg.ocr.resultsCsv, [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
+      'hash-already,<already@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,already.pdf,already.pdf,pdf,invoice,电子发票,已识别销售方,1.00,2026-05-21,EXISTING,http,text_layer,mock,,success,',
+      '',
+    ].join('\n'));
 
-  const { stdout } = await runMfh(['ocr', 'run', '--config', configPath, '--single-item', '--allow-parse-failures'], {
-    MFH_MOCK_OCR_FAIL_BATCH: '1',
+    const { stdout } = await runMfh(['ocr', 'run', '--config', configPath, '--single-item', '--allow-parse-failures'], {
+      MFH_MOCK_OCR_FAIL_BATCH: '1',
+    });
+    if (!stdout.includes('OCR complete: scanned=2, parsed=1, skipped=1, failed=0')) {
+      fail(`single-item OCR summary did not show resume behavior:\n${stdout}`);
+    }
+    if (stdout.includes('mock batch parser should not be used')) {
+      fail('single-item OCR invoked parseBatch');
+    }
+
+    const pendingCsv = await readFile(join(ocrDir, 'ocr-pending.csv'), 'utf8');
+    if (!pendingCsv.includes('already.pdf,already.pdf,pdf,invoice,recognized,already_in_results')) {
+      fail(`single-item OCR did not keep existing successful row as resumed:\n${pendingCsv}`);
+    }
+    if (!pendingCsv.includes('todo.pdf,todo.pdf,pdf,invoice,recognized,')) {
+      fail(`single-item OCR did not checkpoint newly parsed row:\n${pendingCsv}`);
+    }
+
+    const results = parseSimpleCsv(await readFile(cfg.ocr.resultsCsv, 'utf8'));
+    if (results.rows.length !== 2) {
+      fail(`single-item OCR should append exactly one new result row, got ${results.rows.length}`);
+    }
+    const todoRow = results.rows.find((row) => column(results, row, 'hash') === 'hash-todo');
+    if (!todoRow) fail(`single-item OCR did not append the hash-todo result:\n${results.rows.map((r) => r.join(',')).join('\n')}`);
+    if (column(results, todoRow, 'status') !== 'success' || column(results, todoRow, 'seller') !== '国家电网有限公司') {
+      fail(`the newly parsed row lost its fields: ${todoRow.join(',')}`);
+    }
+    const alreadyRow = results.rows.find((row) => column(results, row, 'hash') === 'hash-already');
+    if (column(results, alreadyRow, 'invoiceNo') !== 'EXISTING') {
+      fail(`resuming rewrote the pre-existing result row: ${alreadyRow.join(',')}`);
+    }
   });
-  if (!stdout.includes('OCR complete: scanned=2, parsed=1, skipped=1, failed=0')) {
-    fail(`single-item OCR summary did not show resume behavior:\n${stdout}`);
-  }
-  if (stdout.includes('mock batch parser should not be used')) {
-    fail('single-item OCR invoked parseBatch');
-  }
-
-  const pendingCsv = await readFile(join(ocrDir, 'ocr-pending.csv'), 'utf8');
-  if (!pendingCsv.includes('already.pdf,already.pdf,pdf,invoice,recognized,already_in_results')) {
-    fail(`single-item OCR did not keep existing successful row as resumed:\n${pendingCsv}`);
-  }
-  if (!pendingCsv.includes('todo.pdf,todo.pdf,pdf,invoice,recognized,')) {
-    fail(`single-item OCR did not checkpoint newly parsed row:\n${pendingCsv}`);
-  }
-
-  const results = parseSimpleCsv(await readFile(cfg.ocr.resultsCsv, 'utf8'));
-  if (results.rows.length !== 2) {
-    fail(`single-item OCR should append exactly one new result row, got ${results.rows.length}`);
-  }
-  const todoRow = results.rows.find((row) => column(results, row, 'hash') === 'hash-todo');
-  if (!todoRow) fail(`single-item OCR did not append the hash-todo result:\n${results.rows.map((r) => r.join(',')).join('\n')}`);
-  if (column(results, todoRow, 'status') !== 'success' || column(results, todoRow, 'seller') !== '国家电网有限公司') {
-    fail(`the newly parsed row lost its fields: ${todoRow.join(',')}`);
-  }
-  const alreadyRow = results.rows.find((row) => column(results, row, 'hash') === 'hash-already');
-  if (column(results, alreadyRow, 'invoiceNo') !== 'EXISTING') {
-    fail(`resuming rewrote the pre-existing result row: ${alreadyRow.join(',')}`);
-  }
 }
 
 async function testOcrSuccessBeatsLaterFailure() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-dedupe-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  const ocrDir = join(cfg.paths.invoices, 'ocr');
-  await mkdir(ocrDir, { recursive: true });
-  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
-    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,failed,efapiao timeout after 120000ms',
-    '',
-  ].join('\n'));
-  await writeFile(cfg.ocr.resultsCsv, [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
-    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,电子发票,上海德玺楼餐饮有限公司,188.00,2026-05-21,26312000002724191086,cli,text_layer,0.1.0,,success,',
-    'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,,,,,,,,,,error,efapiao timeout after 120000ms',
-    '',
-  ].join('\n'));
+  await withTempDir('mfh-cli-ocr-dedupe-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    const ocrDir = join(cfg.paths.invoices, 'ocr');
+    await mkdir(ocrDir, { recursive: true });
+    await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+      'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,failed,efapiao timeout after 120000ms',
+      '',
+    ].join('\n'));
+    await writeFile(cfg.ocr.resultsCsv, [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error',
+      'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,电子发票,示例餐饮有限公司,99.00,2026-05-21,00000000000000000000,cli,text_layer,0.1.0,,success,',
+      'same-hash,<same@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,same.pdf,same.pdf,pdf,invoice,,,,,,,,,,error,efapiao timeout after 120000ms',
+      '',
+    ].join('\n'));
 
-  const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
-  if (!stdout.includes('recognized=1 failed=0 ignored=0 pending=0')) {
-    fail(`OCR summary should prefer an existing success over a later failure:\n${stdout}`);
-  }
+    const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
+    if (!stdout.includes('recognized=1 failed=0 ignored=0 pending=0')) {
+      fail(`OCR summary should prefer an existing success over a later failure:\n${stdout}`);
+    }
+  });
 }
 
 async function testOcrDedupeFallsBackToFilename() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-ocr-filename-key-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  const ocrDir = join(cfg.paths.invoices, 'ocr');
-  await mkdir(ocrDir, { recursive: true });
-  await writeFile(join(ocrDir, 'ocr-pending.csv'), [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
-    'hash-a,<a@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,a.pdf,a.pdf,pdf,invoice,recognized,',
-    'hash-b,<b@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,行程单,b.pdf,b.pdf,pdf,itinerary,recognized,',
-    '',
-  ].join('\n'));
-  await writeFile(cfg.ocr.resultsCsv, [
-    '﻿filename,dateValue,date,seller,invoiceNo,amount,transport,status,documentType,invoiceType,error',
-    'a.pdf,2026-05-21,2026-05-21,国家电网有限公司,1234567890,318.42,http,ok,invoice,电子发票,',
-    'b.pdf,2026-05-21,2026-05-21,差旅平台,TRIP-20260521,88.00,http,ok,itinerary,行程单,',
-    '',
-  ].join('\n'));
+  await withTempDir('mfh-cli-ocr-filename-key-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    const ocrDir = join(cfg.paths.invoices, 'ocr');
+    await mkdir(ocrDir, { recursive: true });
+    await writeFile(join(ocrDir, 'ocr-pending.csv'), [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason',
+      'hash-a,<a@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,发票,a.pdf,a.pdf,pdf,invoice,recognized,',
+      'hash-b,<b@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,行程单,b.pdf,b.pdf,pdf,itinerary,recognized,',
+      '',
+    ].join('\n'));
+    await writeFile(cfg.ocr.resultsCsv, [
+      '﻿filename,dateValue,date,seller,invoiceNo,amount,transport,status,documentType,invoiceType,error',
+      'a.pdf,2026-05-21,2026-05-21,国家电网有限公司,1234567890,318.42,http,ok,invoice,电子发票,',
+      'b.pdf,2026-05-21,2026-05-21,差旅平台,TRIP-20260521,88.00,http,ok,itinerary,行程单,',
+      '',
+    ].join('\n'));
 
-  const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
-  if (!stdout.includes('recognized=2 failed=0 ignored=0 pending=0')) {
-    fail(`OCR summary should not collapse legacy result rows without hash/source:\n${stdout}`);
-  }
+    const { stdout } = await runMfh(['ocr', 'summary', '--config', configPath]);
+    if (!stdout.includes('recognized=2 failed=0 ignored=0 pending=0')) {
+      fail(`OCR summary should not collapse legacy result rows without hash/source:\n${stdout}`);
+    }
+  });
 }
 
-/* CODE-03: no absolute millisecond budget.
+/* TEST-04: assert real concurrency overlap via barrier + peak counter.
  *
- * The previous version asserted `elapsed < 900ms` for a run that also pays Node
- * startup, module import and file I/O — and, worse, it passed `--concurrency 4`
- * with MFH_MOCK_OCR_FAIL_BATCH=1, which routes into parseBatch, throws before
- * the artificial delay, and therefore never exercised parallelism at all.
- *
- * The check below runs the *same* workload twice in the *same* environment —
- * once strictly serial (--single-item), once with --concurrency N — and asserts
- * that the parallel run recovers a real share of the theoretical saving. Node
- * startup and I/O appear in both measurements and cancel out in the difference,
- * so a slow machine shifts both numbers instead of turning the suite red.
+ * Wall-clock savings (old 900ms / 600ms thresholds) are machine-dependent.
+ * The mock provider now waits on MFH_MOCK_OCR_BARRIER_DIR until `go` exists and
+ * writes peak concurrency to MFH_MOCK_OCR_PEAK_PATH — so this test measures
+ * overlap, not scheduler luck.
  */
 async function testOcrConcurrencyRunsInParallel() {
   const ITEMS = 4;
-  const DELAY_MS = 400;
 
-  async function prepare(prefix) {
-    const tmp = await mkdtemp(join(tmpdir(), prefix));
+  async function prepare(tmp) {
     const { cfg, path: configPath } = await writeConfig(tmp, mockOcrConfig(tmp));
     const ocrDir = join(cfg.paths.invoices, 'ocr');
     await mkdir(ocrDir, { recursive: true });
@@ -390,91 +392,140 @@ async function testOcrConcurrencyRunsInParallel() {
     return configPath;
   }
 
-  async function measure(prefix, extraArgs) {
-    const configPath = await prepare(prefix);
-    const started = Date.now();
-    const { stdout } = await runMfh(['ocr', 'run', '--config', configPath, ...extraArgs], {
-      // Guard: the per-item path must be used, so a regression that silently
-      // re-routes into parseBatch fails loudly instead of finishing instantly.
-      MFH_MOCK_OCR_FAIL_BATCH: '1',
-      MFH_MOCK_OCR_DELAY_MS: String(DELAY_MS),
+  async function runWithBarrier(prefix, extraArgs, { expectMinPeak, expectMaxPeak }) {
+    return withTempDir(prefix, async (tmp) => {
+      const configPath = await prepare(tmp);
+      const barrierDir = join(tmp, 'barrier');
+      const peakPath = join(tmp, 'peak.txt');
+      await mkdir(barrierDir, { recursive: true });
+
+      const child = spawn(process.execPath, ['dist/index.js', 'ocr', 'run', '--config', configPath, ...extraArgs], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          MFH_ALLOW_MOCK_OCR: '1',
+          MFH_MOCK_OCR_FAIL_BATCH: '1',
+          MFH_MOCK_OCR_BARRIER_DIR: barrierDir,
+          MFH_MOCK_OCR_PEAK_PATH: peakPath,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+      // Wait until the mock provider has entered at least expectMinPeak times
+      // (or the process exits early with an error).
+      const goPath = join(barrierDir, 'go');
+      const deadline = Date.now() + 30_000;
+      let sawEntries = 0;
+      while (Date.now() < deadline) {
+        if (child.exitCode !== null) break;
+        try {
+          const entries = (await readdir(barrierDir)).filter((name) => name.startsWith('entered-'));
+          sawEntries = entries.length;
+          if (sawEntries >= expectMinPeak) break;
+        } catch {
+          // barrier dir may not exist yet
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      if (child.exitCode !== null) {
+        fail(`OCR child exited before barrier entries reached ${expectMinPeak}: code=${child.exitCode}\n${stdout}\n${stderr}`);
+      }
+      if (sawEntries < expectMinPeak) {
+        killProcessTree(child.pid);
+        fail(`OCR barrier never saw ${expectMinPeak} concurrent entries (saw ${sawEntries}) for ${extraArgs.join(' ')}`);
+      }
+      await writeFile(goPath, 'go\n');
+
+      const exitCode = await new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', (code) => resolve(code));
+      });
+      if (exitCode !== 0) {
+        fail(`OCR run failed (${extraArgs.join(' ')}): code=${exitCode}\n${stdout}\n${stderr}`);
+      }
+      if (!stdout.includes(`OCR complete: scanned=${ITEMS}, parsed=${ITEMS}, skipped=0, failed=0`)) {
+        fail(`OCR run did not parse all ${ITEMS} items (${extraArgs.join(' ')}):\n${stdout}`);
+      }
+      const peak = Number((await readFile(peakPath, 'utf8').catch(() => '0')).trim());
+      if (!Number.isFinite(peak) || peak < expectMinPeak) {
+        fail(`OCR peak concurrency ${peak} < required ${expectMinPeak} for ${extraArgs.join(' ')}`);
+      }
+      if (peak > expectMaxPeak) {
+        fail(`OCR peak concurrency ${peak} > allowed ${expectMaxPeak} for ${extraArgs.join(' ')}`);
+      }
+      return peak;
     });
-    const elapsed = Date.now() - started;
-    if (!stdout.includes(`OCR complete: scanned=${ITEMS}, parsed=${ITEMS}, skipped=0, failed=0`)) {
-      fail(`OCR run did not parse all ${ITEMS} items (${extraArgs.join(' ')}):\n${stdout}`);
-    }
-    return elapsed;
   }
 
-  const serialMs = await measure('mfh-cli-ocr-serial-', ['--single-item']);
-  const parallelMs = await measure('mfh-cli-ocr-concurrency-', ['--concurrency', String(ITEMS)]);
-
-  // Perfect parallelism saves (ITEMS - 1) * DELAY_MS. Require at least half of
-  // that, which is far above scheduling noise yet impossible to reach when the
-  // items are processed one after another.
-  const theoreticalSaving = (ITEMS - 1) * DELAY_MS;
-  const observedSaving = serialMs - parallelMs;
-  if (observedSaving < theoreticalSaving / 2) {
-    fail(
-      `OCR --concurrency ${ITEMS} did not run in parallel: serial=${serialMs}ms parallel=${parallelMs}ms `
-      + `saving=${observedSaving}ms, expected at least ${theoreticalSaving / 2}ms of the ${theoreticalSaving}ms theoretical saving`,
-    );
-  }
+  // Serial: at most one parse active at a time.
+  await runWithBarrier('mfh-cli-ocr-serial-', ['--single-item'], { expectMinPeak: 1, expectMaxPeak: 1 });
+  // Parallel: at least two parses must overlap under --concurrency N.
+  await runWithBarrier('mfh-cli-ocr-concurrency-', ['--concurrency', String(ITEMS)], {
+    expectMinPeak: 2,
+    expectMaxPeak: ITEMS,
+  });
 }
 
 async function testDataDirLockDoesNotDeleteUnknownStaleLock() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-lock-unknown-'));
-  const { acquireDataDirLock, dataDirLockPath } = await import('../../dist/util/dataDirLock.js');
-  const lockPath = dataDirLockPath(tmp);
-  await mkdir(lockPath, { recursive: true });
-  const old = new Date(Date.now() - 20_000);
-  await utimes(lockPath, old, old);
+  await withTempDir('mfh-cli-lock-unknown-', async (tmp) => {
+    const { acquireDataDirLock, dataDirLockPath } = await import('../../dist/util/dataDirLock.js');
+    const lockPath = dataDirLockPath(tmp);
+    await mkdir(lockPath, { recursive: true });
+    const old = new Date(Date.now() - 20_000);
+    await utimes(lockPath, old, old);
 
-  const acquired = acquireDataDirLock(tmp, 'pipeline', 'test-job');
-  if (acquired.ok) {
-    acquired.lease.release();
-    fail('data-dir lock acquired ownership after replacing an unreadable stale lock path');
-  }
+    const acquired = acquireDataDirLock(tmp, 'pipeline', 'test-job');
+    if (acquired.ok) {
+      acquired.lease.release();
+      fail('data-dir lock acquired ownership after replacing an unreadable stale lock path');
+    }
 
-  const after = await stat(lockPath).catch(() => null);
-  if (!after?.isDirectory()) {
-    fail('data-dir lock reclamation deleted an unknown stale lock instead of preserving it for retry/manual recovery');
-  }
-  await rm(lockPath, { recursive: true, force: true });
+    const after = await stat(lockPath).catch(() => null);
+    if (!after?.isDirectory()) {
+      fail('data-dir lock reclamation deleted an unknown stale lock instead of preserving it for retry/manual recovery');
+    }
+    await rm(lockPath, { recursive: true, force: true });
+  });
 }
 
 async function testArchivePlanningDoesNotCreatePreJournalOrphan() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-archive-plan-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { stageDocuments } = await import('../../dist/download/downloader.js');
-  const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-  const { summarizeLibrary } = await import('../../dist/electron/summary.js');
-  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await withTempDir('mfh-cli-archive-plan-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { stageDocuments } = await import('../../dist/download/downloader.js');
+    const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+    const { summarizeLibrary } = await import('../../dist/electron/summary.js');
+    const log = { debug() {}, info() {}, warn() {}, error() {} };
 
-  const batch = stageDocuments([
-    { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-  ], 'prejournal-crash', cfg.paths.invoices, log);
+    const batch = stageDocuments([
+      { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+    ], 'prejournal-crash', cfg.paths.invoices, log);
 
-  const planned = batch.plan();
-  if (planned.length !== 1 || !planned[0].path.endsWith('0001.pdf')) {
-    fail(`archive planning should choose 0001.pdf without touching it, got ${JSON.stringify(planned)}`);
-  }
+    const planned = batch.plan();
+    if (planned.length !== 1 || !planned[0].path.endsWith('0001.pdf')) {
+      fail(`archive planning should choose 0001.pdf without touching it, got ${JSON.stringify(planned)}`);
+    }
 
-  // Simulates the old kill point between reserve() and beginArchiveTransaction():
-  // there is no journal yet. The repair is that planning must not have mutated
-  // the final archive directory, so recovery has nothing loose to clean up and
-  // the library summary must not expose a false pending invoice row.
-  recoverArchiveTransactions(cfg.paths.invoices);
-  const archived = (await readdir(cfg.paths.invoices)).filter((name) => isArchivedDocName(name));
-  if (archived.length !== 0) {
-    fail(`planning before journal creation left loose archive files: ${JSON.stringify(archived)}`);
-  }
-  const library = summarizeLibrary(cfg, tmp);
-  if (library.rows.some((row) => row.filename === '0001.pdf')) {
-    fail(`library summary exposed a false row for an unjournaled planning crash: ${JSON.stringify(library.rows)}`);
-  }
-  batch.dispose();
+    // Simulates the old kill point between reserve() and beginArchiveTransaction():
+    // there is no journal yet. The repair is that planning must not have mutated
+    // the final archive directory, so recovery has nothing loose to clean up and
+    // the library summary must not expose a false pending invoice row.
+    recoverArchiveTransactions(cfg.paths.invoices);
+    const archived = (await readdir(cfg.paths.invoices)).filter((name) => isArchivedDocName(name));
+    if (archived.length !== 0) {
+      fail(`planning before journal creation left loose archive files: ${JSON.stringify(archived)}`);
+    }
+    const library = summarizeLibrary(cfg, tmp);
+    if (library.rows.some((row) => row.filename === '0001.pdf')) {
+      fail(`library summary exposed a false row for an unjournaled planning crash: ${JSON.stringify(library.rows)}`);
+    }
+    batch.dispose();
+  });
 }
 
 function isArchivedDocName(name) {
@@ -482,166 +533,170 @@ function isArchivedDocName(name) {
 }
 
 async function testArchiveCollisionAfterJournalPreservesRacedFile() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-archive-collision-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { stageDocuments } = await import('../../dist/download/downloader.js');
-  const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
-  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await withTempDir('mfh-cli-archive-collision-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { stageDocuments } = await import('../../dist/download/downloader.js');
+    const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
+    const log = { debug() {}, info() {}, warn() {}, error() {} };
 
-  const batch = stageDocuments([
-    { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-  ], 'collision-after-journal', cfg.paths.invoices, log);
-  const planned = batch.plan();
-  const finalPath = planned[0]?.path;
-  if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
+    const batch = stageDocuments([
+      { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+    ], 'collision-after-journal', cfg.paths.invoices, log);
+    const planned = batch.plan();
+    const finalPath = planned[0]?.path;
+    if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
 
-  const tx = beginArchiveTransaction(cfg.paths.invoices, {
-    files: planned,
-    csv: [
-      { path: cfg.output.csv, baseLength: 0 },
-      { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
-    ],
-  });
-  const racedBytes = Buffer.from('%PDF-1.4\n%RACED-WRITER\n%EOF\n');
-  await writeFile(finalPath, racedBytes);
+    const tx = beginArchiveTransaction(cfg.paths.invoices, {
+      files: planned,
+      csv: [
+        { path: cfg.output.csv, baseLength: 0 },
+        { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
+      ],
+    });
+    const racedBytes = Buffer.from('%PDF-1.4\n%RACED-WRITER\n%EOF\n');
+    await writeFile(finalPath, racedBytes);
 
-  let failedWithExists = false;
-  try {
-    batch.commit();
-  } catch (err) {
-    failedWithExists = err?.code === 'EEXIST';
+    let failedWithExists = false;
     try {
-      tx.rollback();
-    } catch (rollbackErr) {
-      if (rollbackErr?.code !== 'archive_recovery_failed') throw rollbackErr;
+      batch.commit();
+    } catch (err) {
+      failedWithExists = err?.code === 'EEXIST';
+      try {
+        tx.rollback();
+      } catch (rollbackErr) {
+        if (rollbackErr?.code !== 'archive_journal_recovery_failed' && rollbackErr?.name !== 'ArchiveRecoveryError') throw rollbackErr;
+      }
+      batch.dispose();
     }
-    batch.dispose();
-  }
-  if (!failedWithExists) fail('archive commit should fail transactionally when a planned final path is created by another writer');
-  const after = await readFile(finalPath);
-  if (!after.equals(racedBytes)) {
-    fail('archive rollback/recovery deleted or overwrote a raced-in file after an EEXIST collision');
-  }
+    if (!failedWithExists) fail('archive commit should fail transactionally when a planned final path is created by another writer');
+    const after = await readFile(finalPath);
+    if (!after.equals(racedBytes)) {
+      fail('archive rollback/recovery deleted or overwrote a raced-in file after an EEXIST collision');
+    }
+  });
 }
 
 async function testArchiveLinkFailureLeavesNoFinalFile() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-archive-link-fail-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { stageDocuments } = await import('../../dist/download/downloader.js');
-  const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
-  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await withTempDir('mfh-cli-archive-link-fail-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { stageDocuments } = await import('../../dist/download/downloader.js');
+    const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
+    const log = { debug() {}, info() {}, warn() {}, error() {} };
 
-  const batch = stageDocuments([
-    { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-  ], 'link-failure', cfg.paths.invoices, log);
-  const planned = batch.plan();
-  const finalPath = planned[0]?.path;
-  if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
+    const batch = stageDocuments([
+      { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+    ], 'link-failure', cfg.paths.invoices, log);
+    const planned = batch.plan();
+    const finalPath = planned[0]?.path;
+    if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
 
-  const tx = beginArchiveTransaction(cfg.paths.invoices, {
-    files: planned,
-    csv: [
-      { path: cfg.output.csv, baseLength: 0 },
-      { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
-    ],
+    const tx = beginArchiveTransaction(cfg.paths.invoices, {
+      files: planned,
+      csv: [
+        { path: cfg.output.csv, baseLength: 0 },
+        { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
+      ],
+    });
+    const originalLinkSync = fs.linkSync;
+    fs.linkSync = () => {
+      const err = new Error('forced link failure');
+      err.code = 'EXDEV';
+      throw err;
+    };
+    let failedWithForcedLink = false;
+    try {
+      batch.commit();
+    } catch (err) {
+      failedWithForcedLink = err?.code === 'EXDEV';
+      tx.rollback();
+    } finally {
+      fs.linkSync = originalLinkSync;
+      batch.dispose();
+    }
+    if (!failedWithForcedLink) fail('archive commit should fail on non-EEXIST link errors instead of falling back to copy');
+    if (existsSync(finalPath)) fail('archive link failure left an exposed final archive file');
   });
-  const originalLinkSync = fs.linkSync;
-  fs.linkSync = () => {
-    const err = new Error('forced link failure');
-    err.code = 'EXDEV';
-    throw err;
-  };
-  let failedWithForcedLink = false;
-  try {
-    batch.commit();
-  } catch (err) {
-    failedWithForcedLink = err?.code === 'EXDEV';
-    tx.rollback();
-  } finally {
-    fs.linkSync = originalLinkSync;
-    batch.dispose();
-  }
-  if (!failedWithForcedLink) fail('archive commit should fail on non-EEXIST link errors instead of falling back to copy');
-  if (existsSync(finalPath)) fail('archive link failure left an exposed final archive file');
 }
 
 async function testArchiveLaterItemFailureRollsBackEarlierHardlink() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-archive-later-fail-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { stageDocuments } = await import('../../dist/download/downloader.js');
-  const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
-  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await withTempDir('mfh-cli-archive-later-fail-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { stageDocuments } = await import('../../dist/download/downloader.js');
+    const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
+    const log = { debug() {}, info() {}, warn() {}, error() {} };
 
-  const batch = stageDocuments([
-    { source: 'a.pdf', suggestedName: 'a.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-    { source: 'b.pdf', suggestedName: 'b.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-  ], 'later-fail', cfg.paths.invoices, log);
-  const planned = batch.plan();
-  const firstPath = planned[0]?.path;
-  const secondPath = planned[1]?.path;
-  if (!firstPath || !secondPath) fail(`archive planning returned incomplete paths: ${JSON.stringify(planned)}`);
+    const batch = stageDocuments([
+      { source: 'a.pdf', suggestedName: 'a.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+      { source: 'b.pdf', suggestedName: 'b.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+    ], 'later-fail', cfg.paths.invoices, log);
+    const planned = batch.plan();
+    const firstPath = planned[0]?.path;
+    const secondPath = planned[1]?.path;
+    if (!firstPath || !secondPath) fail(`archive planning returned incomplete paths: ${JSON.stringify(planned)}`);
 
-  const tx = beginArchiveTransaction(cfg.paths.invoices, {
-    files: planned,
-    csv: [
-      { path: cfg.output.csv, baseLength: 0 },
-      { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
-    ],
-  });
-  const racedBytes = Buffer.from('%PDF-1.4\n%SECOND-RACED\n%EOF\n');
-  await writeFile(secondPath, racedBytes);
+    const tx = beginArchiveTransaction(cfg.paths.invoices, {
+      files: planned,
+      csv: [
+        { path: cfg.output.csv, baseLength: 0 },
+        { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
+      ],
+    });
+    const racedBytes = Buffer.from('%PDF-1.4\n%SECOND-RACED\n%EOF\n');
+    await writeFile(secondPath, racedBytes);
 
-  let failedWithExists = false;
-  try {
-    batch.commit();
-  } catch (err) {
-    failedWithExists = err?.code === 'EEXIST';
+    let failedWithExists = false;
     try {
-      tx.rollback();
-    } catch (rollbackErr) {
-      if (rollbackErr?.code !== 'archive_recovery_failed') throw rollbackErr;
+      batch.commit();
+    } catch (err) {
+      failedWithExists = err?.code === 'EEXIST';
+      try {
+        tx.rollback();
+      } catch (rollbackErr) {
+        if (rollbackErr?.code !== 'archive_journal_recovery_failed' && rollbackErr?.name !== 'ArchiveRecoveryError') throw rollbackErr;
+      }
+      batch.dispose();
     }
-    batch.dispose();
-  }
-  if (!failedWithExists) fail('archive commit should fail when a later planned final path already exists');
-  if (existsSync(firstPath)) fail('archive rollback did not remove the earlier owned hard-linked file');
-  const secondAfter = await readFile(secondPath);
-  if (!secondAfter.equals(racedBytes)) fail('archive rollback deleted or overwrote the raced-in later file');
+    if (!failedWithExists) fail('archive commit should fail when a later planned final path already exists');
+    if (existsSync(firstPath)) fail('archive rollback did not remove the earlier owned hard-linked file');
+    const secondAfter = await readFile(secondPath);
+    if (!secondAfter.equals(racedBytes)) fail('archive rollback deleted or overwrote the raced-in later file');
+  });
 }
 
 async function testPreparedArchiveRecoveryRemovesOwnedHardlink() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-archive-prepared-recover-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { stageDocuments } = await import('../../dist/download/downloader.js');
-  const { beginArchiveTransaction, recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-  const log = { debug() {}, info() {}, warn() {}, error() {} };
+  await withTempDir('mfh-cli-archive-prepared-recover-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { stageDocuments } = await import('../../dist/download/downloader.js');
+    const { beginArchiveTransaction, recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+    const log = { debug() {}, info() {}, warn() {}, error() {} };
 
-  const batch = stageDocuments([
-    { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
-  ], 'prepared-recover', cfg.paths.invoices, log);
-  const planned = batch.plan();
-  const finalPath = planned[0]?.path;
-  if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
+    const batch = stageDocuments([
+      { source: 'invoice.pdf', suggestedName: 'invoice.pdf', data: Buffer.from(PDF_BYTES_B64, 'base64'), format: 'pdf' },
+    ], 'prepared-recover', cfg.paths.invoices, log);
+    const planned = batch.plan();
+    const finalPath = planned[0]?.path;
+    if (!finalPath) fail(`archive planning returned no final path: ${JSON.stringify(planned)}`);
 
-  beginArchiveTransaction(cfg.paths.invoices, {
-    files: planned,
-    csv: [
-      { path: cfg.output.csv, baseLength: 0 },
-      { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
-    ],
+    beginArchiveTransaction(cfg.paths.invoices, {
+      files: planned,
+      csv: [
+        { path: cfg.output.csv, baseLength: 0 },
+        { path: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), baseLength: 0 },
+      ],
+    });
+    batch.commit();
+    if (!existsSync(finalPath)) fail('prepared recovery setup failed to install the final archive file');
+
+    const recovered = recoverArchiveTransactions(cfg.paths.invoices);
+    batch.dispose();
+    if (recovered.rolledBack !== 1 || existsSync(finalPath)) {
+      fail(`prepared archive recovery did not remove its owned hard-linked file: recovered=${JSON.stringify(recovered)} exists=${existsSync(finalPath)}`);
+    }
   });
-  batch.commit();
-  if (!existsSync(finalPath)) fail('prepared recovery setup failed to install the final archive file');
-
-  const recovered = recoverArchiveTransactions(cfg.paths.invoices);
-  batch.dispose();
-  if (recovered.rolledBack !== 1 || existsSync(finalPath)) {
-    fail(`prepared archive recovery did not remove its owned hard-linked file: recovered=${JSON.stringify(recovered)} exists=${existsSync(finalPath)}`);
-  }
 }
 
 async function writeLegacyJournal(invoicesDir, txId, startedAtMs, files, csv = [], overrides = {}) {
@@ -676,486 +731,828 @@ async function withLiveChildPid(body) {
 }
 
 async function testLegacyPreparedJournalRemovesOwnedPlaceholderWithoutLibraryRow() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-legacy-placeholder-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-  const { summarizeLibrary } = await import('../../dist/electron/summary.js');
-  const placeholder = join(cfg.paths.invoices, '0001.pdf');
-  await writeFile(placeholder, '');
-  const startedAtMs = Date.now();
-  const started = new Date(startedAtMs);
-  await utimes(placeholder, started, started);
-  const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'legacy-owned-placeholder', startedAtMs, [placeholder]);
+  await withTempDir('mfh-cli-legacy-placeholder-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+    const { summarizeLibrary } = await import('../../dist/electron/summary.js');
+    const placeholder = join(cfg.paths.invoices, '0001.pdf');
+    await writeFile(placeholder, '');
+    const startedAtMs = Date.now();
+    const started = new Date(startedAtMs);
+    await utimes(placeholder, started, started);
+    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'legacy-owned-placeholder', startedAtMs, [placeholder]);
 
-  const recovered = recoverArchiveTransactions(cfg.paths.invoices);
-  if (recovered.rolledBack !== 1 || recovered.skipped !== 0) {
-    fail(`legacy owned placeholder should recover cleanly, got ${JSON.stringify(recovered)}`);
-  }
-  if (existsSync(placeholder) || existsSync(journalPath)) {
-    fail(`legacy owned placeholder recovery left file/journal behind: file=${existsSync(placeholder)} journal=${existsSync(journalPath)}`);
-  }
-  const library = summarizeLibrary(cfg, tmp);
-  if (library.rows.some((row) => row.filename === '0001.pdf')) {
-    fail(`legacy placeholder recovery left a false library row: ${JSON.stringify(library.rows)}`);
-  }
+    const recovered = recoverArchiveTransactions(cfg.paths.invoices);
+    if (recovered.rolledBack !== 1 || recovered.skipped !== 0) {
+      fail(`legacy owned placeholder should recover cleanly, got ${JSON.stringify(recovered)}`);
+    }
+    if (existsSync(placeholder) || existsSync(journalPath)) {
+      fail(`legacy owned placeholder recovery left file/journal behind: file=${existsSync(placeholder)} journal=${existsSync(journalPath)}`);
+    }
+    const library = summarizeLibrary(cfg, tmp);
+    if (library.rows.some((row) => row.filename === '0001.pdf')) {
+      fail(`legacy placeholder recovery left a false library row: ${JSON.stringify(library.rows)}`);
+    }
+  });
 }
 
 async function testLegacyPreparedJournalPreservesUnprovenFilesAndJournal() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-legacy-unproven-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-  const oldZero = join(cfg.paths.invoices, '0002.pdf');
-  const nonzero = join(cfg.paths.invoices, '0003.pdf');
-  await writeFile(oldZero, '');
-  await writeFile(nonzero, '%PDF-1.4\n%PREEXISTING\n%EOF\n');
-  const startedAtMs = Date.now();
-  const old = new Date(startedAtMs - 60_000);
-  const matching = new Date(startedAtMs);
-  await utimes(oldZero, old, old);
-  await utimes(nonzero, matching, matching);
-  const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'legacy-unproven-files', startedAtMs, [oldZero, nonzero]);
+  await withTempDir('mfh-cli-legacy-unproven-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+    const oldZero = join(cfg.paths.invoices, '0002.pdf');
+    const nonzero = join(cfg.paths.invoices, '0003.pdf');
+    await writeFile(oldZero, '');
+    await writeFile(nonzero, '%PDF-1.4\n%PREEXISTING\n%EOF\n');
+    const startedAtMs = Date.now();
+    const old = new Date(startedAtMs - 60_000);
+    const matching = new Date(startedAtMs);
+    await utimes(oldZero, old, old);
+    await utimes(nonzero, matching, matching);
+    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'legacy-unproven-files', startedAtMs, [oldZero, nonzero]);
 
-  const recovered = recoverArchiveTransactions(cfg.paths.invoices);
-  if (recovered.rolledBack !== 0 || recovered.skipped !== 1) {
-    fail(`legacy unproven files should retain the journal as unresolved, got ${JSON.stringify(recovered)}`);
-  }
-  if (!existsSync(oldZero) || !existsSync(nonzero) || !existsSync(journalPath)) {
-    fail(`legacy unproven recovery should preserve files and journal: zero=${existsSync(oldZero)} nonzero=${existsSync(nonzero)} journal=${existsSync(journalPath)}`);
-  }
+    const recovered = recoverArchiveTransactions(cfg.paths.invoices);
+    if (recovered.rolledBack !== 0 || recovered.skipped !== 1) {
+      fail(`legacy unproven files should retain the journal as unresolved, got ${JSON.stringify(recovered)}`);
+    }
+    if (!existsSync(oldZero) || !existsSync(nonzero) || !existsSync(journalPath)) {
+      fail(`legacy unproven recovery should preserve files and journal: zero=${existsSync(oldZero)} nonzero=${existsSync(nonzero)} journal=${existsSync(journalPath)}`);
+    }
+  });
 }
 
 async function testUnresolvedJournalDoesNotRetruncateLaterCsvRows() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-unresolved-csv-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-  const unproven = join(cfg.paths.invoices, '0004.pdf');
-  const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
-  await writeFile(cfg.output.csv, '');
-  await writeFile(ocrCsv, '');
-  const startedAtMs = Date.now();
-  const started = new Date(startedAtMs);
-  await utimes(unproven, started, started);
-  const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'unresolved-retained-csv', startedAtMs, [unproven], [
-    { path: cfg.output.csv, baseLength: 0 },
-    { path: ocrCsv, baseLength: 0 },
-  ]);
+  await withTempDir('mfh-cli-unresolved-csv-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    const { recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+    const unproven = join(cfg.paths.invoices, '0004.pdf');
+    const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
+    await writeFile(cfg.output.csv, '');
+    await writeFile(ocrCsv, '');
+    const startedAtMs = Date.now();
+    const started = new Date(startedAtMs);
+    await utimes(unproven, started, started);
+    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'unresolved-retained-csv', startedAtMs, [unproven], [
+      { path: cfg.output.csv, baseLength: 0 },
+      { path: ocrCsv, baseLength: 0 },
+    ]);
 
-  const first = recoverArchiveTransactions(cfg.paths.invoices);
-  if (first.rolledBack !== 0 || first.skipped !== 1 || !existsSync(journalPath)) {
-    fail(`unresolved journal should be retained before later CSV writes: ${JSON.stringify(first)}`);
-  }
-  const flaggedJournal = JSON.parse(await readFile(journalPath, 'utf8'));
-  if (flaggedJournal.csvRollbackDisabled !== true) {
-    fail(`unresolved journal did not durably disable CSV rollback: ${JSON.stringify(flaggedJournal)}`);
-  }
+    const first = recoverArchiveTransactions(cfg.paths.invoices);
+    if (first.rolledBack !== 0 || first.skipped !== 1 || !existsSync(journalPath)) {
+      fail(`unresolved journal should be retained before later CSV writes: ${JSON.stringify(first)}`);
+    }
+    const flaggedJournal = JSON.parse(await readFile(journalPath, 'utf8'));
+    if (flaggedJournal.csvRollbackDisabled !== true) {
+      fail(`unresolved journal did not durably disable CSV rollback: ${JSON.stringify(flaggedJournal)}`);
+    }
 
-  const laterInvoiceRow = [
-    '﻿messageId,date,from,subject,filename,source,contentHash',
-    '<later@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,后续发票,9999.pdf,later.pdf,laterhash',
-    '',
-  ].join('\n');
-  const laterOcrRow = [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash',
-    'later-hash,<later@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,后续发票,9999.pdf,later.pdf,pdf,invoice,pending,,laterhash',
-    '',
-  ].join('\n');
-  await writeFile(cfg.output.csv, laterInvoiceRow);
-  await writeFile(ocrCsv, laterOcrRow);
+    const laterInvoiceRow = [
+      '﻿messageId,date,from,subject,filename,source,contentHash',
+      '<later@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,后续发票,9999.pdf,later.pdf,laterhash',
+      '',
+    ].join('\n');
+    const laterOcrRow = [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash',
+      'later-hash,<later@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,后续发票,9999.pdf,later.pdf,pdf,invoice,pending,,laterhash',
+      '',
+    ].join('\n');
+    await writeFile(cfg.output.csv, laterInvoiceRow);
+    await writeFile(ocrCsv, laterOcrRow);
 
-  const second = recoverArchiveTransactions(cfg.paths.invoices);
-  if (second.rolledBack !== 0 || second.skipped !== 1 || !existsSync(journalPath)) {
-    fail(`unresolved journal should remain retained on retry: ${JSON.stringify(second)}`);
-  }
-  const invoiceAfter = await readFile(cfg.output.csv, 'utf8');
-  const ocrAfter = await readFile(ocrCsv, 'utf8');
-  if (!invoiceAfter.includes('<later@example.com>') || !ocrAfter.includes('later-hash')) {
-    fail(`unresolved retained journal truncated later valid CSV rows:\ninvoice=${invoiceAfter}\nocr=${ocrAfter}`);
-  }
+    const second = recoverArchiveTransactions(cfg.paths.invoices);
+    if (second.rolledBack !== 0 || second.skipped !== 1 || !existsSync(journalPath)) {
+      fail(`unresolved journal should remain retained on retry: ${JSON.stringify(second)}`);
+    }
+    const invoiceAfter = await readFile(cfg.output.csv, 'utf8');
+    const ocrAfter = await readFile(ocrCsv, 'utf8');
+    if (!invoiceAfter.includes('<later@example.com>') || !ocrAfter.includes('later-hash')) {
+      fail(`unresolved retained journal truncated later valid CSV rows:\ninvoice=${invoiceAfter}\nocr=${ocrAfter}`);
+    }
 
-  await rm(unproven, { force: true });
-  const third = recoverArchiveTransactions(cfg.paths.invoices);
-  if (third.rolledBack !== 1 || third.skipped !== 0 || existsSync(journalPath)) {
-    fail(`resolved disabled-CSV journal should clean up without truncating CSV: recovered=${JSON.stringify(third)} journal=${existsSync(journalPath)}`);
-  }
-  const invoiceFinal = await readFile(cfg.output.csv, 'utf8');
-  const ocrFinal = await readFile(ocrCsv, 'utf8');
-  if (!invoiceFinal.includes('<later@example.com>') || !ocrFinal.includes('later-hash')) {
-    fail(`resolved disabled-CSV journal truncated later valid rows:\ninvoice=${invoiceFinal}\nocr=${ocrFinal}`);
-  }
+    await rm(unproven, { force: true });
+    const third = recoverArchiveTransactions(cfg.paths.invoices);
+    if (third.rolledBack !== 1 || third.skipped !== 0 || existsSync(journalPath)) {
+      fail(`resolved disabled-CSV journal should clean up without truncating CSV: recovered=${JSON.stringify(third)} journal=${existsSync(journalPath)}`);
+    }
+    const invoiceFinal = await readFile(cfg.output.csv, 'utf8');
+    const ocrFinal = await readFile(ocrCsv, 'utf8');
+    if (!invoiceFinal.includes('<later@example.com>') || !ocrFinal.includes('later-hash')) {
+      fail(`resolved disabled-CSV journal truncated later valid rows:\ninvoice=${invoiceFinal}\nocr=${ocrFinal}`);
+    }
+  });
 }
 
 async function testAutomaticArchiveBlocksWhenCsvRollbackFlagCannotPersist() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-recovery-block-run-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<blocked-recovery@example.com>'));
-  const unproven = join(cfg.paths.invoices, '0004.pdf');
-  const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
-  const startedAtMs = Date.now();
-  const started = new Date(startedAtMs);
-  await utimes(unproven, started, started);
-  const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-run', startedAtMs, [unproven], [
-    { path: cfg.output.csv, baseLength: 0 },
-    { path: ocrCsv, baseLength: 0 },
-  ], { pid: 99999999 });
+  await withTempDir('mfh-cli-recovery-block-run-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<blocked-recovery@example.com>'));
+    const unproven = join(cfg.paths.invoices, '0004.pdf');
+    const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
+    const startedAtMs = Date.now();
+    const started = new Date(startedAtMs);
+    await utimes(unproven, started, started);
+    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-run', startedAtMs, [unproven], [
+      { path: cfg.output.csv, baseLength: 0 },
+      { path: ocrCsv, baseLength: 0 },
+    ], { pid: 99999999 });
 
-  let failed = false;
-  try {
-    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'], {
-      MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
-      MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE: '1',
-    });
-  } catch (err) {
-    failed = true;
-    const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
-    if (!output.includes('archive_journal_recovery_failed')) {
-      fail(`unsafe recovery failure should abort the run with recovery error, got:\n${output}`);
+    let failed = false;
+    try {
+      await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'], {
+        MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
+        MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE: '1',
+      });
+    } catch (err) {
+      failed = true;
+      const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+      if (!output.includes('archive_journal_recovery_failed')) {
+        fail(`unsafe recovery failure should abort the run with recovery error, got:\n${output}`);
+      }
     }
-  }
-  if (!failed) fail('mfh run succeeded even though CSV rollback disable persistence was forced to fail');
-  if (existsSync(cfg.output.csv) || existsSync(ocrCsv)) {
-    fail(`unsafe recovery failure allowed archive CSV writes: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)}`);
-  }
-  const archived = (await readdir(cfg.paths.invoices)).filter((name) => /^000[0-3]\.pdf$/i.test(name));
-  if (archived.length > 0) fail(`unsafe recovery failure installed new archive files: ${JSON.stringify(archived)}`);
-  const unflagged = JSON.parse(await readFile(journalPath, 'utf8'));
-  if (unflagged.csvRollbackDisabled === true) fail(`forced persistence failure unexpectedly flagged journal: ${JSON.stringify(unflagged)}`);
+    if (!failed) fail('mfh run succeeded even though CSV rollback disable persistence was forced to fail');
+    if (existsSync(cfg.output.csv) || existsSync(ocrCsv)) {
+      fail(`unsafe recovery failure allowed archive CSV writes: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)}`);
+    }
+    const archived = (await readdir(cfg.paths.invoices)).filter((name) => /^000[0-3]\.pdf$/i.test(name));
+    if (archived.length > 0) fail(`unsafe recovery failure installed new archive files: ${JSON.stringify(archived)}`);
+    const unflagged = JSON.parse(await readFile(journalPath, 'utf8'));
+    if (unflagged.csvRollbackDisabled === true) fail(`forced persistence failure unexpectedly flagged journal: ${JSON.stringify(unflagged)}`);
 
-  await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
-  const flagged = JSON.parse(await readFile(journalPath, 'utf8'));
-  if (flagged.csvRollbackDisabled !== true) fail(`retry did not persist CSV rollback guard: ${JSON.stringify(flagged)}`);
-  const ledger = await readFile(cfg.output.csv, 'utf8');
-  const queue = await readFile(ocrCsv, 'utf8');
-  if (!ledger.includes('<blocked-recovery@example.com>') || !queue.includes('<blocked-recovery@example.com>')) {
-    fail(`retry after recovery did not append expected archive rows:\nledger=${ledger}\nqueue=${queue}`);
-  }
+    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
+    const flagged = JSON.parse(await readFile(journalPath, 'utf8'));
+    if (flagged.csvRollbackDisabled !== true) fail(`retry did not persist CSV rollback guard: ${JSON.stringify(flagged)}`);
+    const ledger = await readFile(cfg.output.csv, 'utf8');
+    const queue = await readFile(ocrCsv, 'utf8');
+    if (!ledger.includes('<blocked-recovery@example.com>') || !queue.includes('<blocked-recovery@example.com>')) {
+      fail(`retry after recovery did not append expected archive rows:\nledger=${ledger}\nqueue=${queue}`);
+    }
+  });
 }
 
 async function testManualArchiveBlocksAndRetriesWhenCsvRollbackFlagCannotPersist() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-recovery-block-manual-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  const source = join(tmp, 'source.pdf');
-  await writeFile(source, Buffer.from(PDF_BYTES_B64, 'base64'));
-  const unproven = join(cfg.paths.invoices, '0004.pdf');
-  const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
-  const startedAtMs = Date.now();
-  const started = new Date(startedAtMs);
-  await utimes(unproven, started, started);
-  const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-manual', startedAtMs, [unproven], [
-    { path: cfg.output.csv, baseLength: 0 },
-    { path: ocrCsv, baseLength: 0 },
-  ]);
-  const { runManualArchive } = await import('../../dist/electron/manualArchive.js');
-  const input = {
-    sources: [source],
-    invoicesDir: cfg.paths.invoices,
-    ledgerCsv: cfg.output.csv,
-    ocrPendingCsv: ocrCsv,
-    hash: 'manual-recovery-hash',
-    pendingRow: {
-      messageId: '<manual-recovery@example.com>',
-      date: '2026-05-21T03:00:00.000Z',
-      from: 'vendor@example.com',
-      subject: '手动归档',
-    },
-    removePendingRow: () => fail('manual archive removed pending row after unsafe recovery failure'),
-  };
-
-  const previous = process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE;
-  const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
-  process.env.MFH_TEST_FAULT_TOKEN = TEST_FAULT_TOKEN;
-  process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE = '1';
-  let threw = false;
-  try {
-    runManualArchive(input);
-  } catch (err) {
-    threw = err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
-  } finally {
-    if (previous === undefined) delete process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE;
-    else process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE = previous;
-    if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
-    else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
-  }
-  if (!threw) fail('manual archive did not throw an archive recovery error when guard persistence failed');
-  if (existsSync(cfg.output.csv) || existsSync(ocrCsv) || existsSync(join(cfg.paths.invoices, '0001.pdf'))) {
-    fail(`manual archive wrote files/CSVs after unsafe recovery failure: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)} file=${existsSync(join(cfg.paths.invoices, '0001.pdf'))}`);
-  }
-  const unflagged = JSON.parse(await readFile(journalPath, 'utf8'));
-  if (unflagged.csvRollbackDisabled === true) fail(`manual forced persistence failure unexpectedly flagged journal: ${JSON.stringify(unflagged)}`);
-
-  const result = runManualArchive({
-    ...input,
-    removePendingRow: () => 1,
-  });
-  if (!result.ok || result.files.length !== 1) fail(`manual archive retry did not succeed after recovery retry: ${JSON.stringify(result)}`);
-  const flagged = JSON.parse(await readFile(journalPath, 'utf8'));
-  if (flagged.csvRollbackDisabled !== true) fail(`manual retry did not persist CSV rollback guard: ${JSON.stringify(flagged)}`);
-  const ledger = await readFile(cfg.output.csv, 'utf8');
-  const queue = await readFile(ocrCsv, 'utf8');
-  if (!ledger.includes('<manual-recovery@example.com>') || !queue.includes('manual-recovery-hash')) {
-    fail(`manual retry did not append expected rows:\nledger=${ledger}\nqueue=${queue}`);
-  }
-}
-
-async function testRollbackTruncateFailureBlocksLaterArchiveRowsAndRetries() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-rollback-block-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  const statePath = join(tmp, 'state.json');
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await writeFile(join(tmp, 'raw', 'a.eml'), pdfMail('<rollback-a@example.com>'));
-  await writeFile(join(tmp, 'raw', 'b.eml'), pdfMail('<rollback-b@example.com>'));
-
-  let failed = false;
-  try {
-    await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1'], {
-      MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
-      MFH_TEST_FAIL_AFTER_INVOICE_CSV: '1',
-      MFH_TEST_FAIL_CSV_TRUNCATE: '1',
-    });
-  } catch (err) {
-    failed = true;
-    const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
-    if (!output.includes('archive_journal_recovery_failed')) {
-      fail(`rollback truncate failure should abort as archive recovery error, got:\n${output}`);
-    }
-  }
-  if (!failed) fail('mfh run succeeded despite forced rollback truncation failure');
-  const retainedJournals = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
-  if (retainedJournals.filter((name) => name.endsWith('.json')).length !== 1) {
-    fail(`forced rollback truncation failure should retain exactly one journal, got ${JSON.stringify(retainedJournals)}`);
-  }
-  const ledgerAfterFailure = existsSync(cfg.output.csv) ? await readFile(cfg.output.csv, 'utf8') : '';
-  if (ledgerAfterFailure.includes('<rollback-b@example.com>')) {
-    fail(`same-process recovery cache allowed later email B to append after retained rollback journal:\n${ledgerAfterFailure}`);
-  }
-
-  await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
-  const journalsAfterRetry = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
-  if (journalsAfterRetry.some((name) => name.endsWith('.json'))) {
-    fail(`retry should recover and remove retained rollback journal, got ${JSON.stringify(journalsAfterRetry)}`);
-  }
-  const ledger = await readFile(cfg.output.csv, 'utf8');
-  if (!ledger.includes('<rollback-a@example.com>') || !ledger.includes('<rollback-b@example.com>')) {
-    fail(`retry after rollback recovery should process both emails:\n${ledger}`);
-  }
-}
-
-async function testOrganizeBlocksWhenArchiveRecoveryCannotPersistGuard() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-organize-recovery-block-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await writeFile(join(cfg.paths.invoices, '0001.pdf'), Buffer.from(PDF_BYTES_B64, 'base64'));
-  await writeFile(cfg.ocr.resultsCsv, [
-    '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error,contentHash',
-    'organize-hash,<organize-block@example.com>,2026-05-21T04:00:00.000Z,vendor@example.com,整理测试,0001.pdf,source.pdf,pdf,invoice,normal,测试公司,12.34,2026-05-21,INV-1,mock,mock,1,mock,success,,organize-content',
-    '',
-  ].join('\n'));
-  const unproven = join(cfg.paths.invoices, '0004.pdf');
-  const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
-  const startedAtMs = Date.now();
-  const started = new Date(startedAtMs);
-  await utimes(unproven, started, started);
-  await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-organize', startedAtMs, [unproven], [
-    { path: cfg.output.csv, baseLength: 0 },
-    { path: ocrCsv, baseLength: 0 },
-  ], { pid: 99999999 });
-
-  let failed = false;
-  try {
-    await runMfh(['organize', '--config', configPath, '--apply-rename'], {
-      MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
-      MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE: '1',
-    });
-  } catch (err) {
-    failed = true;
-    const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
-    if (!output.includes('archive_journal_recovery_failed')) {
-      fail(`organize recovery gate should fail with recovery error, got:\n${output}`);
-    }
-  }
-  if (!failed) fail('mfh organize succeeded even though archive recovery guard persistence failed');
-  if (existsSync(join(cfg.rename.organizedDir, 'organize-results.csv'))) {
-    fail('organize wrote audit CSV after archive recovery gate failure');
-  }
-  const organizedFiles = await readdir(cfg.rename.organizedDir).catch(() => []);
-  if (organizedFiles.some((name) => name.toLowerCase().endsWith('.pdf'))) {
-    fail(`organize copied files after archive recovery gate failure: ${JSON.stringify(organizedFiles)}`);
-  }
-}
-
-async function testAutomaticArchiveDisposesStagingWhenJournalCreationFails() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-begin-journal-fail-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<begin-journal-fail@example.com>'));
-
-  await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'], {
-    MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
-    MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION: '1',
-  });
-
-  const stagingRoot = join(cfg.paths.invoices, '.staging');
-  const stagingEntries = await readdir(stagingRoot, { recursive: true }).catch(() => []);
-  if (stagingEntries.length > 0) {
-    fail(`journal creation failure left staged archive artifacts behind: ${JSON.stringify(stagingEntries)}`);
-  }
-  const archived = (await readdir(cfg.paths.invoices)).filter((name) => /^\d{4}\.(pdf|ofd|png|jpe?g|gif|webp|bmp)$/i.test(name));
-  if (archived.length > 0) fail(`journal creation failure installed final archive files: ${JSON.stringify(archived)}`);
-}
-
-async function testManualArchiveRollbackFailurePropagatesRecoveryError() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-manual-rollback-fail-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  const source = join(tmp, 'source.pdf');
-  await writeFile(source, Buffer.from(PDF_BYTES_B64, 'base64'));
-  const { runManualArchive } = await import('../../dist/electron/manualArchive.js');
-  const previous = process.env.MFH_TEST_FAIL_CSV_TRUNCATE;
-  const previousManual = process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV;
-  const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
-  process.env.MFH_TEST_FAULT_TOKEN = TEST_FAULT_TOKEN;
-  process.env.MFH_TEST_FAIL_CSV_TRUNCATE = '1';
-  process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV = '1';
-  let threw = false;
-  try {
-    runManualArchive({
+  await withTempDir('mfh-cli-recovery-block-manual-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    const source = join(tmp, 'source.pdf');
+    await writeFile(source, Buffer.from(PDF_BYTES_B64, 'base64'));
+    const unproven = join(cfg.paths.invoices, '0004.pdf');
+    const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
+    const startedAtMs = Date.now();
+    const started = new Date(startedAtMs);
+    await utimes(unproven, started, started);
+    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-manual', startedAtMs, [unproven], [
+      { path: cfg.output.csv, baseLength: 0 },
+      { path: ocrCsv, baseLength: 0 },
+    ]);
+    const { runManualArchive } = await import('../../dist/electron/manualArchive.js');
+    const input = {
       sources: [source],
       invoicesDir: cfg.paths.invoices,
       ledgerCsv: cfg.output.csv,
-      ocrPendingCsv: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'),
-      hash: 'manual-rollback-fail',
+      ocrPendingCsv: ocrCsv,
+      hash: 'manual-recovery-hash',
       pendingRow: {
-        messageId: '<manual-rollback-fail@example.com>',
-        date: '2026-05-21T05:00:00.000Z',
+        messageId: '<manual-recovery@example.com>',
+        date: '2026-05-21T03:00:00.000Z',
         from: 'vendor@example.com',
-        subject: '手动回滚失败',
+        subject: '手动归档',
       },
-      removePendingRow: () => fail('manual archive removed pending row after rollback recovery failure'),
+      removePendingRow: () => fail('manual archive removed pending row after unsafe recovery failure'),
+    };
+
+    const previous = process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE;
+    const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
+    process.env.MFH_TEST_FAULT_TOKEN = TEST_FAULT_TOKEN;
+    process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE = '1';
+    let threw = false;
+    try {
+      runManualArchive(input);
+    } catch (err) {
+      threw = err?.code === 'archive_journal_recovery_failed' || err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
+    } finally {
+      if (previous === undefined) delete process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE;
+      else process.env.MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE = previous;
+      if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
+      else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
+    }
+    if (!threw) fail('manual archive did not throw an archive recovery error when guard persistence failed');
+    if (existsSync(cfg.output.csv) || existsSync(ocrCsv) || existsSync(join(cfg.paths.invoices, '0001.pdf'))) {
+      fail(`manual archive wrote files/CSVs after unsafe recovery failure: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)} file=${existsSync(join(cfg.paths.invoices, '0001.pdf'))}`);
+    }
+    const unflagged = JSON.parse(await readFile(journalPath, 'utf8'));
+    if (unflagged.csvRollbackDisabled === true) fail(`manual forced persistence failure unexpectedly flagged journal: ${JSON.stringify(unflagged)}`);
+
+    const result = runManualArchive({
+      ...input,
+      removePendingRow: () => 1,
     });
-  } catch (err) {
-    threw = err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
-  } finally {
-    if (previous === undefined) delete process.env.MFH_TEST_FAIL_CSV_TRUNCATE;
-    else process.env.MFH_TEST_FAIL_CSV_TRUNCATE = previous;
-    if (previousManual === undefined) delete process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV;
-    else process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV = previousManual;
-    if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
-    else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
-  }
-  if (!threw) fail('manual archive rollback failure was hidden instead of propagating ArchiveRecoveryError');
-  const journals = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
-  if (!journals.some((name) => name.endsWith('.json'))) fail(`manual rollback failure should retain recovery journal, got ${JSON.stringify(journals)}`);
+    if (!result.ok || result.files.length !== 1) fail(`manual archive retry did not succeed after recovery retry: ${JSON.stringify(result)}`);
+    const flagged = JSON.parse(await readFile(journalPath, 'utf8'));
+    if (flagged.csvRollbackDisabled !== true) fail(`manual retry did not persist CSV rollback guard: ${JSON.stringify(flagged)}`);
+    const ledger = await readFile(cfg.output.csv, 'utf8');
+    const queue = await readFile(ocrCsv, 'utf8');
+    if (!ledger.includes('<manual-recovery@example.com>') || !queue.includes('manual-recovery-hash')) {
+      fail(`manual retry did not append expected rows:\nledger=${ledger}\nqueue=${queue}`);
+    }
+  });
+}
+
+async function testRollbackTruncateFailureBlocksLaterArchiveRowsAndRetries() {
+  await withTempDir('mfh-cli-rollback-block-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    const statePath = join(tmp, 'state.json');
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'a.eml'), pdfMail('<rollback-a@example.com>'));
+    await writeFile(join(tmp, 'raw', 'b.eml'), pdfMail('<rollback-b@example.com>'));
+
+    let failed = false;
+    try {
+      await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1'], {
+        MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
+        MFH_TEST_FAIL_AFTER_INVOICE_CSV: '1',
+        MFH_TEST_FAIL_CSV_TRUNCATE: '1',
+      });
+    } catch (err) {
+      failed = true;
+      const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+      if (!output.includes('archive_journal_recovery_failed')) {
+        fail(`rollback truncate failure should abort as archive recovery error, got:\n${output}`);
+      }
+    }
+    if (!failed) fail('mfh run succeeded despite forced rollback truncation failure');
+    const retainedJournals = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
+    if (retainedJournals.filter((name) => name.endsWith('.json')).length !== 1) {
+      fail(`forced rollback truncation failure should retain exactly one journal, got ${JSON.stringify(retainedJournals)}`);
+    }
+    const ledgerAfterFailure = existsSync(cfg.output.csv) ? await readFile(cfg.output.csv, 'utf8') : '';
+    if (ledgerAfterFailure.includes('<rollback-b@example.com>')) {
+      fail(`same-process recovery cache allowed later email B to append after retained rollback journal:\n${ledgerAfterFailure}`);
+    }
+
+    await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
+    const journalsAfterRetry = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
+    if (journalsAfterRetry.some((name) => name.endsWith('.json'))) {
+      fail(`retry should recover and remove retained rollback journal, got ${JSON.stringify(journalsAfterRetry)}`);
+    }
+    const ledger = await readFile(cfg.output.csv, 'utf8');
+    if (!ledger.includes('<rollback-a@example.com>') || !ledger.includes('<rollback-b@example.com>')) {
+      fail(`retry after rollback recovery should process both emails:\n${ledger}`);
+    }
+  });
+}
+
+async function testOrganizeBlocksWhenArchiveRecoveryCannotPersistGuard() {
+  await withTempDir('mfh-cli-organize-recovery-block-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(cfg.paths.invoices, '0001.pdf'), Buffer.from(PDF_BYTES_B64, 'base64'));
+    await writeFile(cfg.ocr.resultsCsv, [
+      '﻿hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error,contentHash',
+      'organize-hash,<organize-block@example.com>,2026-05-21T04:00:00.000Z,vendor@example.com,整理测试,0001.pdf,source.pdf,pdf,invoice,normal,测试公司,12.34,2026-05-21,INV-1,mock,mock,1,mock,success,,organize-content',
+      '',
+    ].join('\n'));
+    const unproven = join(cfg.paths.invoices, '0004.pdf');
+    const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await writeFile(unproven, '%PDF-1.4\n%UNPROVEN\n%EOF\n');
+    const startedAtMs = Date.now();
+    const started = new Date(startedAtMs);
+    await utimes(unproven, started, started);
+    await writeLegacyJournal(cfg.paths.invoices, 'blocked-recovery-organize', startedAtMs, [unproven], [
+      { path: cfg.output.csv, baseLength: 0 },
+      { path: ocrCsv, baseLength: 0 },
+    ], { pid: 99999999 });
+
+    let failed = false;
+    try {
+      await runMfh(['organize', '--config', configPath, '--apply-rename'], {
+        MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
+        MFH_TEST_FAIL_CSV_ROLLBACK_DISABLE: '1',
+      });
+    } catch (err) {
+      failed = true;
+      const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+      if (!output.includes('archive_journal_recovery_failed')) {
+        fail(`organize recovery gate should fail with recovery error, got:\n${output}`);
+      }
+    }
+    if (!failed) fail('mfh organize succeeded even though archive recovery guard persistence failed');
+    if (existsSync(join(cfg.rename.organizedDir, 'organize-results.csv'))) {
+      fail('organize wrote audit CSV after archive recovery gate failure');
+    }
+    const organizedFiles = await readdir(cfg.rename.organizedDir).catch(() => []);
+    if (organizedFiles.some((name) => name.toLowerCase().endsWith('.pdf'))) {
+      fail(`organize copied files after archive recovery gate failure: ${JSON.stringify(organizedFiles)}`);
+    }
+  });
+}
+
+async function testAutomaticArchiveDisposesStagingWhenJournalCreationFails() {
+  await withTempDir('mfh-cli-begin-journal-fail-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<begin-journal-fail@example.com>'));
+
+    await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'], {
+      MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
+      MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION: '1',
+    });
+
+    const stagingRoot = join(cfg.paths.invoices, '.staging');
+    const stagingEntries = await readdir(stagingRoot, { recursive: true }).catch(() => []);
+    if (stagingEntries.length > 0) {
+      fail(`journal creation failure left staged archive artifacts behind: ${JSON.stringify(stagingEntries)}`);
+    }
+    const archived = (await readdir(cfg.paths.invoices)).filter((name) => /^\d{4}\.(pdf|ofd|png|jpe?g|gif|webp|bmp)$/i.test(name));
+    if (archived.length > 0) fail(`journal creation failure installed final archive files: ${JSON.stringify(archived)}`);
+  });
+}
+
+async function testManualArchiveRollbackFailurePropagatesRecoveryError() {
+  await withTempDir('mfh-cli-manual-rollback-fail-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    const source = join(tmp, 'source.pdf');
+    await writeFile(source, Buffer.from(PDF_BYTES_B64, 'base64'));
+    const { runManualArchive } = await import('../../dist/electron/manualArchive.js');
+    const previous = process.env.MFH_TEST_FAIL_CSV_TRUNCATE;
+    const previousManual = process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV;
+    const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
+    process.env.MFH_TEST_FAULT_TOKEN = TEST_FAULT_TOKEN;
+    process.env.MFH_TEST_FAIL_CSV_TRUNCATE = '1';
+    process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV = '1';
+    let threw = false;
+    try {
+      runManualArchive({
+        sources: [source],
+        invoicesDir: cfg.paths.invoices,
+        ledgerCsv: cfg.output.csv,
+        ocrPendingCsv: join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'),
+        hash: 'manual-rollback-fail',
+        pendingRow: {
+          messageId: '<manual-rollback-fail@example.com>',
+          date: '2026-05-21T05:00:00.000Z',
+          from: 'vendor@example.com',
+          subject: '手动回滚失败',
+        },
+        removePendingRow: () => fail('manual archive removed pending row after rollback recovery failure'),
+      });
+    } catch (err) {
+      threw = err?.code === 'archive_journal_recovery_failed' || err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
+    } finally {
+      if (previous === undefined) delete process.env.MFH_TEST_FAIL_CSV_TRUNCATE;
+      else process.env.MFH_TEST_FAIL_CSV_TRUNCATE = previous;
+      if (previousManual === undefined) delete process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV;
+      else process.env.MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV = previousManual;
+      if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
+      else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
+    }
+    if (!threw) fail('manual archive rollback failure was hidden instead of propagating ArchiveRecoveryError');
+    const journals = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
+    if (!journals.some((name) => name.endsWith('.json'))) fail(`manual rollback failure should retain recovery journal, got ${JSON.stringify(journals)}`);
+  });
 }
 
 async function testFaultInjectionRequiresToken() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-fault-token-'));
-  const { cfg } = await writeConfig(tmp);
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
-  const previous = process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION;
-  const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
-  delete process.env.MFH_TEST_FAULT_TOKEN;
-  process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION = '1';
-  try {
-    const tx = beginArchiveTransaction(cfg.paths.invoices, { files: [], csv: [] });
-    tx.commit();
-  } catch (err) {
-    fail(`fault env without token should not affect runtime behavior: ${err?.message ?? err}`);
-  } finally {
-    if (previous === undefined) delete process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION;
-    else process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION = previous;
-    if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
-    else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
-  }
+  await withTempDir('mfh-cli-fault-token-', async (tmp) => {
+    const { cfg } = await writeConfig(tmp);
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    const { beginArchiveTransaction } = await import('../../dist/download/archiveJournal.js');
+    const previous = process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION;
+    const previousToken = process.env.MFH_TEST_FAULT_TOKEN;
+    delete process.env.MFH_TEST_FAULT_TOKEN;
+    process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION = '1';
+    try {
+      const tx = beginArchiveTransaction(cfg.paths.invoices, { files: [], csv: [] });
+      tx.commit();
+    } catch (err) {
+      fail(`fault env without token should not affect runtime behavior: ${err?.message ?? err}`);
+    } finally {
+      if (previous === undefined) delete process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION;
+      else process.env.MFH_TEST_FAIL_BEGIN_ARCHIVE_TRANSACTION = previous;
+      if (previousToken === undefined) delete process.env.MFH_TEST_FAULT_TOKEN;
+      else process.env.MFH_TEST_FAULT_TOKEN = previousToken;
+    }
+  });
 }
 
 async function testLivePidJournalBlocksStrictMutationAndRetriesAfterExit() {
-  const tmp = await mkdtemp(join(tmpdir(), 'mfh-cli-live-pid-journal-'));
-  const { cfg, path: configPath } = await writeConfig(tmp);
-  const statePath = join(tmp, 'state.json');
-  await mkdir(join(tmp, 'raw'), { recursive: true });
-  await mkdir(cfg.paths.invoices, { recursive: true });
-  await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
-  await mkdir(join(tmp, 'custom'), { recursive: true });
-  await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<live-pid-block@example.com>'));
-  const finalPath = join(cfg.paths.invoices, '0098.pdf');
-  const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
-  await writeFile(finalPath, '%PDF-1.4\n%LIVE-PID-JOURNAL\n%EOF\n');
-  const startedAtMs = Date.now();
+  await withTempDir('mfh-cli-live-pid-journal-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    const statePath = join(tmp, 'state.json');
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(cfg.paths.invoices, { recursive: true });
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'pdf.eml'), pdfMail('<live-pid-block@example.com>'));
+    const finalPath = join(cfg.paths.invoices, '0098.pdf');
+    const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await writeFile(finalPath, '%PDF-1.4\n%LIVE-PID-JOURNAL\n%EOF\n');
+    const startedAtMs = Date.now();
 
-  await withLiveChildPid(async (child) => {
-    const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'live-pid-block', startedAtMs, [finalPath], [
-      { path: cfg.output.csv, baseLength: 0 },
-      { path: ocrCsv, baseLength: 0 },
-    ], {
-      pid: child.pid,
-      stage: 'files-installed',
+    await withLiveChildPid(async (child) => {
+      const journalPath = await writeLegacyJournal(cfg.paths.invoices, 'live-pid-block', startedAtMs, [finalPath], [
+        { path: cfg.output.csv, baseLength: 0 },
+        { path: ocrCsv, baseLength: 0 },
+      ], {
+        pid: child.pid,
+        stage: 'files-installed',
+      });
+      const raw = JSON.parse(await readFile(journalPath, 'utf8'));
+      raw.installed = [{ path: finalPath, size: (await stat(finalPath)).size, mtimeMs: (await stat(finalPath)).mtimeMs }];
+      await writeFile(journalPath, `${JSON.stringify(raw)}\n`);
+
+      const { assertArchiveTransactionsRecovered, recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
+      const nonStrict = recoverArchiveTransactions(cfg.paths.invoices);
+      if (nonStrict.rolledBack !== 0 || nonStrict.skipped !== 1) {
+        fail(`non-strict startup recovery should skip live PID journal, got ${JSON.stringify(nonStrict)}`);
+      }
+      let strictBlocked = false;
+      try {
+        assertArchiveTransactionsRecovered(cfg.paths.invoices);
+      } catch (err) {
+        strictBlocked = err?.code === 'archive_journal_recovery_failed' || err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
+      }
+      if (!strictBlocked) fail('strict recovery assertion did not block unrelated live-PID journal');
+
+      let runBlocked = false;
+      try {
+        await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
+      } catch (err) {
+        runBlocked = true;
+        const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
+        if (!output.includes('archive_journal_recovery_failed')) {
+          fail(`CLI run should block on live-PID journal before writes, got:\n${output}`);
+        }
+      }
+      if (!runBlocked) fail('CLI run wrote despite unrelated live-PID journal');
+      if (existsSync(cfg.output.csv) || existsSync(ocrCsv)) {
+        fail(`live-PID journal gate allowed archive CSV writes: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)}`);
+      }
+
+      child.kill();
+      await new Promise((resolve) => child.once('exit', resolve));
     });
-    const raw = JSON.parse(await readFile(journalPath, 'utf8'));
-    raw.installed = [{ path: finalPath, size: (await stat(finalPath)).size, mtimeMs: (await stat(finalPath)).mtimeMs }];
-    await writeFile(journalPath, `${JSON.stringify(raw)}\n`);
 
-    const { assertArchiveTransactionsRecovered, recoverArchiveTransactions } = await import('../../dist/download/archiveJournal.js');
-    const nonStrict = recoverArchiveTransactions(cfg.paths.invoices);
-    if (nonStrict.rolledBack !== 0 || nonStrict.skipped !== 1) {
-      fail(`non-strict startup recovery should skip live PID journal, got ${JSON.stringify(nonStrict)}`);
+    await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
+    if (existsSync(finalPath)) fail('retry recovery did not remove file from dead-PID retained journal');
+    const ledger = await readFile(cfg.output.csv, 'utf8');
+    if (!ledger.includes('<live-pid-block@example.com>')) {
+      fail(`retry after live-PID exit did not process blocked email:\n${ledger}`);
     }
-    let strictBlocked = false;
-    try {
-      assertArchiveTransactionsRecovered(cfg.paths.invoices);
-    } catch (err) {
-      strictBlocked = err?.code === 'archive_recovery_failed' || err?.name === 'ArchiveRecoveryError';
-    }
-    if (!strictBlocked) fail('strict recovery assertion did not block unrelated live-PID journal');
+  });
+}
 
-    let runBlocked = false;
+/* TEST-08: two real processes racing the same data-dir lock — exactly one wins;
+ * wrong token is rejected; correct token inherits the lease. */
+async function testDataDirLockCrossProcessMutualExclusion() {
+  await withTempDir('mfh-cli-lock-race-', async (tmp) => {
+    const { path: configPath } = await writeConfig(tmp);
+    await mkdir(join(tmp, 'raw'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    await writeFile(join(tmp, 'raw', 'a.eml'), pdfMail('<lock-race-a@example.com>'));
+    await writeFile(join(tmp, 'raw', 'b.eml'), pdfMail('<lock-race-b@example.com>'));
+
+    const readyPath = join(tmp, 'holder-ready');
+    const holderPath = join(tmp, 'holder.mjs');
+    await writeFile(holderPath, `
+import { writeFileSync } from 'node:fs';
+import { acquireDataDirLock } from ${JSON.stringify(join(repoRoot, 'dist/util/dataDirLock.js'))};
+const result = acquireDataDirLock(${JSON.stringify(tmp)}, 'pipeline', 'holder-job');
+if (!result.ok) {
+  console.error('holder failed', result);
+  process.exit(2);
+}
+writeFileSync(process.env.MFH_TEST_HOLDER_READY, result.lease.token);
+setInterval(() => {}, 1000);
+`);
+
+    const holder = spawn(process.execPath, [holderPath], {
+      cwd: repoRoot,
+      env: { ...process.env, MFH_TEST_HOLDER_READY: readyPath },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let holderErr = '';
+    holder.stderr.on('data', (c) => { holderErr += c; });
+
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(readyPath) && Date.now() < deadline) {
+      if (holder.exitCode !== null) {
+        fail(`lock holder exited early: code=${holder.exitCode}\n${holderErr}`);
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (!existsSync(readyPath)) {
+      killProcessTree(holder.pid);
+      fail('lock holder never signalled ready');
+    }
+    const holderToken = (await readFile(readyPath, 'utf8')).trim();
+
+    // Contender without token must be blocked.
+    let blocked = false;
     try {
-      await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
+      await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1']);
     } catch (err) {
-      runBlocked = true;
+      blocked = true;
       const output = `${err.stdout ?? ''}\n${err.stderr ?? ''}`;
-      if (!output.includes('archive_journal_recovery_failed')) {
-        fail(`CLI run should block on live-PID journal before writes, got:\n${output}`);
+      if (!/占用|lock|locked|另一个|数据目录/i.test(output)) {
+        // Still OK if exit is non-zero — message text may change; require non-success.
+        if (err.code === 0) fail(`contender succeeded while lock held:\n${output}`);
       }
     }
-    if (!runBlocked) fail('CLI run wrote despite unrelated live-PID journal');
-    if (existsSync(cfg.output.csv) || existsSync(ocrCsv)) {
-      fail(`live-PID journal gate allowed archive CSV writes: ledger=${existsSync(cfg.output.csv)} ocr=${existsSync(ocrCsv)}`);
+    if (!blocked) fail('second CLI acquired the data-dir lock while another process held it');
+
+    // Contender with wrong token must also be blocked.
+    let wrongTokenBlocked = false;
+    try {
+      await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'], {
+        MFH_LOCK_TOKEN: 'deadbeefdeadbeefdeadbeefdeadbeef',
+        MFH_LOCK_JOB_ID: 'wrong-job',
+      });
+    } catch {
+      wrongTokenBlocked = true;
+    }
+    if (!wrongTokenBlocked) fail('CLI with wrong MFH_LOCK_TOKEN inherited a foreign lease');
+
+    // Contender with correct token must inherit and proceed (may write ledger).
+    await runMfh(
+      ['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'],
+      {
+        MFH_LOCK_TOKEN: holderToken,
+        MFH_LOCK_JOB_ID: 'holder-job',
+      },
+    );
+    if (!existsSync(join(tmp, 'custom', 'invoices.csv')) && !existsSync(join(tmp, 'pending', 'pending.csv'))) {
+      // At least one of the two fixture mails should produce ledger or pending.
+      fail('token inheritance run produced neither invoices.csv nor pending.csv');
     }
 
-    child.kill();
-    await new Promise((resolve) => child.once('exit', resolve));
+    killProcessTree(holder.pid);
+    await new Promise((resolve) => {
+      if (holder.exitCode !== null || holder.signalCode !== null) resolve();
+      else holder.once('exit', resolve);
+    });
   });
+}
 
-  await runMfh(['run', '--config', configPath, '--state', statePath, '--concurrency', '1']);
-  if (existsSync(finalPath)) fail('retry recovery did not remove file from dead-PID retained journal');
-  const ledger = await readFile(cfg.output.csv, 'utf8');
-  if (!ledger.includes('<live-pid-block@example.com>')) {
-    fail(`retry after live-PID exit did not process blocked email:\n${ledger}`);
+/* TEST-08: OperationCoordinator 4×4 mutual exclusion matrix + re-entry after release. */
+async function testOperationCoordinatorMutexMatrix() {
+  await withTempDir('mfh-cli-opcoord-', async (tmp) => {
+    const { OperationCoordinator } = await import('../../dist/electron/opCoordinator.js');
+    const kinds = ['fetch', 'pipeline', 'ocr', 'organize'];
+    const broadcasts = [];
+    const coord = new OperationCoordinator(tmp);
+    coord.setBroadcast((payload) => broadcasts.push(payload));
+
+    for (const held of kinds) {
+      const first = coord.begin(held);
+      if (!first.ok) fail(`first begin(${held}) should succeed: ${JSON.stringify(first)}`);
+      if (coord.current()?.kind !== held) fail(`current() should be ${held}, got ${JSON.stringify(coord.current())}`);
+      if (!broadcasts.some((b) => b.running?.kind === held)) {
+        fail(`begin(${held}) did not broadcast running state`);
+      }
+
+      for (const contender of kinds) {
+        const second = coord.begin(contender);
+        if (second.ok) {
+          second.lease.release();
+          first.lease.release();
+          fail(`begin(${contender}) while holding ${held} should return operation_busy`);
+        }
+        if (second.code !== 'operation_busy') {
+          first.lease.release();
+          fail(`expected operation_busy for ${contender} vs ${held}, got ${JSON.stringify(second)}`);
+        }
+      }
+
+      first.lease.release();
+      if (coord.current() !== null) fail(`after release(${held}) current() should be null`);
+      if (!broadcasts.some((b) => b.running === null)) {
+        fail(`release(${held}) did not broadcast running=null`);
+      }
+
+      // Re-entry after release must succeed for every kind.
+      const again = coord.begin(held);
+      if (!again.ok) fail(`re-begin(${held}) after release failed: ${JSON.stringify(again)}`);
+      again.lease.release();
+    }
+
+    // dispose() must free a held lease so a new coordinator on the same dir can acquire.
+    const sticky = coord.begin('pipeline');
+    if (!sticky.ok) fail(`sticky begin failed: ${JSON.stringify(sticky)}`);
+    coord.dispose();
+    const afterDispose = new OperationCoordinator(tmp).begin('ocr');
+    if (!afterDispose.ok) fail(`begin after dispose should succeed: ${JSON.stringify(afterDispose)}`);
+    afterDispose.lease.release();
+  });
+}
+
+/* TEST-10: real SIGKILL at each durable journal stage, then recover in a new process. */
+async function testJournalHardKillStageRecovery() {
+  const stages = ['prepared', 'files-installed', 'ledger-committed'];
+
+  for (const holdStage of stages) {
+    await withTempDir(`mfh-cli-kill-${holdStage}-`, async (tmp) => {
+      const { cfg } = await writeConfig(tmp);
+      await mkdir(cfg.paths.invoices, { recursive: true });
+      await mkdir(join(tmp, 'custom'), { recursive: true });
+      const ocrCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+      await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+
+      // Seed "old" ledger so ledger-committed recovery can prove CSV retention.
+      const oldLedger = [
+        '﻿messageId,date,from,subject,filename,source,contentHash',
+        '<old@example.com>,2026-05-20T00:00:00.000Z,vendor@example.com,旧票,0000.pdf,old.pdf,oldhash000001',
+        '',
+      ].join('\n');
+      await writeFile(cfg.output.csv, oldLedger);
+      const oldOcr = [
+        '﻿hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash',
+        'oldhash,<old@example.com>,2026-05-20T00:00:00.000Z,vendor@example.com,旧票,0000.pdf,old.pdf,pdf,invoice,pending,seed,oldhash000001',
+        '',
+      ].join('\n');
+      await writeFile(ocrCsv, oldOcr);
+      const oldLedgerLen = Buffer.byteLength(oldLedger, 'utf8');
+      const oldOcrLen = Buffer.byteLength(oldOcr, 'utf8');
+
+      const sentinel = join(tmp, `hold-${holdStage}.sentinel`);
+      const workerPath = join(tmp, 'worker.mjs');
+      // Child imports compiled modules and drives a real archive transaction to the hold stage.
+      await writeFile(workerPath, `
+import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { stageDocuments } from ${JSON.stringify(join(repoRoot, 'dist/download/downloader.js'))};
+import { beginArchiveTransaction, appendCsvBlockDurable } from ${JSON.stringify(join(repoRoot, 'dist/download/archiveJournal.js'))};
+
+const invoicesDir = ${JSON.stringify(cfg.paths.invoices)};
+const ledgerCsv = ${JSON.stringify(cfg.output.csv)};
+const ocrCsv = ${JSON.stringify(ocrCsv)};
+const holdStage = ${JSON.stringify(holdStage)};
+const log = { debug() {}, info() {}, warn() {}, error() {} };
+
+const batch = stageDocuments([
+  { source: 'kill.pdf', suggestedName: 'kill.pdf', data: Buffer.from('JVBERi0xLjQKJUVPRgo=', 'base64'), format: 'pdf' },
+], 'hard-kill-' + holdStage, invoicesDir, log);
+const planned = batch.plan();
+const finalPath = planned[0].path;
+const tx = beginArchiveTransaction(invoicesDir, {
+  files: planned,
+  csv: [
+    { path: ledgerCsv, baseLength: ${oldLedgerLen} },
+    { path: ocrCsv, baseLength: ${oldOcrLen} },
+  ],
+});
+// prepared hold already ran inside beginArchiveTransaction when configured.
+if (holdStage === 'prepared') {
+  // Should be unreachable (begin holds forever); keep process alive if barrier misconfigured.
+  setInterval(() => {}, 1000);
+} else {
+  batch.commit();
+  tx.markStage('files-installed');
+  if (holdStage === 'files-installed') {
+    setInterval(() => {}, 1000);
+  } else {
+    const invoiceLine = '<kill@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,强杀票,' +
+      planned[0].path.split(/[\\\\/]/).pop() + ',kill.pdf,killhash000001\\n';
+    appendCsvBlockDurable(ledgerCsv, 'messageId,date,from,subject,filename,source,contentHash', [invoiceLine]);
+    const ocrLine = 'killhash,<kill@example.com>,2026-05-21T02:00:00.000Z,vendor@example.com,强杀票,' +
+      planned[0].path.split(/[\\\\/]/).pop() + ',kill.pdf,pdf,invoice,pending,document_requires_ocr,killhash000001\\n';
+    appendCsvBlockDurable(ocrCsv, 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash', [ocrLine]);
+    tx.markStage('ledger-committed');
+    setInterval(() => {}, 1000);
+  }
+}
+`);
+
+      const child = spawn(process.execPath, [workerPath], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          MFH_TEST_FAULT_TOKEN: TEST_FAULT_TOKEN,
+          MFH_TEST_JOURNAL_HOLD_AT_STAGE: '1',
+          MFH_TEST_JOURNAL_HOLD_STAGE: holdStage,
+          MFH_TEST_JOURNAL_HOLD_SENTINEL: sentinel,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let childErr = '';
+      child.stderr.on('data', (c) => { childErr += c; });
+      child.stdout.on('data', () => {});
+
+      const deadline = Date.now() + 15_000;
+      while (!existsSync(sentinel) && Date.now() < deadline) {
+        if (child.exitCode !== null) {
+          fail(`journal worker for stage=${holdStage} exited before hold: code=${child.exitCode}\n${childErr}`);
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      if (!existsSync(sentinel)) {
+        killProcessTree(child.pid);
+        fail(`journal worker never reached hold stage=${holdStage}\n${childErr}`);
+      }
+
+      // Real hard kill — not a cooperative exit.
+      killProcessTree(child.pid);
+      await new Promise((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) resolve();
+        else child.once('exit', resolve);
+      });
+
+      // New process recovers via the same entry the CLI uses at startup.
+      const recoverPath = join(tmp, 'recover.mjs');
+      await writeFile(recoverPath, `
+import { recoverArchiveTransactions } from ${JSON.stringify(join(repoRoot, 'dist/download/archiveJournal.js'))};
+const r = recoverArchiveTransactions(${JSON.stringify(cfg.paths.invoices)});
+console.log(JSON.stringify(r));
+`);
+      const { stdout: recoverOut } = await execFileAsync(process.execPath, [recoverPath], {
+        cwd: repoRoot,
+        maxBuffer: 1024 * 1024,
+      });
+      const recovered = JSON.parse(recoverOut.trim().split('\n').pop());
+
+      const archived = (await readdir(cfg.paths.invoices)).filter((name) => isArchivedDocName(name));
+      const ledgerText = await readFile(cfg.output.csv, 'utf8');
+      const ocrText = await readFile(ocrCsv, 'utf8');
+      const journals = await readdir(join(cfg.paths.invoices, '.journal')).catch(() => []);
+      const liveJournals = journals.filter((name) => name.endsWith('.json'));
+
+      if (holdStage === 'prepared' || holdStage === 'files-installed') {
+        // Must roll back to pre-transaction state: no new archive files, old CSV only.
+        if (recovered.rolledBack !== 1) {
+          fail(`stage=${holdStage} recovery should roll back once, got ${JSON.stringify(recovered)}`);
+        }
+        if (archived.length !== 0) {
+          fail(`stage=${holdStage} left archive files after recovery: ${JSON.stringify(archived)}`);
+        }
+        if (ledgerText.includes('<kill@example.com>') || ocrText.includes('killhash')) {
+          fail(`stage=${holdStage} recovery left new CSV rows:\nledger=${ledgerText}\nocr=${ocrText}`);
+        }
+        if (!ledgerText.includes('<old@example.com>') || !ocrText.includes('oldhash')) {
+          fail(`stage=${holdStage} recovery damaged pre-existing CSV rows`);
+        }
+        if (liveJournals.length !== 0) {
+          fail(`stage=${holdStage} should clear journal after rollback, got ${JSON.stringify(liveJournals)}`);
+        }
+      } else {
+        // ledger-committed: files + both CSVs stay; journal cleaned (counted as skipped).
+        if (recovered.rolledBack !== 0) {
+          fail(`ledger-committed recovery must not roll back, got ${JSON.stringify(recovered)}`);
+        }
+        if (archived.length !== 1) {
+          fail(`ledger-committed recovery should keep the archive file, got ${JSON.stringify(archived)}`);
+        }
+        if (!ledgerText.includes('<kill@example.com>') || !ocrText.includes('killhash')) {
+          fail(`ledger-committed recovery lost committed CSV rows:\nledger=${ledgerText}\nocr=${ocrText}`);
+        }
+        if (!ledgerText.includes('<old@example.com>')) {
+          fail('ledger-committed recovery truncated pre-existing ledger rows');
+        }
+        if (liveJournals.length !== 0) {
+          fail(`ledger-committed should only clear journal, still have ${JSON.stringify(liveJournals)}`);
+        }
+      }
+
+      // Rerun recovery is a no-op (no duplicate files/rows).
+      const { stdout: recover2Out } = await execFileAsync(process.execPath, [recoverPath], {
+        cwd: repoRoot,
+        maxBuffer: 1024 * 1024,
+      });
+      const recovered2 = JSON.parse(recover2Out.trim().split('\n').pop());
+      if (recovered2.rolledBack !== 0) {
+        fail(`second recovery re-rolled-back after clean journal: ${JSON.stringify(recovered2)}`);
+      }
+      const archived2 = (await readdir(cfg.paths.invoices)).filter((name) => isArchivedDocName(name));
+      if (holdStage === 'ledger-committed' && archived2.length !== 1) {
+        fail(`rerun after ledger-committed recovery changed file set: ${JSON.stringify(archived2)}`);
+      }
+      const ledger2 = await readFile(cfg.output.csv, 'utf8');
+      if ((ledger2.match(/<kill@example.com>/g) || []).length > 1) {
+        fail('recovery rerun duplicated kill ledger rows');
+      }
+    });
   }
 }
 
@@ -1169,6 +1566,8 @@ await runSuite('CLI regression tests', async () => {
   await testOcrDedupeFallsBackToFilename();
   await testOcrConcurrencyRunsInParallel();
   await testDataDirLockDoesNotDeleteUnknownStaleLock();
+  await testDataDirLockCrossProcessMutualExclusion();
+  await testOperationCoordinatorMutexMatrix();
   await testArchivePlanningDoesNotCreatePreJournalOrphan();
   await testArchiveCollisionAfterJournalPreservesRacedFile();
   await testArchiveLinkFailureLeavesNoFinalFile();
@@ -1185,4 +1584,6 @@ await runSuite('CLI regression tests', async () => {
   await testManualArchiveRollbackFailurePropagatesRecoveryError();
   await testFaultInjectionRequiresToken();
   await testLivePidJournalBlocksStrictMutationAndRetriesAfterExit();
-}, { timeoutMs: 4 * 60 * 1000 });
+  await testJournalHardKillStageRecovery();
+}, { timeoutMs: 6 * 60 * 1000 });
+

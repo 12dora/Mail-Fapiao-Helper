@@ -85,6 +85,17 @@ const notarized = platform === 'mac' && signed && notarizeConfigured;
 // away, the stable channel still cannot emit an unsigned binary.
 // ---------------------------------------------------------------------------
 if (channel === 'stable') {
+  // HYG-04: fail-closed — stable channel must never ship a prerelease package version.
+  const pkgVersion = String(pkg.version || '');
+  if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(pkgVersion)) {
+    console.error(
+      `\n[build-release] refusing STABLE build for prerelease package version "${pkgVersion}".\n` +
+        'Stable releases require package.json version MAJOR.MINOR.PATCH with no suffix.\n' +
+        'Use --channel development (or the unsigned-prerelease workflow) for prerelease tags.\n',
+    );
+    process.exit(1);
+  }
+
   const missing = [];
   if (!signed) {
     missing.push(
