@@ -445,7 +445,15 @@ async function main() {
     await expectText(page, '待确认', '.sidebar');
     // COPY-03: credentials may only read as "saved", never as verified, until a
     // real connection test succeeds.
-    await expectText(page, '已保存 · user@test.local', '.sidebar');
+    // UI-03: the visible label is deliberately short so the full address cannot
+    // squeeze the clock and theme button; the address moved to `title`. Assert
+    // both halves so shortening the label cannot silently drop the address.
+    await expectText(page, '已保存', '.sidebar');
+    await expectNoText(page, '已连接', '.sidebar');
+    const mailStatusTitle = await page.locator('.sidebar [data-mail-status-label]').first().getAttribute('title');
+    if (!mailStatusTitle || !mailStatusTitle.includes('已保存 · user@test.local')) {
+      fail(`侧栏邮箱状态的 title 应包含完整地址，实际为 ${JSON.stringify(mailStatusTitle)}`);
+    }
     // COPY-07B: the version pill must come from getAppInfo, not hardcoded HTML.
     await expectText(page, 'v9.8.7', '.sidebar');
 
@@ -457,10 +465,11 @@ async function main() {
     await expectText(page, '获取邮件实时日志');
     await expectText(page, '最多显示最近 6 条记录');
     await expectText(page, '已获取邮件');
-    await expectText(page, '选择日期范围后，点击“开始获取邮件”才会运行');
+    await expectText(page, '选择日期范围后，点击「获取邮件」才会运行');
 
     const dashboardOrder = await page.evaluate((sel) => Array.from(document.querySelectorAll(`${sel} .page h3`)).map((el) => el.textContent.trim()), ACTIVE_MAIN);
-    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次抓取邮件清单', '最近运行'];
+    // COPY-16 统一了「抓取/获取」用语：本次抓取邮件清单 -> 本次获取的邮件。
+    const expectedOrder = ['第一步：获取邮件', '获取邮件实时日志', '第二步：获取发票文件', '获取发票文件实时日志', '第三步：识别发票文件（可选）', '识别发票文件实时日志', '本次获取的邮件', '最近运行'];
     for (let i = 0; i < expectedOrder.length; i++) {
       if (dashboardOrder[i] !== expectedOrder[i]) fail(`开始处理页区块顺序错误：${JSON.stringify(dashboardOrder)}`);
     }
@@ -522,7 +531,7 @@ async function main() {
 
     /* ---------- Fetch ------------------------------------------------------ */
     // P0-6: 默认勾选状态下 startFetch payload 应带 matchSubject/matchBody=true 且 dryRun=false
-    await page.getByRole('button', { name: '开始获取邮件' }).click();
+    await page.getByRole('button', { name: '获取邮件' }).click();
     await waitForText(page, '完成', `${ACTIVE_MAIN} #run-status`);
     const startFetchPayload = await page.evaluate(() => window.__bridgeCalls.find((item) => item.name === 'startFetch')?.payload);
     if (!startFetchPayload || startFetchPayload.matchSubject !== true || startFetchPayload.matchBody !== true || startFetchPayload.dryRun !== false) {
@@ -539,7 +548,7 @@ async function main() {
 
     // P0-6: 勾选「只预览，不保存」后 dryRun 必须为 true，且不得污染「本次抓取」
     await activeMain(page, '[data-fetch-check="dryRun"]').check();
-    await page.getByRole('button', { name: '开始获取邮件' }).click();
+    await page.getByRole('button', { name: '获取邮件' }).click();
     await waitForText(page, '完成', `${ACTIVE_MAIN} #run-status`);
     const dryRunPayload = await page.evaluate(() => window.__bridgeCalls.filter((item) => item.name === 'startFetch').at(-1)?.payload);
     if (!dryRunPayload || dryRunPayload.dryRun !== true) {
@@ -591,7 +600,7 @@ async function main() {
     await page.waitForURL(`${baseUrl}/pages/dashboard.html`);
 
     /* ---------- Pipeline --------------------------------------------------- */
-    await page.getByRole('button', { name: '开始获取发票文件' }).click();
+    await page.getByRole('button', { name: '获取发票文件' }).click();
     await waitForText(page, '获取完成：处理 2 封，跳过 0 封，失败 0 封。', `${ACTIVE_MAIN} [data-file-log]`);
     await dismissToasts(page);
     await activeMain(page, '[data-action="open-invoices-folder"]').first().click();
@@ -625,7 +634,7 @@ async function main() {
     /* ---------- OCR -------------------------------------------------------- */
     await activeMain(page, '[data-action="rename-organize"]').first().click();
     await dismissToasts(page);
-    await page.getByRole('button', { name: '开始识别发票文件' }).click();
+    await page.getByRole('button', { name: '开始识别' }).click();
     await waitForText(page, '识别完成：成功 2 个，跳过 1 个，失败 0 个。', `${ACTIVE_MAIN} [data-ocr-log]`);
     await dismissToasts(page);
     const ocrProgress = await activeMain(page, '[data-ocr-bar]').evaluate((el) => getComputedStyle(el).getPropertyValue('--p').trim());
@@ -633,7 +642,7 @@ async function main() {
     // FB-01: the terminal state must also reach assistive technology.
     await waitForText(page, '识别完成', '#mfh-live-status');
 
-    await page.getByRole('button', { name: '查看将要执行的操作' }).click();
+    await page.getByRole('button', { name: '操作预览' }).click();
     await dismissToasts(page);
     const dashboardCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));
     for (const expected of ['startFetch', 'runPipeline', 'openPath', 'organize', 'runOcr']) {
@@ -651,7 +660,12 @@ async function main() {
     if (preservedFileProgress !== '100%') fail(`页面切换后获取发票进度不应丢失，实际为 ${preservedFileProgress}`);
     await page.getByRole('link', { name: /待确认/ }).click();
     await page.waitForURL(`${baseUrl}/pages/pending.html`);
-    await expectText(page, '这些邮件大多是历史链接过期');
+    /* COPY-12: the banner must no longer assert a cause it cannot know (the old
+       copy claimed "这些邮件大多是历史链接过期" unconditionally). It now states
+       only what is true — these need confirmation — and the per-card reason
+       carries the actual cause. */
+    await expectText(page, '这些邮件需要你确认后才能继续');
+    await expectNoText(page, '大多是历史链接过期');
     await expectText(page, '发票下载链接已过期');
     /* COPY-05: the visible card must show a human category and next step; the
        machine reason may only live inside the collapsed 诊断信息 disclosure, and
@@ -717,12 +731,13 @@ async function main() {
 
     /* P0-7: the standalone「仅失败项」checkbox was removed; status filtering is
        now owned entirely by the tab strip, whose labels come from the backend
-       status enum (完整 / 待补充 / 识别失败). */
+       status enum. COPY-03 renamed the 待补充 tab to 「信息不完整」 for
+       non-technical users; the filter still accepts the legacy 待补充 value. */
     if (await activeMain(page, '[data-filter="library-failed"]').count() !== 0) {
       fail('发票库不应同时存在 tab 和「仅失败项」两套状态筛选');
     }
     const tabLabels = await activeMain(page, '[data-library-tab]').evaluateAll((els) => els.map((el) => ({ key: el.dataset.libraryTab, label: el.textContent.trim() })));
-    const expectedTabs = { all: '全部', recognized: '已识别', partial: '待补充', failed: '识别失败', supporting: '支撑材料', itinerary: '行程单' };
+    const expectedTabs = { all: '全部', recognized: '已识别', partial: '信息不完整', failed: '识别失败', supporting: '支撑材料', itinerary: '行程单' };
     for (const [key, label] of Object.entries(expectedTabs)) {
       const found = tabLabels.find((tab) => tab.key === key);
       if (!found) fail(`发票库缺少「${label}」筛选 tab：${JSON.stringify(tabLabels)}`);
@@ -735,9 +750,9 @@ async function main() {
       ), ACTIVE_MAIN);
     };
     if (await rowsIn('all') !== 3) fail('发票库「全部」应显示 3 行');
-    // APP-20: 已识别 must mean 完整 only — 待补充 rows may not be counted as recognised.
+    // APP-20: 已识别 must mean 完整 only — partial rows may not be counted as recognised.
     if (await rowsIn('recognized') !== 1) fail('「已识别」只应包含状态为「完整」的行');
-    if (await rowsIn('partial') !== 1) fail('「待补充」应只包含状态为「待补充」的行');
+    if (await rowsIn('partial') !== 1) fail('「信息不完整」应只包含 partial 状态的行（含旧值「待补充」）');
     if (await rowsIn('failed') !== 1) fail('「识别失败」应只包含 1 行');
     await waitForText(page, 'bad.pdf', `${ACTIVE_MAIN} [data-library-rows]`);
     if (await rowsIn('itinerary') !== 1) fail('「行程单」应只包含 1 行');
@@ -787,11 +802,19 @@ async function main() {
     await expectText(page, '这里只设置关键词');
     // COPY-02: the cloud disclosure must name what leaves the device.
     await expectText(page, '待识别的发票和行程单文件本身会被发送到腾讯云进行识别。');
-    await expectText(page, '腾讯云 SecretId');
+    /* COPY-15: the credential fields are labelled in plain Chinese; the raw
+       machine terms (SecretId / SecretKey) must not be the user-facing label. */
+    await expectText(page, '腾讯云识别密钥 ID');
+    await expectNoText(page, '腾讯云 SecretId');
     await expectText(page, '修改后自动保存');
-    // COPY-04: the destructive action must read as a data reset, not a cache purge.
-    await expectText(page, '重置应用数据（将删除所有本机数据）');
-    await expectText(page, '已归档的发票和行程单原件');
+    /* COPY-04: the destructive action must read as a data reset, not a cache purge.
+       COPY-08: it must also not overstate its scope — the old heading claimed it
+       deleted ALL local data while mail/save settings are in fact retained. */
+    await expectText(page, '清空应用管理的数据（保留邮箱与保存设置）');
+    await expectNoText(page, '将删除所有本机数据');
+    // COPY-08: the body must state both what is deleted and what is retained.
+    await expectText(page, '会永久删除应用内部保存的邮件、发票和行程单');
+    await expectText(page, '邮箱与保存设置不会删除');
     // COPY-06 / APP-19 / CODE-08: retired jargon and dead settings must be gone.
     const removedConfigText = await activeMain(page, '.page').evaluate((el) => (
       /自定义日期范围|最近多少天|npx playwright install chromium|当前版本不会调用 LLM|桌面版会随应用准备浏览器|运行 efapiao 时会作为本地环境变量透传|efapiao（内置）|删除本机缓存/.exec(el.innerText)?.[0] || ''
@@ -830,13 +853,28 @@ async function main() {
     await page.getByRole('button', { name: '测试邮箱连接' }).click();
     await page.locator('.toast').getByText('邮箱连接正常', { exact: false }).first().waitFor({ state: 'visible', timeout: 5000 });
     // Only a verified connection may upgrade the sidebar status to 已连接.
-    await waitForText(page, '已连接 · user@test.local', '.sidebar');
+    /* UI-01: only a successful connection test may show the verified state.
+       UI-03: the visible label stays short; the address lives in `title`. */
+    await waitForText(page, '已连接', '.sidebar');
+    const verifiedTitle = await page.locator('.sidebar [data-mail-status-label]').first().getAttribute('title');
+    if (!verifiedTitle || !verifiedTitle.includes('已连接 · user@test.local')) {
+      fail(`验证通过后侧栏 title 应包含完整地址，实际为 ${JSON.stringify(verifiedTitle)}`);
+    }
     await dismissToasts(page);
 
     // Advanced settings are behind a disclosure now (COPY-06).
     await activeMain(page, 'details.card summary').first().click();
-    await expectText(page, '{seller}');
-    await expectText(page, '{invoiceNo}');
+    /* COPY-15: the naming fields are presented as Chinese chips; the raw
+       `{seller}` template syntax is an implementation detail and must not be the
+       user-facing label. The token itself still lives in `data-token` so the
+       insert action keeps working. */
+    await expectText(page, '销售方');
+    await expectText(page, '发票号码');
+    await expectNoText(page, '{seller}');
+    const tokenValues = await activeMain(page, '[data-token]').evaluateAll((els) => els.map((el) => el.dataset.token));
+    for (const token of ['{seller}', '{invoiceNo}']) {
+      if (!tokenValues.includes(token)) fail(`命名字段按钮缺少 ${token}：${JSON.stringify(tokenValues)}`);
+    }
     const tlsAlignment = await activeMain(page, '.field--compact').evaluate((el) => {
       const label = el.querySelector('.field__label')?.getBoundingClientRect();
       const check = el.querySelector('.check')?.getBoundingClientRect();
@@ -853,6 +891,10 @@ async function main() {
     await activeMain(page, '#cfg-ocr-mode').selectOption('disabled');
     await activeMain(page, '#tencent-secret-id').fill('demo-secret-id');
     await activeMain(page, '#tencent-secret-key').fill('demo-secret-key');
+    /* COPY-14: service topology (region, results path) now lives behind the
+       「查看技术详情」 disclosure, so it must be opened before the field exists
+       to the user. Opening it here also asserts the field is still reachable. */
+    await activeMain(page, 'details:has(#tencent-region) > summary').first().click();
     await activeMain(page, '#tencent-region').fill('ap-guangzhou');
     // P0-1: 邮箱文件夹多选要保存进 imap.mailbox
     await activeMain(page, '.select--mailboxes').selectOption(['INBOX', 'Sent Messages']);
@@ -863,7 +905,11 @@ async function main() {
     await activeMain(page, '[data-config-check="rename.organizeByType"]').check();
     // P0-5: 网络重试两个输入框要绑定 network.*
     await activeMain(page, '[data-config="network.retries"]').fill('5');
-    await activeMain(page, '[data-config="network.retryDelayMs"]').fill('2500');
+    /* COPY-14: the retry interval is entered in SECONDS now (milliseconds are an
+       internal unit a non-technical user should not have to think about) and is
+       converted on collect. 2.5s === the 2500ms the payload assertions expect;
+       typing 2500 here would exceed the 60s maximum and fail validation. */
+    await activeMain(page, '[data-config="network.retryDelayMs"]').fill('2.5');
     await waitForText(page, '已保存到本机', `${ACTIVE_MAIN} #save-state`);
     await page.waitForFunction(() => window.__savedConfigPayload?.network?.retryDelayMs === 2500);
     const savedPayload = await page.evaluate(() => window.__savedConfigPayload);
@@ -938,9 +984,13 @@ async function main() {
     await dismissToasts(page);
 
     // The stack is bounded, and distinct messages never collapse into each other.
+    /* UI-07 gave toasts an exit animation, so a trimmed toast stays in the DOM
+       marked `.is-leaving` until it finishes. Count only what the user actually
+       still sees; the leak check below then proves the leaving ones are really
+       removed rather than accumulating. */
     const bounded = await page.evaluate(() => {
       for (let i = 0; i < 8; i++) window.FPH.showToast(`不同提示 ${i}`, `第 ${i} 条`, 'warn');
-      const toasts = Array.from(document.querySelectorAll('.toast-stack .toast'));
+      const toasts = Array.from(document.querySelectorAll('.toast-stack .toast:not(.is-leaving)'));
       return {
         visible: toasts.length,
         signatures: new Set(toasts.map((el) => el.dataset.toastSignature)).size,
@@ -951,6 +1001,13 @@ async function main() {
     if (bounded.signatures !== bounded.visible) {
       fail(`不同内容的 toast 被错误合并：${JSON.stringify(bounded)}`);
     }
+    /* UI-07 leak check: every trimmed toast must actually leave the DOM once its
+       exit animation finishes, otherwise the stack grows invisibly forever. */
+    await page.waitForFunction(() => document.querySelectorAll('.toast-stack .toast').length <= 4, undefined, { timeout: 5000 })
+      .catch(async () => {
+        const total = await page.evaluate(() => document.querySelectorAll('.toast-stack .toast').length);
+        fail(`退出动画结束后仍有 ${total} 个 toast 残留在 DOM 中`);
+      });
     await dismissToasts(page);
 
     const configCalls = await page.evaluate(() => window.__bridgeCalls.map((item) => item.name));

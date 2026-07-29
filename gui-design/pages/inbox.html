@@ -69,12 +69,15 @@
             </div>
 
             <div class="table-wrap">
-                <table class="table">
+                <!-- 同 library：给整表宽度下限，窄窗口下横向滚动而不是压扁各列。 -->
+                <table class="table" style="min-width: 1000px;">
                     <thead>
                         <tr>
                             <th style="width: 140px;" data-sort-key="date">日期</th>
                             <th style="width: 220px;" data-sort-key="from">发件人</th>
-                            <th data-sort-key="subject">主题</th>
+                            <!-- 同 library：其余列宽度固定，主题是唯一自适应列，窄窗口下会被
+                                 压到逐字换行。给下限，宽度不足时由 .table-wrap 横向滚动。 -->
+                            <th style="min-width: 260px;" data-sort-key="subject">主题</th>
                             <th class="col-secondary" style="width: 90px;" data-sort-key="hasAttachment">附件</th>
                             <th class="col-secondary" style="width: 70px;" data-sort-key="bodyLinkCount">链接</th>
                             <th class="col-secondary" style="width: 110px;" data-sort-key="mailbox">邮箱</th>
