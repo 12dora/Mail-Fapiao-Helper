@@ -59,22 +59,33 @@
 
 GitHub [Releases](../../releases) 上可能同时存在：
 
+> ### ⚠️ 当前所有安装包都是**未签名**的
+>
+> 本仓库尚未配置代码签名证书（Apple Developer ID + 公证、Windows Authenticode），
+> 因此**包括标记为 Latest 的正式 Release 在内**，所有安装包都未签名、未公证。
+> 资产文件名一律带 `-unsigned` 后缀，发布标题写明「未签名」。
+>
+> 这意味着**系统无法替你验证安装包的来源和完整性**：macOS Gatekeeper 与
+> Windows SmartScreen 会拦截，且这些警告是真实有效的信号，不是误报。
+> 安装前请自行核对发布说明里的 SHA-256 校验值。公司/受管电脑不建议安装。
+
 | 通道 | 如何识别 | 签名 | 适用场景 |
 |---|---|---|---|
-| **稳定 Release** | GitHub 标记为 Latest；tag 形如 `v0.1.0`（无后缀）；**不是** prerelease | macOS Developer ID + 公证；Windows Authenticode + 时间戳 | 日常使用、公司电脑 |
-| **未签名 prerelease** | GitHub 标记为 **Pre-release**；tag 含 `-unsigned.N`；资产名含 `-unsigned` | **未签名、未公证** | 仅开发/内测；公司电脑不建议安装 |
+| **正式 Release（当前）** | GitHub 标记为 Latest；tag 形如 `v0.0.5`；标题含「未签名」；资产名含 `-unsigned` | **未签名、未公证** | 个人本机使用 |
+| **未签名 prerelease** | GitHub 标记为 **Pre-release**；tag 含 `-unsigned.N` | **未签名、未公证** | 内测 |
 | **开发构建 artifact** | 不在 Releases；只在 Actions workflow 产物里（约 14 天） | 未签名 | 本地联调 |
 
-**默认请只下载稳定 Latest。** 稳定通道流水线在打包后会逐个产物跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate` 与 Authenticode 校验，**任一项不过就不会发布**。发布说明会列出源码 commit 与签名状态。
-
-> **当前说明：** 若仓库尚无已发布的稳定 Latest（例如签名 secrets 未配置），则暂时没有“正式签名安装包”可下——请从源码构建，或明确接受未签名 prerelease 的风险。不要把 Pre-release 里的 `-unsigned` 包当成已公证的正式版。
+签名通道的流水线（`.github/workflows/release.yml`）仍然保留且**保持 fail-closed**：
+它会逐个产物跑 `codesign --verify --deep --strict`、`spctl --assess`、`stapler validate`
+与 Authenticode 校验，任一项不过就拒绝发布。等证书 secrets 配好后，把该 workflow 顶部
+被注释掉的 `push.tags` 触发器恢复，正式通道即可重新签名发布；届时本节需要同步更新。
 
 ### 如果你拿到的是未签名包（prerelease、开发构建，或本项目早期版本）
 
 未签名包意味着**系统无法替你验证来源和完整性**，Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
 
 - 请只从本仓库下载，并核对 commit；不要从转发的网盘、群文件安装。
-- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——用稳定 Release（若已发布），或按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
+- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——当前没有已签名的安装包可用，请按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
 - macOS：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），弹窗里再点 **打开**。系统记住这一次授权后即可正常使用。
 - Windows：SmartScreen 提示时，先确认文件来源，再点 **更多信息 → 仍要运行**。
 
@@ -176,9 +187,16 @@ pending/               # 待确认邮件（含原 .eml 与索引）
 <details>
 <summary>macOS 提示"应用已损坏，无法打开"</summary>
 
-Releases 上的正式安装包已签名并公证，正常不会出现这个提示。如果你看到它，说明手上的包是**未签名的开发构建**（CI workflow artifact 或早期版本），或者文件在下载中被改动了。参见 [第三节](#三首次打开)。
+当前所有安装包都未签名（见 [第二节](#两种发布通道请先认准再下载)），因此这个提示是**预期会出现的**，
+并不代表文件一定损坏。但它同时也是"文件在下载中被改动"的真实信号——**先核对发布说明里的
+SHA-256 校验值再放行**：
 
-未签名开发构建的正确做法：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。这只对这一个 app 放行。
+```bash
+shasum -a 256 ~/Downloads/mail-fapiao-helper-0.0.5-arm64-unsigned.dmg
+```
+
+校验值一致后，正确做法是：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。
+这只对这一个 app 放行。
 
 **请不要**用 `xattr -dr com.apple.quarantine <目录>` 递归清除隔离标记：它会连带信任你没打算信任的文件，并且会让真正的"文件损坏/被篡改"提示也一并消失。
 
