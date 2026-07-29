@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { chromium, type Browser } from 'playwright';
 import { loadConfig, type Config } from './config.js';
 import { fetchMails, missingImapCredentials, parseMailWithGuards, type RawMail } from './mail/fetcher.js';
@@ -33,7 +33,7 @@ import { runOcrPending } from './ocr/runner.js';
 import { stopEfapiaoServices } from './ocr/efapiao.js';
 import { summarizeOcr } from './ocr/summary.js';
 import { pendingEmlExists, summarizePending } from './pending/summary.js';
-import { readCsvRows, csvCell, parseCsvLine } from './util/csv.js';
+import { readCsvRows, csvCell, ensureCsvSchema, parseCsvLine } from './util/csv.js';
 
 const ROOT_USAGE = `mfh — Mail Fapiao Helper
 
@@ -55,11 +55,11 @@ Run 'mfh <command> --help' for command-specific options.
 `;
 
 /**
- * 网页自动下载所用的浏览器（APP-19）。
+ * 可选浏览器启动（APP-19 / EXT-09 / WIRE-03）。
  *
- * 应用**不会**自动准备或下载浏览器：桌面版优先使用系统已安装的 Chrome / Edge，
- * 开发环境才可能命中 Playwright 自带的 Chromium。原先的 `playwright.browserManagement`
- * 设置从不参与这里的决策，已在配置 schema v3 中删除，不再暗示任何「由应用准备」的承诺。
+ * 当前站点处理器均不依赖 Playwright page，普通 HTTP 下载不需要浏览器。
+ * 仅当未来 handler 声明需要浏览器、或显式调用 getBrowser 时才会走到这里。
+ * 应用**不会**自动下载浏览器；桌面版优先系统 Chrome / Edge。
  */
 async function launchBrowser(cfg: Config): Promise<Browser> {
   const launchOptions = {
@@ -87,8 +87,8 @@ async function launchBrowser(cfg: Config): Promise<Browser> {
     }
   }
   throw new Error(
-    '网页自动下载需要浏览器，但本机没有找到可用的 Chrome 或 Microsoft Edge。'
-    + '本应用不会自动下载浏览器，请先安装最新版 Chrome 或 Microsoft Edge 后重试。'
+    '可选的浏览器自动化未能启动：本机没有找到可用的 Chrome、Microsoft Edge 或 Playwright Chromium。'
+    + '当前发票站点下载默认只走 HTTP，一般不需要浏览器；若你未使用依赖浏览器的扩展处理器，可忽略本错误。'
     + `原始错误：${failures[failures.length - 1] ?? 'unknown'}`,
   );
 }
@@ -334,11 +334,73 @@ function requireValue(argv: string[], i: number, flag: string): string {
 let activeDataDirLease: DataDirLease | undefined;
 
 /**
+ * CORE-01：锁身份必须覆盖实际写入目标，不能单靠 `--state` 父目录。
+ * 两个 CLI 若用不同 state 路径但同一 invoices/csv，必须争同一把锁。
+ */
+function commonPathPrefix(a: string, b: string): string {
+  const left = resolve(a).split(sep);
+  const right = resolve(b).split(sep);
+  const out: string[] = [];
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] !== right[i]) break;
+    out.push(left[i]!);
+  }
+  if (out.length === 0) return '';
+  // Windows 盘符根：`C:` → `C:\`
+  if (out.length === 1 && /^[A-Za-z]:$/.test(out[0]!)) return `${out[0]}${sep}`;
+  return out.join(sep) || sep;
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child));
+  return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !rel.startsWith('..'));
+}
+
+/**
+ * 从 config 的实际写目标推导锁目录。优先 MFH_DATA_DIR；否则取 samples /
+ * invoices / pending / output.csv 父目录的公共前缀；无法收敛时锁 invoices 本身。
+ */
+function resolveLockDataDir(cfg: Config, hints: DataDirHints = {}): string {
+  const fromEnv = process.env.MFH_DATA_DIR;
+  if (fromEnv && fromEnv.length > 0) return resolve(fromEnv);
+
+  const writeDirs = [
+    resolve(cfg.paths.samples),
+    resolve(cfg.paths.invoices),
+    resolve(cfg.paths.pending),
+    dirname(resolve(cfg.output.csv)),
+  ];
+  let common = writeDirs[0]!;
+  for (const d of writeDirs.slice(1)) {
+    common = commonPathPrefix(common, d);
+    if (!common) break;
+  }
+  // 公共前缀退化为盘符/根时，改锁 invoices（主归档面），避免整盘一把锁。
+  const degenerate = !common || common === sep || /^[A-Za-z]:\\?$/.test(common);
+  const lockDir = degenerate ? resolve(cfg.paths.invoices) : common;
+
+  // 若调用方还传了 --state，且 state 落在另一棵树上：仍以写目标为准持锁，
+  // 并打一条警告——state 隔离不能换来双写台账。
+  if (hints.statePath && hints.statePath.length > 0) {
+    const stateDir = dirname(resolve(hints.statePath));
+    if (!isPathInside(lockDir, stateDir) && !isPathInside(stateDir, lockDir)) {
+      log.warn(
+        `state 路径（${stateDir}）不在业务数据锁目录（${lockDir}）内；`
+        + `锁按 invoices/samples/pending/csv 持有，避免两个 --state 并发写同一台账。`,
+      );
+    }
+  }
+  return lockDir;
+}
+
+/**
  * 会写数据目录的命令入口统一走这里。拿不到锁时只打印中文提示，由调用方返回
  * 退出码 2，不抛栈。只读命令与 `--dry-run` 不需要调用本函数。
+ *
+ * 已加载 config 时必须传入 `cfg`，以便 CORE-01 按写目标持锁。
  */
-function acquireCommandLock(kind: DataOpKind, hints: DataDirHints): boolean {
-  const dataDir = resolveDataDir(hints);
+function acquireCommandLock(kind: DataOpKind, hints: DataDirHints, cfg?: Config): boolean {
+  const dataDir = cfg ? resolveLockDataDir(cfg, hints) : resolveDataDir(hints);
   const result = acquireDataDirLock(dataDir, kind);
   if (!result.ok) {
     log.error(result.message);
@@ -366,10 +428,9 @@ function releaseDataDirLock(): void {
 const INDEX_HEADER = 'messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
 
 function ensureIndexCsv(path: string): void {
-  if (existsSync(path)) return;
+  // CORE-05：空文件也要写表头，不能只判断 exists。
   ensureSecureDir(dirname(path));
-  // UTF-8 BOM so Excel renders CJK correctly.
-  writeFileSync(path, `﻿${INDEX_HEADER}\n`, { encoding: 'utf8', mode: 0o600 });
+  ensureCsvSchema(path, INDEX_HEADER);
   secureFileMode(path);
 }
 
@@ -457,8 +518,8 @@ async function cmdFetch(argv: string[]): Promise<number> {
     log.error(`尚未配置邮箱：请先在设置中填写 ${missingCredentials.join('、')} 后再抓取邮件。`);
     return 2;
   }
-  // --dry-run 不写数据目录，因此不占锁。
-  if (!opts.dryRun && !acquireCommandLock('fetch', { statePath: opts.statePath, configPath: opts.configPath })) return 2;
+  // --dry-run 不写数据目录，因此不占锁。正式运行按写目标持锁（CORE-01）。
+  if (!opts.dryRun && !acquireCommandLock('fetch', { statePath: opts.statePath, configPath: opts.configPath }, cfg)) return 2;
 
   const outDir = resolve(opts.outDir ?? cfg.paths.samples);
   const indexCsv = join(outDir, 'INDEX.csv');
@@ -468,8 +529,14 @@ async function cmdFetch(argv: string[]): Promise<number> {
   const statePath = resolve(opts.statePath);
   let store: StateStore;
   try {
-    store = StateStore.open(statePath);
-    await recoverQuarantinedState(store, cfg, outDir);
+    if (opts.dryRun) {
+      // CORE-06：dry-run 只读 state，损坏时只报告、绝不 quarantine/重写。
+      store = StateStore.openReadOnly(statePath);
+      if (store.quarantine) log.warn(store.quarantine.message);
+    } else {
+      store = StateStore.open(statePath);
+      await recoverQuarantinedState(store, cfg, outDir);
+    }
   } catch (e) {
     log.error((e as Error).message);
     return 1;
@@ -483,11 +550,13 @@ async function cmdFetch(argv: string[]): Promise<number> {
   try {
     for await (const mail of fetchMails(cfg, log)) {
       seen++;
+      // CORE-03：把原始字节并入身份，避免重复/缺失 Message-Id 折叠不同邮件。
       const hash = msgIdHash(
         mail.messageId,
         mail.from,
         mail.date.toISOString(),
         mail.subject,
+        mail.raw,
       );
       // APP-11：先解析预期的 .eml 目标路径，只有 state 命中**且**文件存在且非空
       // 才跳过。否则换缓存目录 / 删除样本后，state 会谎称邮件已知，新目录永远为空。
@@ -527,14 +596,17 @@ async function cmdFetch(argv: string[]): Promise<number> {
       log.info(`saved ${hash} subject="${mail.subject}"`);
     }
     // 命令结束时显式 flush 并注销，未达阈值的增量才算真正落盘。
-    store.dispose();
+    // dry-run 的只读 store 未注册 activeStores，dispose 也是安全的空 flush。
+    if (!opts.dryRun) store.dispose();
   } catch (e) {
     // 有界批量 checkpoint 必须在致命错误时显式 flush，否则本次已落盘的 .eml 会
     // 失去对应的 state 记录（CODE-07）。
-    try {
-      store.flush();
-    } catch (flushErr) {
-      log.error(`state flush failed: ${(flushErr as Error).message}`);
+    if (!opts.dryRun) {
+      try {
+        store.flush();
+      } catch (flushErr) {
+        log.error(`state flush failed: ${(flushErr as Error).message}`);
+      }
     }
     log.error(`fetch aborted: ${(e as Error).message}`);
     return 1;
@@ -622,8 +694,11 @@ function archivedMessageIdSet(cfg: Config): Set<string> {
 // 状态重建（APP-18A）：只读缓存与台账，不删除任何业务数据
 // ---------------------------------------------------------------------------
 
-/** msgIdHash 的输出形态：12 位小写十六进制。真实 Message-Id 必然含 `@`。 */
-const BARE_HASH_RE = /^[0-9a-f]{12}$/;
+/**
+ * msgIdHash 输出形态：历史 12 位，或 CORE-03 有 raw 时的 32 位（128 bit）。
+ * 真实 Message-Id 必然含 `@`，不会与裸 hash 混淆。
+ */
+const BARE_HASH_RE = /^[0-9a-f]{12}$|^[0-9a-f]{32}$/;
 
 /**
  * 台账行 -> 运行期身份。pipeline 写 CSV 时 messageId 取 `mail.messageId || hash`，
@@ -736,7 +811,7 @@ async function cmdRebuildState(argv: string[]): Promise<number> {
       log.info(`[dry-run] would rebuild ${statePath}: fetched=${new Set(rebuilt.fetchedHashes).size} processed=${new Set(rebuilt.processedHashes).size}`);
       return 0;
     }
-    if (!acquireCommandLock('pipeline', { statePath: parsed.statePath, configPath: parsed.configPath })) return 2;
+    if (!acquireCommandLock('pipeline', { statePath: parsed.statePath, configPath: parsed.configPath }, cfg)) return 2;
     const store = StateStore.open(statePath);
     if (store.quarantine) log.warn(store.quarantine.message);
     // 已处理身份只做并集：重建不应让历史上已处理的邮件重新进入处理队列。
@@ -776,7 +851,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     return 2;
   }
 
-  if (!acquireCommandLock('pipeline', { statePath: opts.statePath, configPath: opts.configPath })) return 2;
+  if (!acquireCommandLock('pipeline', { statePath: opts.statePath, configPath: opts.configPath }, cfg)) return 2;
 
   try {
     assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
@@ -800,7 +875,7 @@ async function cmdRun(argv: string[]): Promise<number> {
   let browserPromise: Promise<Browser> | undefined;
   const getBrowser = async (): Promise<Browser> => {
     if (!browserInstance) {
-      // launchBrowser() 已经给出准确的中文错误（说明需要系统 Chrome/Edge）。
+      // 当前站点 handler 默认不需要浏览器（EXT-09）；仅惰性启动。
       browserPromise ??= launchBrowser(cfg);
       browserInstance = await browserPromise;
     }
@@ -818,18 +893,63 @@ async function cmdRun(argv: string[]): Promise<number> {
   let partial = 0;
   const networkFailures: ProcessMailResult[] = [];
   const inFlight = new Set<string>();
+  // CORE-02：致命错误时 abort 所有 worker，并在归档临界区前再次检查。
+  const fatalAbort = new AbortController();
+  let fatalError: unknown;
 
   const handleEml = async (emlPath: string): Promise<void> => {
+    if (fatalAbort.signal.aborted) return;
+
     const raw = readFileSync(emlPath);
-    // 缓存的 .eml 同样是不可信输入：沿用抓取侧的大小上限、linkify 关闭与解析超时
-    // （APP-09）。超限/超时的邮件计入 failed 并保留在缓存里，不提交任何状态。
-    const mail = await parseMailWithGuards(raw);
+    // CORE-03：身份必须绑定原始字节，否则重复/缺失 Message-Id 会折叠不同邮件。
+    const contentHashId = msgIdHash(undefined, '', '', '', raw);
+
+    let mail: Awaited<ReturnType<typeof parseMailWithGuards>>;
+    try {
+      // 缓存的 .eml 同样是不可信输入：沿用抓取侧的大小上限、linkify 关闭与解析超时
+      // （APP-09）。超限邮件转入待确认（EXT-05），不能静默 failed 后永久无法补档。
+      mail = await parseMailWithGuards(raw);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith('mail_too_large_to_parse:')) {
+        const hash = contentHashId;
+        if (opts.onlyMail !== undefined && hash !== opts.onlyMail) return;
+        const reason = '邮件过大无法解析（原始超过 32MB），请在待确认中手动选择发票文件归档';
+        log.warn(`mail too large, routing to pending: ${hash} (${msg})`);
+        try {
+          const pendingDir = resolve(cfg.paths.pending);
+          ensureSecureDir(pendingDir);
+          const emlOut = join(pendingDir, `${hash}.eml`);
+          if (!fileExistsNonEmpty(emlOut)) {
+            writeEmlAtomic(emlOut, raw);
+          }
+          const pendingCsv = join(pendingDir, 'pending.csv');
+          ensureCsvSchema(pendingCsv, 'messageId,date,from,subject,reason');
+          // 无解析结果时用空 envelope + 稳定 reason；hash 已由内容决定。
+          const line = [hash, '', '', basename(emlPath), reason].map(csvCell).join(',') + '\n';
+          appendFileSync(pendingCsv, line, 'utf8');
+          store.addProcessed(hash);
+          store.checkpoint();
+          processed++;
+          log.info(`pending ${hash} reason=${reason}`);
+        } catch (writeErr) {
+          failed++;
+          log.warn(
+            `Failed to queue oversized mail ${emlPath} to pending: `
+            + `${writeErr instanceof Error ? writeErr.message : String(writeErr)}`,
+          );
+        }
+        return;
+      }
+      throw err;
+    }
 
     const hash = msgIdHash(
       mail.messageId ?? undefined,
       mail.from?.text ?? '',
       mail.date?.toISOString() ?? '',
       mail.subject ?? '',
+      raw,
     );
     // Use the same identity the writer commits to invoices.csv (messageId,
     // falling back to hash) so the archived-message self-heal recognizes emails
@@ -869,6 +989,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       return;
     }
 
+    if (fatalAbort.signal.aborted) return;
+
     inFlight.add(hash);
     try {
       const taskState: State = {
@@ -883,7 +1005,12 @@ async function cmdRun(argv: string[]): Promise<number> {
         store.checkpoint();
       };
 
-      const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, { force: opts.force || opts.onlyMail !== undefined, raw });
+      const result = await processMail(mail, cfg, log, taskState, taskSaveState, getBrowser, {
+        force: opts.force || opts.onlyMail !== undefined,
+        raw,
+        signal: fatalAbort.signal,
+      });
+      if (result.reason === 'aborted') return;
       for (const item of taskState.processedHashes) store.addProcessed(item);
       if (result.outcome === 'pdf' && result.messageId.length > 0) {
         archivedMessageIds.add(result.messageId);
@@ -906,20 +1033,21 @@ async function cmdRun(argv: string[]): Promise<number> {
     const workerCount = Math.min(opts.concurrency, Math.max(emlPaths.length, 1));
     log.info(`Queued ${emlPaths.length} cached emails with concurrency=${workerCount}`);
 
-    let aborted = false;
     const worker = async (): Promise<void> => {
       while (true) {
-        if (aborted) return;
+        if (fatalAbort.signal.aborted) return;
         const emlPath = emlPaths[next++];
         if (!emlPath) return;
         try {
           await handleEml(emlPath);
         } catch (err) {
           // Iron rule: state writes and unsafe archive recovery failures must
-          // abort the whole run before any later archive/CSV mutation proceeds.
+          // abort the whole run. 用 allSettled 等全部 worker 退出后再离开锁域
+          // （CORE-02），不要靠 Promise.all 的提前 reject。
           if (err instanceof StateWriteError || err instanceof ArchiveRecoveryError) {
-            aborted = true;
-            throw err;
+            if (!fatalError) fatalError = err;
+            fatalAbort.abort();
+            return;
           }
           failed++;
           log.warn(`Failed to process ${emlPath}: ${err instanceof Error ? err.message : String(err)}`);
@@ -927,7 +1055,8 @@ async function cmdRun(argv: string[]): Promise<number> {
       }
     };
 
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
+    if (fatalError) throw fatalError;
     // 有界批量 checkpoint 之后必须显式 flush 并注销，命令结束时状态才算真正落盘。
     store.dispose();
   } catch (e) {
@@ -1036,7 +1165,7 @@ async function cmdOrganize(argv: string[]): Promise<number> {
     return 2;
   }
 
-  if (!acquireCommandLock('organize', { configPath: parsed.configPath })) return 2;
+  if (!acquireCommandLock('organize', { configPath: parsed.configPath }, cfg)) return 2;
 
   try {
     assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
@@ -1114,7 +1243,7 @@ async function cmdOcr(argv: string[]): Promise<number> {
   }
 
   // `ocr summary` 只读队列与结果，不占锁；`ocr run` 会写结果 CSV 与队列。
-  if (parsed.command === 'run' && !acquireCommandLock('ocr', { configPath: parsed.configPath })) return 2;
+  if (parsed.command === 'run' && !acquireCommandLock('ocr', { configPath: parsed.configPath }, cfg)) return 2;
 
   try {
     if (parsed.command === 'summary') {

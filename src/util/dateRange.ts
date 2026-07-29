@@ -1,17 +1,24 @@
 /**
- * 统一的日期范围契约（APP-07）。
+ * 统一的日期范围契约（APP-07 / CORE-07）。
  *
  * - date-only（`YYYY-MM-DD`）按**本地时区**解释：下界取当天本地午夜，上界取
  *   「本地日历下一天」的午夜（不含）。用日历加一天而不是固定 86_400_000ms，
  *   所以夏令时切换当天（23 小时 / 25 小时）也不会漏掉或多带邮件。
- * - 完整 ISO timestamp 保留精确 instant，绝不再额外加 24 小时；上界按毫秒包含
- *   用户给定的那一刻（内部 +1ms 转换成半开区间 `[since, before)`）。
+ * - 完整 ISO timestamp 必须通过严格解析（年月日/时分秒/offset 独立校验 +
+ *   round-trip），绝不再委托宽松的 `Date.parse`（会把 2026-02-31 滚到 3 月）。
  *
  * IMAP 查询与客户端过滤必须共享同一个窗口对象，调用方只应通过
  * `resolveDateWindowFromFilter()` 计算一次并向下传递。
  */
 
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * 严格 ISO 8601 timestamp（带时间；date-only 走另一条路径）：
+ * `YYYY-MM-DDTHH:mm[:ss[.sss]][Z|±HH:mm|±HHmm]`
+ * 不接受 `07/29/2026`、空格分隔、缺少时区的含糊形式。
+ */
+const ISO_TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|([+-])(\d{2}):?(\d{2}))$/;
 
 interface DateOnlyParts {
   y: number;
@@ -40,19 +47,56 @@ function parseDateOnlyParts(value: string): DateOnlyParts | undefined {
   return { y, m, d };
 }
 
-/** 是否是纯日期（`YYYY-MM-DD`），即不带时间与时区的本地日历日。 */
-export function isDateOnly(value: string): boolean {
-  return parseDateOnlyParts(value) !== undefined;
+function isValidCalendarYmd(y: number, m: number, d: number): boolean {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return false;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // UTC 构造 + round-trip，避免本地时区干扰日历校验。
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  return probe.getUTCFullYear() === y && probe.getUTCMonth() === m - 1 && probe.getUTCDate() === d;
+}
+
+/**
+ * 严格解析完整 ISO timestamp 为 epoch ms。失败返回 undefined。
+ * 不走 `Date.parse`，因此不存在日期不会被滚到下月。
+ */
+function parseStrictIsoTimestamp(value: string): number | undefined {
+  const matched = ISO_TIMESTAMP_RE.exec(value.trim());
+  if (!matched) return undefined;
+  const y = Number(matched[1]);
+  const mo = Number(matched[2]);
+  const d = Number(matched[3]);
+  const hh = Number(matched[4]);
+  const mm = Number(matched[5]);
+  const ss = matched[6] !== undefined ? Number(matched[6]) : 0;
+  const frac = matched[7];
+  // 小数秒最多取到毫秒。
+  const ms = frac !== undefined ? Number(frac.padEnd(3, '0').slice(0, 3)) : 0;
+  if (!isValidCalendarYmd(y, mo, d)) return undefined;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 || ms < 0 || ms > 999) {
+    return undefined;
+  }
+
+  let offsetMin = 0;
+  if (matched[8] !== undefined) {
+    const sign = matched[8] === '-' ? -1 : 1;
+    const oh = Number(matched[9]);
+    const om = Number(matched[10]);
+    if (oh < 0 || oh > 23 || om < 0 || om > 59) return undefined;
+    offsetMin = sign * (oh * 60 + om);
+  }
+  // 无显式 offset 且不是 Z：上面正则要求 Z 或 ±offset，因此这里 offsetMin=0 表示 Z。
+  const utcMs = Date.UTC(y, mo - 1, d, hh, mm, ss, ms) - offsetMin * 60_000;
+  if (!Number.isFinite(utcMs)) return undefined;
+  return utcMs;
 }
 
 /**
  * 是否是本模块可解析的边界（date-only 或完整 ISO timestamp）。
- * 形如 `2026-02-31` 的不存在日历日一律判为非法：不能让它掉进 `Date.parse()` 的
- * 宽松回退里被悄悄解释成 3 月 3 日。
+ * 形如 `2026-02-31` / `2026-02-31T00:00:00Z` 的不存在日历日一律判为非法。
  */
 export function isValidDateBound(value: string): boolean {
   if (looksDateOnly(value)) return parseDateOnlyParts(value) !== undefined;
-  return Number.isFinite(Date.parse(value));
+  return parseStrictIsoTimestamp(value) !== undefined;
 }
 
 /** 下界（含）：date-only -> 本地午夜；完整 timestamp -> 精确 instant。 */
@@ -61,8 +105,8 @@ export function resolveSinceBound(value: string): Date | undefined {
     const parts = parseDateOnlyParts(value);
     return parts ? new Date(parts.y, parts.m - 1, parts.d, 0, 0, 0, 0) : undefined;
   }
-  const t = Date.parse(value);
-  return Number.isFinite(t) ? new Date(t) : undefined;
+  const t = parseStrictIsoTimestamp(value);
+  return t !== undefined ? new Date(t) : undefined;
 }
 
 /**
@@ -78,8 +122,8 @@ export function resolveUntilExclusiveBound(value: string): Date | undefined {
     // 因此这就是「本地日历下一天的午夜」。
     return parts ? new Date(parts.y, parts.m - 1, parts.d + 1, 0, 0, 0, 0) : undefined;
   }
-  const t = Date.parse(value);
-  return Number.isFinite(t) ? new Date(t + 1) : undefined;
+  const t = parseStrictIsoTimestamp(value);
+  return t !== undefined ? new Date(t + 1) : undefined;
 }
 
 export interface DateWindow {

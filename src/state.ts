@@ -245,6 +245,28 @@ export class StateStore {
     return store;
   }
 
+  /**
+   * CORE-06：只读打开。内容损坏时**绝不** quarantine / 重写磁盘，只报告原因；
+   * 供 `--dry-run` 使用（帮助文案承诺「Do not write files」）。
+   */
+  static openReadOnly(path: string, options: StateStoreOptions = {}): StateStore {
+    let state: State;
+    let quarantine: StateQuarantine | undefined;
+    try {
+      state = loadState(path);
+    } catch (e) {
+      if (!(e instanceof StateCorruptionError)) throw e;
+      // 不隔离、不重写：返回空内存状态 + 说明，正式运行时才会 quarantine。
+      state = { processedHashes: [], fetchedHashes: [] };
+      quarantine = {
+        backupPath: '',
+        message: `状态文件已损坏（${e.message}），--dry-run 不会修改磁盘；正式运行时将隔离并重建。`,
+      };
+    }
+    // 不加入 activeStores：只读路径不应被信号处理器 flush 回写。
+    return new StateStore(path, state, options, quarantine);
+  }
+
   hasProcessed(hash: string): boolean {
     return this.processed.has(hash);
   }

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * True when a cell would be interpreted as a formula by Excel / LibreOffice /
@@ -111,8 +112,61 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+/**
+ * CORE-05：保证 CSV 具备期望表头。
+ * - 不存在或 size=0：原子写 BOM + header
+ * - 非空：解析首行并严格比对，不匹配则抛错（禁止向未知 schema 盲目追加）
+ *
+ * `expectedHeader` 可以带或不带尾部换行；比较时忽略 BOM 与空白差异。
+ */
+export function ensureCsvSchema(csvPath: string, expectedHeader: string): void {
+  const headerLine = expectedHeader.replace(/^\uFEFF/, '').replace(/\r?\n$/, '');
+  const dir = path.dirname(csvPath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  let st: fs.Stats | undefined;
+  try {
+    st = fs.statSync(csvPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    st = undefined;
+  }
+
+  if (!st || st.size === 0) {
+    const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+    fs.writeFileSync(tmp, `\uFEFF${headerLine}\n`, 'utf8');
+    fs.renameSync(tmp, csvPath);
+    return;
+  }
+
+  // 只读出足够判定表头的前缀，避免大文件全量加载。
+  const fd = fs.openSync(csvPath, 'r');
+  try {
+    const buf = Buffer.alloc(Math.min(st.size, 64 * 1024));
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.subarray(0, n).toString('utf8').replace(/^\uFEFF/, '');
+    // 在 quote 外找首行结束；表头本身不应含换行。
+    const nl = text.search(/\r?\n/);
+    const firstLine = (nl >= 0 ? text.slice(0, nl) : text).trim();
+    const expected = headerLine.trim();
+    if (firstLine !== expected) {
+      throw new Error(
+        `csv_schema_mismatch:${csvPath}: expected header ${JSON.stringify(expected)}, got ${JSON.stringify(firstLine)}`,
+      );
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function readCsvRows(csvPath: string): Record<string, string>[] {
   if (!fs.existsSync(csvPath)) return [];
+  // 空文件没有合法表头：当作尚无数据，避免把第一行数据当 header（CORE-05）。
+  try {
+    if (fs.statSync(csvPath).size === 0) return [];
+  } catch {
+    return [];
+  }
   const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(text);
   if (records.length === 0) return [];

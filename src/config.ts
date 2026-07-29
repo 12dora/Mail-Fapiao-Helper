@@ -376,7 +376,20 @@ function readCredentials(c: ErrorCollector, raw: unknown, path: string): Record<
     c.add(path, `config.${path} 必须是「键: 字符串」形式的对象`);
     return {};
   }
-  return value as Record<string, string>;
+  // CORE-11：逐项校验 value 为 string，禁止数字/布尔/嵌套对象靠类型断言蒙混过关。
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key.length === 0) {
+      c.add(path, `config.${path} 的键不能为空`);
+      continue;
+    }
+    if (typeof entry !== 'string') {
+      c.add(`${path}.${key}`, `config.${path}.${key} 必须是字符串`);
+      continue;
+    }
+    out[key] = entry;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,16 +421,55 @@ function fillMissing(target: Record<string, unknown>, key: string, value: unknow
 }
 
 /**
+ * CORE-10：解析声明的 schemaVersion。必须是正整数；高于当前版本时抛专门错误，
+ * 禁止旧程序静默把未来配置「盖章」成 v3。
+ */
+export class ConfigVersionTooNewError extends Error {
+  readonly code = 'config_version_too_new';
+  readonly declared: number;
+  readonly supported: number;
+
+  constructor(declared: number, supported: number) {
+    super(
+      `config_version_too_new: 配置 schemaVersion=${declared} 高于本程序支持的 ${supported}，请升级应用后再打开。`,
+    );
+    this.name = 'ConfigVersionTooNewError';
+    this.declared = declared;
+    this.supported = supported;
+  }
+}
+
+function readDeclaredSchemaVersion(raw: Record<string, unknown>): number {
+  const v = raw.schemaVersion;
+  if (v === undefined || v === null || v === '') return 1;
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+    // 非正整数：交给校验阶段报字段错误；迁移路径先按 1 处理会不安全，
+    // 这里对「明显过大的非整数」也拒绝。小数等非法值在 validate 里再报。
+    if (typeof v === 'number' && Number.isFinite(v) && v > CONFIG_SCHEMA_VERSION) {
+      throw new ConfigVersionTooNewError(Math.floor(v), CONFIG_SCHEMA_VERSION);
+    }
+    return 1;
+  }
+  if (v > CONFIG_SCHEMA_VERSION) {
+    throw new ConfigVersionTooNewError(v, CONFIG_SCHEMA_VERSION);
+  }
+  return v;
+}
+
+/**
  * 把任意历史版本的配置对象迁移到当前 schema。缺失 `schemaVersion` 视为 v1。
  * 迁移只补齐缺失字段，绝不覆盖用户已经写入的值。
+ * `declared > CONFIG_SCHEMA_VERSION` 时抛 `ConfigVersionTooNewError`（CORE-10）。
  */
 export function migrateRawConfig(raw: unknown): MigrateResult {
   const out = cloneRaw(raw);
-  const declared = typeof out.schemaVersion === 'number' && Number.isFinite(out.schemaVersion)
-    ? out.schemaVersion
-    : 1;
+  const declared = readDeclaredSchemaVersion(out);
 
+  // 显式按版本阶梯迁移，不允许把任意未来版本统一盖章为当前版本。
   // v1 -> v2：output.csv / network.timeoutMs 允许缺省，这里补默认值。
+  if (declared <= 1) {
+    // no-op marker：v1 与 v2 共享后续字段补齐。
+  }
   const output = { ...asRecord(out.output) };
   fillMissing(output, 'csv', DEFAULTS.outputCsv);
 
@@ -429,7 +481,12 @@ export function migrateRawConfig(raw: unknown): MigrateResult {
 
   // v2 -> v3：删除从不生效的字段。旧文件里出现时只是被丢弃，不产生任何校验错误；
   // 迁移后的对象不再携带它们，因此 GUI 原子回写时也会把它们一并清出配置文件。
-  for (const path of REMOVED_FIELDS_V3) deleteFieldPath(out, path);
+  if (declared <= 2) {
+    for (const path of REMOVED_FIELDS_V3) deleteFieldPath(out, path);
+  } else {
+    // declared === 3：仍清理一遍，保证 in-memory 对象干净。
+    for (const path of REMOVED_FIELDS_V3) deleteFieldPath(out, path);
+  }
 
   out.schemaVersion = CONFIG_SCHEMA_VERSION;
   return {
@@ -455,7 +512,19 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
     return { ok: false, errors: [{ path: '', message: '配置必须是一个 JSON 对象' }] };
   }
 
-  const migrated = migrateRawConfig(raw).raw;
+  let migrated: Record<string, unknown>;
+  try {
+    migrated = migrateRawConfig(raw).raw;
+  } catch (err) {
+    // CORE-10：未来版本配置不得被旧程序打开或回写。
+    if (err instanceof ConfigVersionTooNewError) {
+      return {
+        ok: false,
+        errors: [{ path: 'schemaVersion', message: err.message }],
+      };
+    }
+    throw err;
+  }
 
   const config: Config = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
