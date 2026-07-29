@@ -1716,7 +1716,7 @@
         if (!select) return;
         const sellers = Array.from(new Set(rows.map((row) => row.seller).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
         const current = select.value;
-        select.innerHTML = '<option value="">全部销售方（已加载记录）</option>' + sellers.map((seller) => `<option value="${escapeHtml(seller)}">${escapeHtml(seller)}</option>`).join('');
+        select.innerHTML = '<option value="">全部销售方</option>' + sellers.map((seller) => `<option value="${escapeHtml(seller)}">${escapeHtml(seller)}</option>`).join('');
         if (sellers.includes(current)) select.value = current;
     }
 
@@ -3001,24 +3001,20 @@
         if (result?.ok) {
             // UI-01: only a real successful connection may mark credentials verified,
             // and only for the exact settings that were tested.
-            const testedCfg = payload || window.FPH.configPayload?.config || {};
-            const testedSecrets = window.FPH.configPayload?.secrets || {};
-            if (payload?.imap) {
-                markMailVerified(payload, {
-                    ...testedSecrets,
-                    imapPass: Boolean(payload.imap.pass) || testedSecrets.imapPass,
-                });
-            } else {
-                markMailVerified(testedCfg, testedSecrets);
-            }
-            applyMailStatus(
-                payload?.imap ? payload : testedCfg,
-                payload?.imap
-                    ? { ...testedSecrets, imapPass: Boolean(payload.imap.pass) || testedSecrets.imapPass }
-                    : testedSecrets,
-            );
             await reloadMailboxes({ silent: true });
             await loadBridgeConfig();
+            /* UI-01: mark verified against the config that was just RELOADED, not
+               against the test payload. `collectConfigPayload()` omits `imap.pass`
+               when the user did not retype it, so a payload-derived fingerprint
+               recorded hasPass=0 while the reloaded config reports the stored
+               password as hasPass=1 — the fingerprints never matched and
+               applyMailStatus cleared verification immediately, so a successful
+               test could never surface 「已连接」. Computing both sides from the
+               same inputs makes them equal by construction. */
+            const verifiedCfg = window.FPH.configPayload?.config || payload || {};
+            const verifiedSecrets = window.FPH.configPayload?.secrets || {};
+            markMailVerified(verifiedCfg, verifiedSecrets);
+            applyMailStatus(verifiedCfg, verifiedSecrets);
         } else {
             clearMailVerification();
             refreshMailStatusFromForm();

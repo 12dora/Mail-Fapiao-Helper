@@ -59,18 +59,18 @@
                 </div>
 
                 <label class="sr-only" for="library-seller">按销售方筛选（仅在已加载记录中生效）</label>
-                <select class="select" id="library-seller" data-library-seller style="width: 160px;">
-                    <option value="">全部销售方（已加载记录）</option>
+                <select class="select" id="library-seller" data-library-seller style="width: 200px;">
+                    <option value="">全部销售方</option>
                 </select>
 
                 <div class="spacer"></div>
                 <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别</button>
                 <label class="sr-only" for="library-ocr-parallel">同时识别数量</label>
-                <select class="select" id="library-ocr-parallel" data-ocr-parallel style="width: 160px;">
-                    <option value="1" selected>每次同时识别 1 份（推荐）</option>
-                    <option value="2">每次同时识别 2 份</option>
-                    <option value="4">每次同时识别 4 份</option>
-                    <option value="8">每次同时识别 8 份</option>
+                <select class="select" id="library-ocr-parallel" data-ocr-parallel style="width: 190px;">
+                    <option value="1" selected>同时识别 1 份（推荐）</option>
+                    <option value="2">同时识别 2 份</option>
+                    <option value="4">同时识别 4 份</option>
+                    <option value="8">同时识别 8 份</option>
                 </select>
                 <button class="btn btn--sm" type="button" data-action="rename-organize">一键改名</button>
                 <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开发票保存文件夹</button>
@@ -124,11 +124,17 @@
 
             <!-- 发票表格 -->
             <div class="table-wrap">
-                <table class="table">
+                <!-- th 的 width 只是建议值：容器不够宽时浏览器仍会压缩各列，中文表头和
+                     单元格随即逐字换行。给整表一个下限（≈各列宽度之和），
+                     .table-wrap 的 overflow:auto 便会横向滚动而不是压扁列。 -->
+                <table class="table" style="min-width: 1120px;">
                     <thead>
                         <tr>
                             <th style="width: 110px;" data-sort-key="date">开票日期</th>
-                            <th data-sort-key="seller">销售方</th>
+                            <!-- 其余列宽度固定，销售方是唯一自适应列；窗口变窄时它会被压到
+                                 几乎为零，中文随即逐字换行、行高暴涨。给它一个下限，
+                                 容器 .table-wrap 已有 overflow:auto，宽度不够时改为横向滚动。 -->
+                            <th style="min-width: 220px;" data-sort-key="seller">销售方</th>
                             <th style="width: 200px;" data-sort-key="invoiceNo">发票号码</th>
                             <th class="col-num" style="width: 130px;" data-sort-key="amount">金额</th>
                             <th class="col-secondary" style="width: 100px;" data-sort-key="source">来源</th>
