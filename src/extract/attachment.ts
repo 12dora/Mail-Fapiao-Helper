@@ -2,7 +2,7 @@ import type { ParsedMail } from 'mailparser';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { looksLikeItineraryText } from './classify.js';
 import { looksLikeOfdItinerary, preferPdfOverDuplicateOfd } from './documentIdentity.js';
-import { documentsFromZip } from '../sites/common.js';
+import { detectDocumentKind, documentsFromZip } from '../sites/common.js';
 import { MAX_DOC_BYTES } from '../util/net.js';
 
 // Bound how much attachment data one email can pull into memory. A single
@@ -10,6 +10,16 @@ import { MAX_DOC_BYTES } from '../util/net.js';
 // entry count degrades to manual instead of risking an OOM (ARCHITECTURE R4).
 const PER_DOC_CAP = MAX_DOC_BYTES;
 const PER_EMAIL_CAP = MAX_DOC_BYTES;
+
+/** 跟踪像素 / 极小装饰图阈值：宽高未知时按文件字节兜底。 */
+const DECORATIVE_IMAGE_MAX_BYTES = 8 * 1024;
+
+/** 常见签名 logo / 社交图标文件名（小写，无扩展名）。 */
+const DECORATIVE_IMAGE_NAMES = new Set([
+  'logo', 'signature', 'sig', 'icon', 'spacer', 'pixel', 'tracking',
+  'facebook', 'twitter', 'wechat', 'weixin', 'linkedin', 'instagram',
+  'banner', 'header', 'footer', 'avatar',
+]);
 
 function isPdfAttachment(att: { contentType?: string; filename?: string }): boolean {
   if (att.contentType === 'application/pdf') return true;
@@ -37,30 +47,95 @@ function isImageAttachment(att: { contentType?: string; filename?: string }): bo
   return false;
 }
 
-type AttachmentMeta = { contentType?: string; filename?: string; related?: boolean; contentDisposition?: string; cid?: string; contentId?: string };
+type AttachmentMeta = {
+  contentType?: string;
+  filename?: string;
+  related?: boolean;
+  contentDisposition?: string;
+  cid?: string;
+  contentId?: string;
+  content?: Buffer;
+  size?: number;
+};
+
+function attachmentCid(att: AttachmentMeta): string {
+  const raw = att.cid || att.contentId || '';
+  return raw.replace(/^<|>$/g, '').trim().toLowerCase();
+}
+
+function filenameStem(name: string | undefined): string {
+  if (!name) return '';
+  return name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[\s_-]+/g, '');
+}
 
 /**
- * True for an image that mailparser reports as embedded in the HTML body
- * (a signature logo / tracking pixel), not a real document. mailparser sets
- * `related=true` on CID-referenced parts and uses an `inline` disposition for
- * embedded content. Archiving these as invoices both pollutes the library and
- * — because the attachment extractor runs first — shadows the directLink /
- * thirdParty extractors so the email's genuine invoice link is never followed.
+ * 从 HTML 正文收集被引用的 CID（`cid:` 与 `src="cid:..."`）。
+ * 仅当 related 部件的 CID 确实被正文引用时，才更可能是装饰资源。
  */
-function isInlineImage(att: AttachmentMeta): boolean {
+function collectReferencedCids(mail: ParsedMail): Set<string> {
+  const cids = new Set<string>();
+  const html = typeof mail.html === 'string' ? mail.html : '';
+  if (!html) return cids;
+  const re = /(?:src|href)\s*=\s*["']?\s*cid:([^"'\s>]+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(html)) !== null) {
+    if (match[1]) cids.add(match[1].replace(/^<|>$/g, '').trim().toLowerCase());
+  }
+  return cids;
+}
+
+/**
+ * 可靠识别为装饰资源的图片（签名 logo / 跟踪像素等）（EXT-04）。
+ * `inline`  alone 不再构成丢弃理由——正文内嵌发票截图同样可能是 inline。
+ */
+function isDecorativeImage(att: AttachmentMeta, referencedCids: Set<string>): boolean {
   if (!isImageAttachment(att)) return false;
-  return att.related === true || att.contentDisposition === 'inline';
+
+  const size = att.content?.length ?? att.size ?? 0;
+  const stem = filenameStem(att.filename);
+  if (stem && DECORATIVE_IMAGE_NAMES.has(stem)) return true;
+  if (size > 0 && size <= DECORATIVE_IMAGE_MAX_BYTES) return true;
+
+  // related + CID 被 HTML 引用：典型 multipart/related 签名图。
+  if (att.related === true) {
+    const cid = attachmentCid(att);
+    if (cid && referencedCids.has(cid)) return true;
+  }
+
+  return false;
 }
 
 /** An attachment that should make the attachment extractor claim the email. */
-function isArchivableAttachment(att: AttachmentMeta): boolean {
+function isArchivableAttachment(att: AttachmentMeta, referencedCids: Set<string>): boolean {
   if (isPdfAttachment(att) || isOfdAttachment(att) || isZipAttachment(att)) return true;
-  return isImageAttachment(att) && !isInlineImage(att);
+  return isImageAttachment(att) && !isDecorativeImage(att, referencedCids);
 }
 
 function looksLikeItinerary(artifact: PdfArtifact): boolean {
   const text = `${artifact.suggestedName || ''} ${artifact.source}`.toLowerCase();
   return looksLikeItineraryText(text);
+}
+
+/**
+ * EXT-08：附件在入库前核对 magic bytes；声明类型与真实类型不一致时记 issue 并跳过。
+ */
+function validateAttachmentBytes(
+  data: Buffer,
+  claimed: 'pdf' | 'ofd' | 'image',
+  label: string,
+): { ok: true; format: 'pdf' | 'ofd' | 'image' } | { ok: false; reason: string } {
+  const kind = detectDocumentKind(data);
+  if (claimed === 'pdf') {
+    if (kind === 'pdf') return { ok: true, format: 'pdf' };
+    return { ok: false, reason: `attachment:magic_mismatch:${label}:claimed_pdf:got_${kind}` };
+  }
+  if (claimed === 'ofd') {
+    // OFD 是 ZIP 容器（PK 头）。
+    if (kind === 'archive') return { ok: true, format: 'ofd' };
+    return { ok: false, reason: `attachment:magic_mismatch:${label}:claimed_ofd:got_${kind}` };
+  }
+  if (kind === 'image') return { ok: true, format: 'image' };
+  return { ok: false, reason: `attachment:magic_mismatch:${label}:claimed_image:got_${kind}` };
 }
 
 const attachmentExtractor: Extractor = {
@@ -70,11 +145,13 @@ const attachmentExtractor: Extractor = {
     // Only claim the email when it carries a real document attachment. An email
     // whose only "attachments" are embedded signature logos must fall through to
     // the directLink / thirdParty extractors so its real invoice link is followed.
-    return (mail.attachments ?? []).some(isArchivableAttachment);
+    const referencedCids = collectReferencedCids(mail);
+    return (mail.attachments ?? []).some((att) => isArchivableAttachment(att, referencedCids));
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
     const pdfs: PdfArtifact[] = [];
+    const referencedCids = collectReferencedCids(mail);
 
     if (!mail.attachments || mail.attachments.length === 0) {
       return { kind: 'manual', reason: 'no_attachments' };
@@ -106,22 +183,36 @@ const attachmentExtractor: Extractor = {
 
     for (const att of mail.attachments) {
       if (isPdfAttachment(att)) {
-        if (!admit(att.content.length, att.filename || 'unnamed.pdf')) continue;
+        const label = att.filename || 'unnamed.pdf';
+        const validated = validateAttachmentBytes(att.content, 'pdf', label);
+        if (!validated.ok) {
+          issues.push({ reason: validated.reason });
+          ctx.log.warn(`Skip attachment ${label}: ${validated.reason}`);
+          continue;
+        }
+        if (!admit(att.content.length, label)) continue;
         pdfs.push({
           data: att.content,
-          source: att.filename || 'unnamed.pdf',
+          source: label,
           suggestedName: att.filename,
           format: 'pdf',
           documentType: 'invoice',
         });
       } else if (isOfdAttachment(att)) {
-        if (!admit(att.content.length, att.filename || 'unnamed.ofd')) continue;
+        const label = att.filename || 'unnamed.ofd';
+        const validated = validateAttachmentBytes(att.content, 'ofd', label);
+        if (!validated.ok) {
+          issues.push({ reason: validated.reason });
+          ctx.log.warn(`Skip attachment ${label}: ${validated.reason}`);
+          continue;
+        }
+        if (!admit(att.content.length, label)) continue;
         pdfs.push({
           data: att.content,
-          source: att.filename || 'unnamed.ofd',
+          source: label,
           suggestedName: att.filename,
           format: 'ofd',
-          documentType: looksLikeOfdItinerary({ data: att.content, source: att.filename || 'unnamed.ofd', suggestedName: att.filename, format: 'ofd' })
+          documentType: looksLikeOfdItinerary({ data: att.content, source: label, suggestedName: att.filename, format: 'ofd' })
             ? 'itinerary'
             : 'invoice',
           requiresOcr: true,
@@ -147,15 +238,25 @@ const attachmentExtractor: Extractor = {
           ctx.log.warn(`Failed to extract ZIP ${zipName}: ${msg}`);
         }
       } else if (isImageAttachment(att)) {
-        // Skip signature logos / embedded images; only real image attachments archive.
-        if (isInlineImage(att)) continue;
-        if (!admit(att.content.length, att.filename || 'unnamed-image')) continue;
+        // EXT-04：只自动过滤可可靠识别的装饰图；其余 inline 图片作为 image 归档。
+        if (isDecorativeImage(att, referencedCids)) {
+          ctx.log.debug(`Skip decorative image ${att.filename || att.cid || 'inline-image'}`);
+          continue;
+        }
+        const label = att.filename || 'unnamed-image';
+        const validated = validateAttachmentBytes(att.content, 'image', label);
+        if (!validated.ok) {
+          issues.push({ reason: validated.reason });
+          ctx.log.warn(`Skip attachment ${label}: ${validated.reason}`);
+          continue;
+        }
+        if (!admit(att.content.length, label)) continue;
         pdfs.push({
           data: att.content,
-          source: att.filename || 'unnamed-image',
+          source: label,
           suggestedName: att.filename,
           format: 'image',
-          documentType: looksLikeItinerary({ data: att.content, source: att.filename || 'unnamed-image', suggestedName: att.filename, format: 'image' })
+          documentType: looksLikeItinerary({ data: att.content, source: label, suggestedName: att.filename, format: 'image' })
             ? 'itinerary'
             : 'invoice',
           requiresOcr: true,

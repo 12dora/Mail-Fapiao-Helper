@@ -1,6 +1,5 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
 import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 /** 百望短链域名：`match()` 与 `handle()` 必须使用同一个判定（APP-10B）。 */
@@ -30,6 +29,17 @@ function isBaiwangFormat(parsed: URL): boolean {
   return parsed.hostname === 'fp.baiwang.com' && parsed.pathname === '/format/d';
 }
 
+/** API 返回的下载地址必须落在百望相关 host，防止中间人替换为任意公网 PDF（EXT-06）。 */
+function isAllowedBaiwangDownloadHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === 'baiwang.com'
+    || h.endsWith('.baiwang.com')
+    || h === 'bwjf.cn'
+    || h.endsWith('.bwjf.cn')
+    || h === 'baiwang.com.cn'
+    || h.endsWith('.baiwang.com.cn');
+}
+
 function filenameFromDisposition(value: string | null): string {
   const encoded = value?.match(/filename\*=UTF-8''([^;\s]+)/i);
   if (encoded?.[1]) return safeFilename(tryDecodeURIComponent(encoded[1]), 'baiwang-invoice.pdf');
@@ -38,7 +48,7 @@ function filenameFromDisposition(value: string | null): string {
   return safeFilename(tryDecodeURIComponent(match[1].replace(/^"|"$/g, '')), 'baiwang-invoice.pdf');
 }
 
-async function pdfFromUrl(url: string, ctx: Ctx, referer?: string): Promise<PdfArtifact> {
+async function pdfFromUrl(url: string, ctx: Ctx, referer?: string) {
   const { data, contentType, contentDisposition } = await fetchBuffer(url, ctx, referer);
 
   // 与其他 handler 共用同一个文档响应校验（APP-10D）。
@@ -48,7 +58,7 @@ async function pdfFromUrl(url: string, ctx: Ctx, referer?: string): Promise<PdfA
     data,
     source: url,
     suggestedName: filenameFromDisposition(contentDisposition),
-    format: 'pdf',
+    format: 'pdf' as const,
   };
 }
 
@@ -97,20 +107,40 @@ async function resolveBwjfShortUrl(url: string, ctx: Ctx): Promise<string> {
   return finalUrl;
 }
 
+/**
+ * 旧预览页：只走 HTTPS 解析下载地址（EXT-06）。
+ * 明文 HTTP 会被链路中间人替换 einvoiceUrl，绝不能降级。
+ */
 async function resolveLegacyPreview(url: string, ctx: Ctx): Promise<string> {
   const invoiceId = new URL(url).searchParams.get('invoiceId');
   if (!invoiceId) throw new Error('baiwang_invoice_id_missing');
-  const apiUrl = `http://i.baiwang.com/api/forward/tour/invoices?invoiceId=${encodeURIComponent(invoiceId)}`;
+  const apiUrl = `https://i.baiwang.com/api/forward/cloud/invoices?invoiceId=${encodeURIComponent(invoiceId)}`;
   const response = await ctx.http(apiUrl, {
     headers: {
       Accept: 'application/json,*/*',
       'User-Agent': 'Mozilla/5.0 Mail-Fapiao-Helper',
     },
   });
-  if (!response.ok) throw new Error(`http_${response.status}`);
+  if (!response.ok) {
+    // HTTPS 不可用时进入待确认，不回退到明文 HTTP。
+    throw new Error(`baiwang_legacy_api_http_${response.status}`);
+  }
   const json = await response.json() as { resultData?: Array<{ einvoiceUrl?: string }> };
   const downloadUrl = json.resultData?.find((row) => typeof row.einvoiceUrl === 'string')?.einvoiceUrl;
   if (!downloadUrl) throw new Error('baiwang_invoice_url_missing');
+
+  let parsed: URL;
+  try {
+    parsed = new URL(downloadUrl);
+  } catch {
+    throw new Error('baiwang_invoice_url_invalid');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`baiwang_invoice_url_insecure:${parsed.protocol}`);
+  }
+  if (!isAllowedBaiwangDownloadHost(parsed.hostname)) {
+    throw new Error(`baiwang_invoice_url_untrusted_host:${parsed.hostname}`);
+  }
   return downloadUrl;
 }
 
@@ -130,7 +160,7 @@ const baiwangHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const cleanUrl = decodeHtmlEntities(url);
     const parsed = new URL(cleanUrl);
     let downloadUrl = directDownloadUrl(cleanUrl);
@@ -145,7 +175,7 @@ const baiwangHandler: SiteHandler = {
     }
     if (!downloadUrl) throw new Error('baiwang_download_url_missing');
 
-    return [await pdfFromUrl(downloadUrl, ctx, cleanUrl)];
+    return { artifacts: [await pdfFromUrl(downloadUrl, ctx, cleanUrl)] };
   },
 };
 

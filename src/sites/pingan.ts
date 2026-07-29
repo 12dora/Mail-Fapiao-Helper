@@ -1,6 +1,5 @@
-import type { Page } from 'playwright';
-import type { Ctx, PdfArtifact } from '../extract/types.js';
-import type { SiteHandler } from './types.js';
+import type { Ctx } from '../extract/types.js';
+import type { SiteHandleResult, SiteHandler } from './types.js';
 import { assertDocumentResponse, decodeHtmlEntities, fetchBuffer, safeFilename, tryDecodeURIComponent } from './common.js';
 
 function extractInvoiceUrl(html: string): string | null {
@@ -47,7 +46,7 @@ const pinganHandler: SiteHandler = {
     }
   },
 
-  async handle(_page: Page, url: string, ctx: Ctx): Promise<PdfArtifact[]> {
+  async handle(url: string, ctx: Ctx): Promise<SiteHandleResult> {
     const token = await resolveToken(decodeHtmlEntities(url), ctx);
     const downloadUrl = `https://dscs-ucup-evp-core.pingan.com.cn/ucup-evp-dmz/api/v1/preview?t=1&v=3&q=${encodeURIComponent(token)}`;
     const { data, contentType } = await fetchBuffer(downloadUrl, ctx);
@@ -57,12 +56,14 @@ const pinganHandler: SiteHandler = {
     assertDocumentResponse({ data, contentType, label: 'pingan', allow: ['pdf'] });
 
     const head = await ctx.http(downloadUrl, { method: 'HEAD' }).catch(() => null);
-    return [{
-      data,
-      source: downloadUrl,
-      suggestedName: filenameFromDisposition(head?.headers.get('content-disposition') ?? null),
-      format: 'pdf',
-    }];
+    return {
+      artifacts: [{
+        data,
+        source: downloadUrl,
+        suggestedName: filenameFromDisposition(head?.headers.get('content-disposition') ?? null),
+        format: 'pdf',
+      }],
+    };
   },
 };
 

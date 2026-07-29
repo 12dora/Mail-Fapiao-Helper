@@ -196,8 +196,25 @@ export async function* fetchMails(cfg: Config, log: Logger): AsyncIterable<RawMa
         log.info(`IMAP SEARCH mailbox="${mailbox}": ${uids.length} matches`);
 
         for await (const msg of client.fetch(uids, { source: true, envelope: true, internalDate: true }, { uid: true })) {
-          if (!msg.source) continue;
-          const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source);
+          // EXT-11：请求了 source 却为空时不得静默跳过——先单 UID 重取一次，仍空则记 warn。
+          let source = msg.source;
+          if (!source) {
+            log.warn(`IMAP mailbox="${mailbox}" uid=${msg.uid}: empty source on first fetch, retrying once`);
+            try {
+              const retry = await client.fetchOne(String(msg.uid), { source: true }, { uid: true });
+              if (retry && retry.source) source = retry.source;
+            } catch (retryErr) {
+              log.warn(
+                `IMAP mailbox="${mailbox}" uid=${msg.uid}: source re-fetch failed: `
+                + `${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+              );
+            }
+          }
+          if (!source) {
+            log.warn(`IMAP mailbox="${mailbox}" uid=${msg.uid}: missing source after retry, skipping message`);
+            continue;
+          }
+          const raw = Buffer.isBuffer(source) ? source : Buffer.from(source);
           let parsed: Awaited<ReturnType<typeof simpleParser>> | undefined;
           try {
             parsed = await parseMailWithGuards(raw);
