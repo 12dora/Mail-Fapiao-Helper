@@ -13,7 +13,7 @@
 
     <main class="main">
         <div class="toolbar">
-            <span class="toolbar__crumb">工作流</span>
+            <span class="toolbar__crumb">日常操作</span>
             <h1 class="toolbar__title" tabindex="-1">发票库</h1>
             <div class="toolbar__spacer"></div>
             <span class="toolbar__meta"><span data-lib="recognized">0</span> 条识别结果 · 发票清册</span>
@@ -24,8 +24,8 @@
             <div class="stats">
                 <div class="stat">
                     <div class="stat__label">待识别文件</div>
-                    <div class="stat__value" data-lib="total">0</div>
-                    <div class="stat__delta is-flat">待识别清单</div>
+                    <div class="stat__value" data-lib="pending">0</div>
+                    <div class="stat__delta is-flat">等待识别</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">已识别</div>
@@ -65,15 +65,15 @@
 
                 <div class="spacer"></div>
                 <button class="btn btn--sm btn--primary" type="button" data-action="ocr-toggle" data-ocr-mode="start">开始识别</button>
-                <label class="sr-only" for="library-ocr-parallel">识别并行数</label>
-                <select class="select" id="library-ocr-parallel" data-ocr-parallel style="width: 120px;">
-                    <option value="1" selected>1 个并行</option>
-                    <option value="2">2 个并行</option>
-                    <option value="4">4 个并行</option>
-                    <option value="8">8 个并行</option>
+                <label class="sr-only" for="library-ocr-parallel">同时识别数量</label>
+                <select class="select" id="library-ocr-parallel" data-ocr-parallel style="width: 160px;">
+                    <option value="1" selected>每次同时识别 1 份（推荐）</option>
+                    <option value="2">每次同时识别 2 份</option>
+                    <option value="4">每次同时识别 4 份</option>
+                    <option value="8">每次同时识别 8 份</option>
                 </select>
                 <button class="btn btn--sm" type="button" data-action="rename-organize">一键改名</button>
-                <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开归档目录</button>
+                <button class="btn btn--sm" type="button" data-action="open-invoices-folder">打开发票保存文件夹</button>
             </div>
 
             <div class="grid-3">
@@ -93,10 +93,10 @@
                 </div>
                 <div class="card card--tight">
                     <div class="row row--between">
-                        <span class="small muted">结账单/堂食明细</span>
-                        <span class="mono strong" data-lib="pending">0</span>
+                        <span class="small muted">发票库总记录</span>
+                        <span class="mono strong" data-lib="total">0</span>
                     </div>
-                    <div class="small muted mt-12">结账单与堂食明细</div>
+                    <div class="small muted mt-12">已加载统计中的全部文件</div>
                 </div>
             </div>
 
@@ -138,7 +138,7 @@
                         </tr>
                     </thead>
                     <tbody data-library-rows>
-                        <tr><td colspan="8" class="muted">暂无识别结果。请先抓取邮件并运行识别。</td></tr>
+                        <tr><td colspan="8" class="muted">暂无识别结果。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。</td></tr>
                     </tbody>
                 </table>
             </div>

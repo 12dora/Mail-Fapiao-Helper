@@ -1,7 +1,7 @@
 /* =============================================================
    Mail Fapiao Helper — Desktop App UI
    Restrained tool aesthetic. Light default, dark optional.
-   Designed for Electron (1100×700 min, frameless titlebar drag).
+   Designed for Electron (900×640 min, default ~1180×780, frameless titlebar drag).
    ============================================================= */
 
 /* ---------- Tokens: Light (default) ---------- */
@@ -332,11 +332,25 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
 .status-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: var(--ok);
+  background: var(--fg-deco);
   position: relative;
   flex-shrink: 0;
 }
 .status-dot::after {
+  content: none;
+}
+/* UI-01: only verified shows green; pulse reserved for verified only. */
+.status-dot.is-unconfigured,
+.status-dot.is-off {
+  background: var(--fg-deco);
+}
+.status-dot.is-saved {
+  background: var(--warn);
+}
+.status-dot.is-verified {
+  background: var(--ok);
+}
+.status-dot.is-verified::after {
   content: "";
   position: absolute;
   inset: -3px;
@@ -349,12 +363,20 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
   0%   { transform: scale(0.6); opacity: 0.6; }
   100% { transform: scale(1.6); opacity: 0;   }
 }
+.sidebar__mail-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sidebar__foot-meta {
   font-family: var(--f-mono);
   font-size: 10.5px;
   color: var(--fg-faint);
   margin-left: auto;
+  flex-shrink: 0;
 }
+.theme-toggle { flex-shrink: 0; }
 
 /* ---------- Main pane ---------- */
 .main {
@@ -410,6 +432,10 @@ code, kbd, pre, samp { font-family: var(--f-mono); }
   scrollbar-gutter: stable;
   padding: 22px 28px 60px;
   animation: pageIn var(--dur-3) var(--ease-out) both;
+}
+/* SPA revisits re-apply this class so the enter motion runs again (UI-05). */
+.page.is-page-entering {
+  animation: pageIn 180ms var(--ease-out) both;
 }
 @keyframes pageIn {
   from { opacity: 0; transform: translateY(6px); }
@@ -550,8 +576,6 @@ kbd {
   border-bottom-width: 2px;
   border-radius: 4px;
 }
-.kbd-row { display: inline-flex; gap: 4px; }
-
 /* ---------- Inputs ---------- */
 .input, .select, .textarea {
   width: 100%;
@@ -626,29 +650,6 @@ kbd {
   color: var(--fg-muted);
   padding-top: 2px;
 }
-
-/* Toggle */
-.toggle {
-  position: relative;
-  width: 30px; height: 18px;
-  border-radius: 999px;
-  background: var(--border-strong);
-  cursor: pointer;
-  transition: background var(--dur-2) var(--ease-out);
-  flex-shrink: 0;
-}
-.toggle::after {
-  content: "";
-  position: absolute;
-  top: 2px; left: 2px;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform var(--dur-2) var(--ease-spring);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.3);
-}
-.toggle.is-on { background: var(--accent); }
-.toggle.is-on::after { transform: translateX(12px); }
 
 /* `.check` is a real <input type="checkbox">; the visual language of the old
    mouse-only div is preserved through appearance:none + ::after. */
@@ -728,8 +729,13 @@ kbd {
   border-radius: var(--radius-sm);
   background: var(--bg-pane);
   color: var(--fg-strong);
-  font-family: var(--f-mono);
+  font-family: var(--f-sans);
   font-size: 11.5px;
+  cursor: pointer;
+}
+.template-token:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
 }
 .template-token small {
   color: var(--fg-muted);
@@ -856,9 +862,6 @@ kbd {
 /* Secondary columns collapse on narrow windows; their content is repeated
    inline in the primary cell via .cell-sub so nothing becomes unreachable. */
 .cell-sub { display: none; }
-
-.row-expand { height: 0; overflow: hidden; transition: height var(--dur-3) var(--ease-out); }
-.row-expand.is-open { height: var(--h, 120px); }
 
 /* ---------- Filter bar ---------- */
 .filterbar {
@@ -1031,6 +1034,8 @@ kbd {
   flex-direction: column;
   gap: 8px;
   z-index: 80;
+  /* FE-09: stack does not intercept clicks; only toast cards do. */
+  pointer-events: none;
   /* Sticky errors must never push older toasts (and their close buttons) past
      the top of the window; the stack scrolls instead. */
   max-height: calc(100vh - var(--titlebar-h) - 36px);
@@ -1042,6 +1047,7 @@ kbd {
   position: relative;
   min-width: 280px;
   max-width: 380px;
+  pointer-events: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -1051,6 +1057,9 @@ kbd {
   animation: toastIn var(--dur-3) var(--ease-spring);
   font-size: 12.5px;
   color: var(--fg-strong);
+}
+.toast.is-leaving {
+  animation: toastOut 140ms var(--ease-out) forwards;
 }
 .toast.ok   { border-left-color: var(--ok); }
 .toast.warn { border-left-color: var(--warn); }
@@ -1105,34 +1114,31 @@ kbd {
   from { opacity: 0; transform: translateX(20px); }
   to   { opacity: 1; transform: translateX(0);   }
 }
+@keyframes toastOut {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(12px); }
+}
 
-/* ---------- Modal / popover ---------- */
-.scrim {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.45);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  z-index: 70;
-  animation: fadeIn var(--dur-2) var(--ease-out);
-}
-.modal {
+/* ---------- Op-state sync banner (FE-13 / NEW-DEFECT 2) ----------
+   Fixed under the titlebar and hosted on body — never a child of the
+   two-column `.app` grid, which would shift sidebar/main cells. */
+.op-state-banner {
   position: fixed;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%);
-  width: 460px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-modal);
-  z-index: 71;
-  overflow: hidden;
-  animation: modalIn var(--dur-3) var(--ease-spring);
+  top: var(--titlebar-h);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  border-bottom: 1px solid var(--warn);
+  font-size: 12.5px;
+  pointer-events: auto;
 }
-@keyframes modalIn {
-  from { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
-  to   { opacity: 1; transform: translate(-50%, -50%) scale(1);    }
-}
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
 /* ---------- Skeleton ---------- */
 .skeleton {
@@ -1167,16 +1173,6 @@ kbd {
   background: var(--bg-hover);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
-}
-.empty__glyph {
-  width: 84px; height: 84px;
-  margin-bottom: 14px;
-  color: var(--fg-deco);
-  animation: floatY 4s ease-in-out infinite;
-}
-@keyframes floatY {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-4px); }
 }
 .empty__title {
   color: var(--fg-strong);
@@ -1232,6 +1228,23 @@ kbd {
 .mt-16  { margin-top: 16px; }
 .mt-24  { margin-top: 24px; }
 .mb-12  { margin-bottom: 12px; }
+/* UI-02: never compress fixed-height buttons; wrap the date preview instead. */
+.fetch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.fetch-actions > .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.fetch-actions .range-preview,
+.fetch-actions #range-preview {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .mono   { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
 .muted  { color: var(--fg-muted); }
 .faint  { color: var(--fg-faint); }
@@ -1292,41 +1305,6 @@ kbd {
   }
 }
 
-@media (max-width: 760px) {
-  :root { --sidebar-w: 64px; }
-  .sidebar__title,
-  .sidebar__ver,
-  .sidebar__search,
-  .nav-group__title,
-  .nav-item span:not(.nav-item__icon):not(.nav-item__badge),
-  .sidebar__foot span {
-    display: none;
-  }
-  .sidebar__brand {
-    justify-content: center;
-    padding-left: 0;
-    padding-right: 0;
-  }
-  .nav-item {
-    justify-content: center;
-    padding: 9px 0;
-  }
-  .nav-item__badge {
-    position: absolute;
-    right: 3px;
-    top: 2px;
-    margin-left: 0;
-  }
-  .sidebar__foot {
-    justify-content: center;
-    padding-left: 0;
-    padding-right: 0;
-  }
-  .stats {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* ---------- Setting rows ---------- */
 .setting-row {
   display: flex;
@@ -1339,6 +1317,13 @@ kbd {
 .setting-row__main { flex: 1; min-width: 0; }
 .setting-row__title { color: var(--fg-strong); font-size: 12.5px; font-weight: 500; }
 .setting-row__desc  { color: var(--fg-muted); font-size: 11.5px; margin-top: 2px; }
+.setting-row__value {
+  min-width: 0;
+  max-width: 55%;
+  overflow-wrap: anywhere;
+  text-align: right;
+  flex-shrink: 1;
+}
 
 /* ---------- Tabs ---------- */
 .tabs {
@@ -1408,14 +1393,24 @@ kbd {
   transition: transform var(--dur-2) var(--ease-out);
 }
 .group.is-open .group__chev { transform: rotate(90deg); }
+/* UI-06: grid 0fr→1fr animates without a fixed max-height cap.
+   Padding lives on the nested `.group__content` so the 0fr track can fully
+   collapse (padding on the min-height:0 clip wrapper leaves a gutter). */
 .group__body {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height var(--dur-4) var(--ease-out);
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms var(--ease-out);
 }
-/* `none` rather than a fixed cap: every row in a group must stay reachable. */
-.group.is-open .group__body { max-height: none; }
-.group__inner { padding: 0 16px 14px; }
+.group.is-open .group__body {
+  grid-template-rows: 1fr;
+}
+.group__inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.group__content {
+  padding: 0 16px 14px;
+}
 
 /* ---------- Theme toggle ---------- */
 .theme-toggle {
@@ -1427,6 +1422,7 @@ kbd {
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
+  flex-shrink: 0;
   transition: all var(--dur-1) var(--ease-out);
 }
 .theme-toggle:hover { color: var(--fg-strong); border-color: var(--border-strong); }

@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>收件箱 · 发票助手</title>
+    <title>邮件记录 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="inbox">
@@ -13,10 +13,10 @@
 
     <main class="main">
         <div class="toolbar">
-            <span class="toolbar__crumb">工作流</span>
+            <span class="toolbar__crumb">日常操作</span>
             <h1 class="toolbar__title" tabindex="-1">邮件记录</h1>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta"><span data-inbox="total">0</span> 封邮件 · 本地缓存</span>
+            <span class="toolbar__meta"><span data-inbox="total">0</span> 封邮件 · 已保存的邮件</span>
         </div>
 
         <div class="page stagger">
@@ -25,7 +25,7 @@
                 <div class="stat">
                     <div class="stat__label">累计邮件</div>
                     <div class="stat__value" data-inbox="total">0</div>
-                    <div class="stat__delta">本地缓存</div>
+                    <div class="stat__delta">已保存的邮件</div>
                 </div>
                 <div class="stat">
                     <div class="stat__label">有附件</div>
@@ -59,8 +59,8 @@
                 </button>
 
                 <div class="spacer"></div>
-                <button class="btn btn--sm" type="button" data-action="export-table">复制为 CSV</button>
-                <button class="btn btn--sm" type="button" data-action="open-samples-folder">打开邮件缓存</button>
+                <button class="btn btn--sm" type="button" data-action="export-table">复制当前筛选结果</button>
+                <button class="btn btn--sm" type="button" data-action="open-samples-folder">打开已保存的邮件</button>
             </div>
 
             <!-- 结果统计 -->
@@ -82,7 +82,7 @@
                         </tr>
                     </thead>
                     <tbody data-inbox-rows>
-                        <tr><td colspan="7" class="muted">暂无本地缓存邮件。配置邮箱后点击“开始抓取”。</td></tr>
+                        <tr><td colspan="7" class="muted">还没有已保存的邮件。请到「开始处理」，选择日期后点击「获取邮件」。</td></tr>
                     </tbody>
                 </table>
             </div>

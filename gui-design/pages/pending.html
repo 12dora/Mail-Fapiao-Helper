@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>待处理队列 · 发票助手</title>
+    <title>待确认 · 发票助手</title>
     <link rel="stylesheet" href="../styles/main.css">
 </head>
 <body data-page="pending">
@@ -13,10 +13,10 @@
 
     <main class="main">
         <div class="toolbar">
-            <span class="toolbar__crumb">工作流</span>
-            <h1 class="toolbar__title" tabindex="-1">待处理队列</h1>
+            <span class="toolbar__crumb">日常操作</span>
+            <h1 class="toolbar__title" tabindex="-1">待确认</h1>
             <div class="toolbar__spacer"></div>
-            <span class="toolbar__meta"><span data-pending="total">0</span> 封待处理 · 待确认清单</span>
+            <span class="toolbar__meta"><span data-pending="total">0</span> 封待确认</span>
         </div>
 
         <div class="page stagger">
@@ -32,11 +32,12 @@
                 <div class="row gap-12">
                     <svg class="ic ic--lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" style="color: var(--warn); flex-shrink: 0;" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                     <div style="flex: 1;">
-                        <div class="strong">这些邮件大多是历史链接过期，继续自动重试通常也无法下载</div>
-                        <div class="small muted" style="margin-top: 4px;">你可以打开原邮件、重新授权、手动添加文件，或确认这封邮件不用处理。</div>
+                        <div class="strong">这些邮件需要你确认后才能继续。请按每封邮件下方的提示处理。</div>
+                        <div class="small muted" style="margin-top: 4px;">你可以打开原邮件、选择文件归档，或确认这封邮件不用处理。</div>
                     </div>
-                    <div class="row gap-8" style="align-self: flex-start;">
-                        <button class="btn btn--sm" type="button" data-action="export-table">复制为 CSV</button>
+                    <div class="row gap-8" style="align-self: flex-start; flex-wrap: wrap;">
+                        <button class="btn btn--sm" type="button" data-action="export-table">复制待确认清单（可粘贴到 Excel）</button>
+                        <button class="btn btn--sm" type="button" data-action="export-pending-tech">复制技术详情</button>
                         <button class="btn btn--sm btn--primary" type="button" data-action="reload-summary">刷新列表</button>
                     </div>
                 </div>
@@ -61,7 +62,7 @@
             </div>
 
             <div data-pending-groups>
-                <div class="card"><div class="strong">待确认队列是空的</div><div class="small muted mt-12">所有邮件都已经自动处理完成，这里不需要你做任何事。</div></div>
+                <div class="card"><div class="strong">目前没有需要你确认的邮件</div><div class="small muted mt-12">获取发票文件后，如有无法自动处理的邮件，会显示在这里。</div></div>
             </div>
         </div>
     </main>
