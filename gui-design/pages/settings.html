@@ -119,6 +119,16 @@
                     </div>
                 </div>
             </div>
+
+            <div class="card" data-archive-journal-panel>
+                <h3 class="card__title mb-12">归档恢复</h3>
+                <p class="small muted mb-12" data-archive-journal-status>正在检查归档恢复记录…</p>
+                <div class="row gap-8">
+                    <button class="btn btn--sm" type="button" data-action="archive-journal-refresh">刷新状态</button>
+                    <button class="btn btn--sm btn--danger" type="button" data-action="archive-journal-quarantine" data-archive-journal-quarantine disabled>确认隔离并继续</button>
+                </div>
+                <p class="small muted mt-12">仅在自动恢复无法完成时使用。隔离会把恢复记录移到数据目录内的副本，不会删除证据。</p>
+            </div>
         </div>
     </main>
 </div>

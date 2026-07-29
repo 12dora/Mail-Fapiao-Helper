@@ -68,26 +68,77 @@ export function bufferedResponse(original: Response, data: Buffer): Response {
 }
 
 /**
- * IANA IPv4 special-purpose prefixes that are **not** global unicast destinations.
- * Default-deny: anything matching these (or unparseable) is non-global.
- * Sources: IANA IPv4 Special-Purpose Address Registry.
+ * SSRF IP classification — genuine DEFAULT-DENY.
+ *
+ * An address is blocked unless it is **provably global unicast**:
+ *   1. must parse as a strict IPv4 / IPv6 literal (else BLOCK);
+ *   2. IPv4-mapped / IPv4-compatible IPv6 → classify the embedded IPv4;
+ *   3. IPv6 must sit in 2000::/3 (global unicast container);
+ *   4. subtract the full IANA Special-Purpose Address Registries
+ *      (any match → BLOCK; unclassifiable → BLOCK).
+ *
+ * Ordinary public destinations (e.g. CDN invoice hosts) remain allowed.
+ *
+ * Audit sources (do not treat this as an ad-hoc deny-list to grow piecemeal):
+ *   - https://www.iana.org/assignments/iana-ipv4-special-registry/
+ *   - https://www.iana.org/assignments/iana-ipv6-special-registry/
+ *   - Multicast / reserved are non-unicast and therefore never global.
+ *
+ * Compact IPv4 special-purpose table (registry name → prefix):
+ *   This network              0.0.0.0/8
+ *   Private-Use               10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+ *   Shared Address Space      100.64.0.0/10
+ *   Loopback                  127.0.0.0/8
+ *   Link Local                169.254.0.0/16
+ *   IETF Protocol Assignments 192.0.0.0/24  (covers /29 continuity, dummy, PCP, TURN, NAT64)
+ *   TEST-NET-1                192.0.2.0/24
+ *   AS112-v4                  192.31.196.0/24
+ *   AMT                       192.52.193.0/24
+ *   6to4 Relay Anycast (dep.) 192.88.99.0/24
+ *   Direct Delegation AS112   192.175.48.0/24
+ *   Benchmarking              198.18.0.0/15
+ *   TEST-NET-2                198.51.100.0/24
+ *   TEST-NET-3                203.0.113.0/24
+ *   Multicast (non-unicast)   224.0.0.0/4
+ *   Reserved / Limited Bcast  240.0.0.0/4  (includes 255.255.255.255/32)
+ *
+ * Compact IPv6 special-purpose table (registry name → prefix):
+ *   Unspecified               ::/128
+ *   Loopback                  ::1/128
+ *   IPv4-mapped / compatible  ::ffff:0:0/96, ::/96  (→ embedded IPv4 rules)
+ *   Well-known NAT64          64:ff9b::/96
+ *   Local-Use IPv4/IPv6 XLAT  64:ff9b:1::/48
+ *   Discard-Only              100::/64
+ *   IETF Protocol Assignments 2001::/23  (TEREDO, benchmarking, AMT, AS112-v6, ORCHID*, …)
+ *   Documentation             2001:db8::/32, 3fff::/20
+ *   6to4                      2002::/16
+ *   Direct Delegation AS112   2620:4f:8000::/48
+ *   Segment Routing (SIDs)    5f00::/16
+ *   Unique-Local              fc00::/7
+ *   Link-Local Unicast        fe80::/10
+ *   Multicast                 ff00::/8
  */
-const IPV4_NON_GLOBAL: ReadonlyArray<readonly [network: number, prefixLen: number]> = [
-  [0x00000000, 8],  // 0.0.0.0/8 this network
-  [0x0a000000, 8],  // 10.0.0.0/8 private
-  [0x64400000, 10], // 100.64.0.0/10 shared address space (CGNAT)
-  [0x7f000000, 8],  // 127.0.0.0/8 loopback
-  [0xa9fe0000, 16], // 169.254.0.0/16 link-local
-  [0xac100000, 12], // 172.16.0.0/12 private
-  [0xc0000000, 24], // 192.0.0.0/24 IETF protocol assignments
-  [0xc0000200, 24], // 192.0.2.0/24 TEST-NET-1 documentation
-  [0xc0586300, 24], // 192.88.99.0/24 6to4 relay anycast (deprecated)
-  [0xc0a80000, 16], // 192.168.0.0/16 private
-  [0xc6120000, 15], // 198.18.0.0/15 benchmarking
-  [0xc6336400, 24], // 198.51.100.0/24 TEST-NET-2 documentation
-  [0xcb007100, 24], // 203.0.113.0/24 TEST-NET-3 documentation
-  [0xe0000000, 4],  // 224.0.0.0/4 multicast
-  [0xf0000000, 4],  // 240.0.0.0/4 reserved
+
+/** IANA IPv4 Special-Purpose (+ non-unicast) prefixes — subtracted after parse. */
+const IPV4_SPECIAL_PURPOSE: ReadonlyArray<readonly [network: number, prefixLen: number]> = [
+  [0x00000000, 8],  // 0.0.0.0/8 This network
+  [0x0a000000, 8],  // 10.0.0.0/8 Private-Use
+  [0x64400000, 10], // 100.64.0.0/10 Shared Address Space (CGNAT)
+  [0x7f000000, 8],  // 127.0.0.0/8 Loopback
+  [0xa9fe0000, 16], // 169.254.0.0/16 Link Local
+  [0xac100000, 12], // 172.16.0.0/12 Private-Use
+  [0xc0000000, 24], // 192.0.0.0/24 IETF Protocol Assignments
+  [0xc0000200, 24], // 192.0.2.0/24 TEST-NET-1
+  [0xc01fc400, 24], // 192.31.196.0/24 AS112-v4
+  [0xc034c100, 24], // 192.52.193.0/24 AMT
+  [0xc0586300, 24], // 192.88.99.0/24 6to4 Relay Anycast (deprecated)
+  [0xc0a80000, 16], // 192.168.0.0/16 Private-Use
+  [0xc0af3000, 24], // 192.175.48.0/24 Direct Delegation AS112 Service
+  [0xc6120000, 15], // 198.18.0.0/15 Benchmarking
+  [0xc6336400, 24], // 198.51.100.0/24 TEST-NET-2
+  [0xcb007100, 24], // 203.0.113.0/24 TEST-NET-3
+  [0xe0000000, 4],  // 224.0.0.0/4 Multicast (non-unicast)
+  [0xf0000000, 4],  // 240.0.0.0/4 Reserved (incl. 255.255.255.255/32)
 ];
 
 /** Parse dotted-quad to uint32; null if not a strict IPv4 literal. */
@@ -111,13 +162,17 @@ function ipv4InPrefix(ip: number, network: number, prefixLen: number): boolean {
   return ((ip & mask) >>> 0) === ((network & mask) >>> 0);
 }
 
-/** True if IPv4 is globally routable unicast (not any IANA special-purpose range). */
+/**
+ * True only if IPv4 is provably globally routable unicast.
+ * DEFAULT-DENY: unparseable or any IANA special-purpose / non-unicast → false.
+ */
 function isGlobalIpv4(ip: string): boolean {
   const n = parseIpv4Uint(ip);
-  if (n === null) return false;
-  for (const [network, prefixLen] of IPV4_NON_GLOBAL) {
+  if (n === null) return false; // unparseable → blocked
+  for (const [network, prefixLen] of IPV4_SPECIAL_PURPOSE) {
     if (ipv4InPrefix(n, network, prefixLen)) return false;
   }
+  // Survived full special-purpose subtraction → global unicast.
   return true;
 }
 
@@ -180,65 +235,73 @@ function v6Prefix(hexGroups: string, prefixBits: number): { bytes: number[]; bit
 }
 
 /**
- * IANA / RFC IPv6 special-purpose prefixes that are not global destinations.
- * IPv4-mapped / IPv4-compatible are handled before this list (embedded IPv4 path).
+ * IANA IPv6 Special-Purpose prefixes subtracted from 2000::/3 (and other non-global).
+ * IPv4-mapped / IPv4-compatible are classified via the embedded IPv4 path first.
  */
-const IPV6_NON_GLOBAL: ReadonlyArray<{ bytes: number[]; bits: number }> = [
-  v6Prefix('::', 128),           // ::/128 unspecified
-  v6Prefix('::1', 128),          // ::1/128 loopback
-  v6Prefix('64:ff9b', 96),       // 64:ff9b::/96 well-known NAT64
-  v6Prefix('100', 64),           // 100::/64 discard-only
-  v6Prefix('2001', 23),          // 2001::/23 IETF protocol assignments
-  v6Prefix('2001:db8', 32),      // 2001:db8::/32 documentation
-  v6Prefix('2002', 16),          // 2002::/16 6to4
-  v6Prefix('3fff', 20),          // 3fff::/20 documentation (RFC 9637)
-  v6Prefix('fc00', 7),           // fc00::/7 unique-local
-  v6Prefix('fe80', 10),          // fe80::/10 link-local
-  v6Prefix('ff00', 8),           // ff00::/8 multicast
+const IPV6_SPECIAL_PURPOSE: ReadonlyArray<{ bytes: number[]; bits: number }> = [
+  v6Prefix('::', 128),              // ::/128 Unspecified
+  v6Prefix('::1', 128),             // ::1/128 Loopback
+  v6Prefix('64:ff9b', 96),          // 64:ff9b::/96 Well-Known NAT64 Prefix
+  v6Prefix('64:ff9b:1', 48),        // 64:ff9b:1::/48 Local-Use IPv4/IPv6 Translation
+  v6Prefix('100', 64),              // 100::/64 Discard-Only Address Block
+  v6Prefix('2001', 23),             // 2001::/23 IETF Protocol Assignments
+  v6Prefix('2001:db8', 32),         // 2001:db8::/32 Documentation
+  v6Prefix('2002', 16),             // 2002::/16 6to4
+  v6Prefix('3fff', 20),             // 3fff::/20 Documentation (RFC 9637)
+  v6Prefix('5f00', 16),             // 5f00::/16 Segment Routing (IPv6 SIDs)
+  v6Prefix('2620:4f:8000', 48),     // 2620:4f:8000::/48 Direct Delegation AS112 Service
+  v6Prefix('fc00', 7),              // fc00::/7 Unique-Local
+  v6Prefix('fe80', 10),             // fe80::/10 Link-Local Unicast
+  v6Prefix('ff00', 8),              // ff00::/8 Multicast
 ];
 
-/** Global unicast space 2000::/3 (after excluding specials above). */
-const IPV6_GLOBAL_UNICAST = v6Prefix('2000', 3);
+/** Only addresses inside 2000::/3 can be global unicast (IPv6). */
+const IPV6_GLOBAL_UNICAST_CONTAINER = v6Prefix('2000', 3);
 
 function embeddedIpv4FromBytes(bytes: number[], offset: number): string {
   return `${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`;
 }
 
 /**
- * True if an IPv6 literal is a globally routable unicast address.
- * Default-deny: unparseable, non-2000::/3, or any special-purpose prefix → false.
+ * True only if an IPv6 literal is provably globally routable unicast.
+ * DEFAULT-DENY: unparseable → false; outside 2000::/3 → false; special-purpose → false.
  * IPv4-mapped (`::ffff:x.x.x.x`) and IPv4-compatible (`::x.x.x.x`) use IPv4 global rules.
  */
 function isGlobalIpv6(ip: string): boolean {
   const bytes = ipv6ToBytes(ip);
-  if (!bytes) return false;
+  if (!bytes) return false; // unparseable → blocked
 
-  // ::ffff:0:0/96 IPv4-mapped
+  // ::ffff:0:0/96 IPv4-mapped → embedded IPv4 classification (default-deny inherits).
   const first10Zero = bytes.slice(0, 10).every((b) => b === 0);
   if (first10Zero && bytes[10] === 0xff && bytes[11] === 0xff) {
     return isGlobalIpv4(embeddedIpv4FromBytes(bytes, 12));
   }
-  // ::/96 IPv4-compatible (deprecated), excluding :: and ::1 already covered by mapped check length
+  // ::/96 IPv4-compatible (deprecated) → embedded IPv4.
   if (bytes.slice(0, 12).every((b) => b === 0)) {
     return isGlobalIpv4(embeddedIpv4FromBytes(bytes, 12));
   }
 
-  for (const { bytes: prefix, bits } of IPV6_NON_GLOBAL) {
+  // Positive membership in global-unicast container first (default-deny outside).
+  if (!ipv6MatchesPrefix(bytes, IPV6_GLOBAL_UNICAST_CONTAINER.bytes, IPV6_GLOBAL_UNICAST_CONTAINER.bits)) {
+    return false;
+  }
+
+  // Subtract full IANA IPv6 special-purpose registry.
+  for (const { bytes: prefix, bits } of IPV6_SPECIAL_PURPOSE) {
     if (ipv6MatchesPrefix(bytes, prefix, bits)) return false;
   }
 
-  // Only 2000::/3 is global unicast; everything else default-deny.
-  return ipv6MatchesPrefix(bytes, IPV6_GLOBAL_UNICAST.bytes, IPV6_GLOBAL_UNICAST.bits);
+  return true;
 }
 
 /**
- * True if an IP literal is **not** a global unicast destination (SSRF deny list is
- * inverted: we require positive global classification). Unparseable → blocked.
+ * True if an IP literal is **not** a provably global unicast destination.
+ * DEFAULT-DENY: only positively classified global unicast is allowed; unparseable → blocked.
  */
 export function isBlockedIp(ip: string): boolean {
   if (net.isIPv4(ip)) return !isGlobalIpv4(ip);
   if (net.isIPv6(ip)) return !isGlobalIpv6(ip);
-  return true; // not a recognizable IP -> treat as blocked
+  return true; // not a recognizable IP → blocked
 }
 
 /** True if an IP is IPv4 127/8 or IPv6 ::1 (incl. v4-mapped/compat loopback). */

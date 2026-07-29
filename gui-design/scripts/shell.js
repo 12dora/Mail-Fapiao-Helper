@@ -2145,6 +2145,85 @@
             // Also recovers when the bridge only became available after wire().
             Promise.resolve(loadAppInfo({ force: pageId === 'settings' })).catch(() => {});
         }
+        if (pageId === 'settings') {
+            Promise.resolve(refreshArchiveJournalStatus()).catch(() => {});
+        }
+    }
+
+    /**
+     * 设置页「归档恢复」：查询 journal 状态，并仅在可隔离时启用危险按钮。
+     * 无 bridge 时降级为静态预览文案，不假装一切正常。
+     */
+    async function refreshArchiveJournalStatus() {
+        const panel = document.querySelector('[data-archive-journal-panel]');
+        if (!panel) return;
+        const statusEl = panel.querySelector('[data-archive-journal-status]');
+        const quarantineBtn = panel.querySelector('[data-archive-journal-quarantine], [data-action="archive-journal-quarantine"]');
+        const setQuarantineEnabled = (on) => {
+            if (quarantineBtn) quarantineBtn.disabled = !on;
+        };
+
+        const fn = window.mfhBridge?.archiveJournalStatus;
+        if (typeof fn !== 'function') {
+            if (statusEl) {
+                statusEl.textContent = window.mfhBridge
+                    ? '当前版本无法查询归档恢复状态。'
+                    : '当前环境无法查询归档恢复状态（静态预览）。';
+            }
+            setQuarantineEnabled(false);
+            return;
+        }
+        try {
+            const st = await fn();
+            const msg = (st && (st.message || st.detail)) || '状态未知';
+            if (statusEl) statusEl.textContent = String(msg);
+            // 仅在状态表明可以隔离时启用：residual / canQuarantine，且非 clear。
+            const can = Boolean(
+                st
+                && st.status !== 'clear'
+                && (st.status === 'residual' || st.canQuarantine === true)
+            );
+            setQuarantineEnabled(can);
+        } catch (err) {
+            if (statusEl) statusEl.textContent = '读取归档恢复状态失败，请稍后重试。';
+            setQuarantineEnabled(false);
+        }
+    }
+
+    async function quarantineArchiveJournal() {
+        const panel = document.querySelector('[data-archive-journal-panel]');
+        const statusEl = panel?.querySelector('[data-archive-journal-status]');
+        const fn = window.mfhBridge?.archiveJournalQuarantine;
+        if (typeof fn !== 'function') {
+            bridgeUnavailable();
+            return;
+        }
+        const confirmed = window.confirm([
+            '确认隔离未解决的归档恢复记录？',
+            '',
+            '隔离后可继续写入；记录会保留在数据目录的隔离副本中，请勿删除直至确认发票清单无误。',
+        ].join('\n'));
+        if (!confirmed) return;
+        try {
+            const result = await fn({ confirm: true });
+            const ok = result && result.ok === true;
+            if (statusEl) {
+                statusEl.textContent = String(
+                    (result && result.message)
+                    || (ok ? '已隔离。' : '隔离未完成。')
+                );
+            }
+            showToast(
+                ok ? '归档恢复记录已隔离' : '隔离未完成',
+                eventMessage(result) || (ok ? '记录已移到数据目录内的隔离副本，证据未删除。' : '请查看状态说明后重试。'),
+                ok ? 'ok' : 'err',
+                { detail: ok ? '' : eventDetail(result) },
+            );
+        } catch (err) {
+            if (statusEl) statusEl.textContent = '隔离失败，请确认磁盘可写后重试。';
+            showToast('隔离失败', '请确认磁盘可写后重试。', 'err', { detail: err?.message });
+        }
+        await refreshArchiveJournalStatus();
     }
 
     function wireSearch() {
@@ -2330,6 +2409,8 @@
         if (name === 'developer-reset') { await developerReset(); return; }
         if (name === 'pending-primary') { await handlePendingAction(action); return; }
         if (name === 'clear-secret') { await clearSecret(action); return; }
+        if (name === 'archive-journal-refresh') { await refreshArchiveJournalStatus(); return; }
+        if (name === 'archive-journal-quarantine') { await quarantineArchiveJournal(); return; }
     }
 
     async function clearSecret(action) {
