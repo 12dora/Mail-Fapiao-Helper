@@ -244,7 +244,8 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
       seller: row.seller || '未识别销售方',
       invoiceNo: row.invoiceNo || '',
       amount: money(row.amount || ''),
-      source: row.transport === 'http' ? '本机识别' : row.transport || '归档文件',
+      // COPY-17：transport 是识别调用方式，不是发票来源；普通列表不展示 http/cli。
+      source: '归档文件',
       filename: row.filename || '',
       filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
       // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
