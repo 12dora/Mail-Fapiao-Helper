@@ -4,7 +4,7 @@ import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
-import type { OcrResult } from './types.js';
+import type { OcrProvider, OcrResult } from './types.js';
 import { csvCell, parseCsv, readCsvRows } from '../util/csv.js';
 import { contentHash as hashBytes } from '../util/hash.js';
 import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
@@ -277,6 +277,176 @@ function applyOcrResult(
   }
 }
 
+interface OcrRunOptions {
+  force?: boolean;
+  singleItem?: boolean;
+  concurrency?: number;
+}
+
+interface OcrRunActions {
+  checkpoint(): void;
+  markRow(row: PendingRow, status: string, reason: string): void;
+  markPendingDirty(): void;
+  record(row: PendingRow, result: OcrResult): void;
+  recordFailure(row: PendingRow, error: string): void;
+  flushBatch(): Promise<void>;
+  flushConcurrent(jobs: ParseJob[]): Promise<void>;
+}
+
+async function flushJobs(
+  jobs: ParseJob[],
+  mode: 'batch' | 'concurrent',
+  provider: OcrProvider,
+  opts: OcrRunOptions,
+  record: (row: PendingRow, result: OcrResult) => void,
+  recordFailure: (row: PendingRow, error: string) => void,
+  checkpoint: () => void,
+): Promise<void> {
+  if (jobs.length === 0) return;
+
+  if (mode === 'batch') {
+    try {
+      const results = provider.parseBatch && !opts.singleItem
+        ? await provider.parseBatch(jobs.map((job) => ({
+            data: job.data,
+            meta: {
+              format: job.row.format,
+              documentType: job.row.documentType,
+              filename: job.row.filename,
+            },
+          })))
+        : await Promise.all(jobs.map((job) => provider.parse(job.data, {
+            format: job.row.format,
+            documentType: job.row.documentType,
+            filename: job.row.filename,
+          })));
+      for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        const result = results[i];
+        if (!job) continue;
+        if (!result) {
+          recordFailure(job.row, `ocr_missing_batch_result:${job.row.filename}`);
+          continue;
+        }
+        record(job.row, result);
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      for (const job of jobs) recordFailure(job.row, error);
+    }
+  } else {
+    async function processJob(job: ParseJob): Promise<void> {
+      try {
+        const result = await provider.parse(job.data, {
+          format: job.row.format,
+          documentType: job.row.documentType,
+          filename: job.row.filename,
+        });
+        record(job.row, result);
+      } catch (err) {
+        recordFailure(job.row, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    const settled = await Promise.allSettled(jobs.map((job) => processJob(job)));
+    for (let i = 0; i < settled.length; i++) {
+      const item = settled[i];
+      const job = jobs[i];
+      if (!job || item?.status !== 'rejected') continue;
+      recordFailure(job.row, item.reason instanceof Error ? item.reason.message : String(item.reason));
+    }
+  }
+
+  // 解析批次结束后强制落盘 pending（APP-14C）。
+  checkpoint();
+}
+
+async function loadParseJob(
+  row: PendingRow,
+  cfg: Config,
+  actions: OcrRunActions,
+): Promise<ParseJob | null> {
+  const filePath = path.join(cfg.paths.invoices, row.filename);
+  if (!fs.existsSync(filePath)) {
+    await actions.flushBatch();
+    actions.recordFailure(row, `missing_file:${filePath}`);
+    actions.checkpoint();
+    return null;
+  }
+
+  try {
+    const data = fs.readFileSync(filePath);
+    // APP-06B：识别前用与归档相同的算法重算内容指纹与大小。文件被替换、
+    // 编号复用或 pending 指向了别的文件时，继续识别会把票 B 的字段写在票 A 的身份下。
+    const mismatch = verifyArchivedBytes(row, filePath, data);
+    if (mismatch) {
+      await actions.flushBatch();
+      actions.recordFailure(row, mismatch);
+      actions.checkpoint();
+      return null;
+    }
+    // 显式迁移（APP-06A）：老 pending 行没有 contentHash，用刚读到的归档字节补齐，
+    // 让它升级成强身份行；补不出来的行保持独立，不参与任何折叠。
+    if (!row.contentHash) {
+      row.contentHash = hashBytes(data);
+      actions.markPendingDirty();
+    }
+    return { row, data };
+  } catch (err) {
+    await actions.flushBatch();
+    actions.recordFailure(row, err instanceof Error ? err.message : String(err));
+    actions.checkpoint();
+    return null;
+  }
+}
+
+async function processPendingRow(
+  row: PendingRow,
+  cfg: Config,
+  opts: OcrRunOptions,
+  concurrency: number,
+  seenResults: ArtifactIndex<ResultStatus>,
+  summary: OcrRunSummary,
+  batch: ParseJob[],
+  actions: OcrRunActions,
+): Promise<void> {
+  if (row.status === 'ignored' || row.documentType === 'supporting') {
+    actions.markRow(row, 'ignored', row.reason || 'supporting_document');
+    summary.skipped++;
+    return;
+  }
+  const identity = rowIdentity(row);
+  if (seenResults.has(identity)) {
+    await actions.flushBatch();
+    const existing = seenResults.get(identity);
+    if (existing?.status === 'success') {
+      actions.markRow(row, 'recognized', 'already_in_results');
+    } else if (existing?.status === 'partial') {
+      actions.markRow(row, 'partial', existing.error || 'already_partial_in_results');
+    } else if (existing?.status === 'error') {
+      actions.markRow(row, 'failed', existing.error || 'already_failed_in_results');
+    }
+    summary.skipped++;
+    return;
+  }
+
+  const job = await loadParseJob(row, cfg, actions);
+  if (!job) return;
+  try {
+    batch.push(job);
+    if (concurrency > 1 && batch.length >= concurrency) {
+      const jobs = batch.splice(0, batch.length);
+      await actions.flushConcurrent(jobs);
+    } else if (batch.length >= (opts.singleItem ? 1 : cfg.ocr.batchSize)) {
+      await actions.flushBatch();
+    }
+  } catch (err) {
+    await actions.flushBatch();
+    actions.recordFailure(row, err instanceof Error ? err.message : String(err));
+    actions.checkpoint();
+  }
+}
+
 export async function runOcrPending(
   cfg: Config,
   log: Logger,
@@ -330,126 +500,28 @@ export async function runOcrPending(
   }
 
   async function flushBatch(): Promise<void> {
-    if (batch.length === 0) return;
     const jobs = batch.splice(0, batch.length);
-    try {
-      const results = provider.parseBatch && !opts.singleItem
-        ? await provider.parseBatch(jobs.map((job) => ({
-            data: job.data,
-            meta: {
-              format: job.row.format,
-              documentType: job.row.documentType,
-              filename: job.row.filename,
-            },
-          })))
-        : await Promise.all(jobs.map((job) => provider.parse(job.data, {
-            format: job.row.format,
-            documentType: job.row.documentType,
-            filename: job.row.filename,
-          })));
-      for (let i = 0; i < jobs.length; i++) {
-        const job = jobs[i];
-        const result = results[i];
-        if (!job) continue;
-        if (!result) {
-          recordFailure(job.row, `ocr_missing_batch_result:${job.row.filename}`);
-          continue;
-        }
-        record(job.row, result);
-      }
-    } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      for (const job of jobs) recordFailure(job.row, error);
-    }
-    // 解析批次结束后强制落盘 pending（APP-14C）。
-    checkpoint();
-  }
-
-  async function processJob(job: ParseJob): Promise<void> {
-    try {
-      const result = await provider.parse(job.data, {
-        format: job.row.format,
-        documentType: job.row.documentType,
-        filename: job.row.filename,
-      });
-      record(job.row, result);
-    } catch (err) {
-      recordFailure(job.row, err instanceof Error ? err.message : String(err));
-    }
+    await flushJobs(jobs, 'batch', provider, opts, record, recordFailure, checkpoint);
   }
 
   async function flushConcurrent(jobs: ParseJob[]): Promise<void> {
-    if (jobs.length === 0) return;
-    const settled = await Promise.allSettled(jobs.map((job) => processJob(job)));
-    for (let i = 0; i < settled.length; i++) {
-      const item = settled[i];
-      const job = jobs[i];
-      if (!job || item?.status !== 'rejected') continue;
-      recordFailure(job.row, item.reason instanceof Error ? item.reason.message : String(item.reason));
-    }
-    checkpoint();
+    await flushJobs(jobs, 'concurrent', provider, opts, record, recordFailure, checkpoint);
   }
+
+  const actions: OcrRunActions = {
+    checkpoint,
+    markRow,
+    markPendingDirty: () => { pendingDirty = true; },
+    record,
+    recordFailure,
+    flushBatch,
+    flushConcurrent,
+  };
 
   for (let i = 0; i < nextRows.length; i++) {
     const row = nextRows[i];
     if (!row) continue;
-    if (row.status === 'ignored' || row.documentType === 'supporting') {
-      markRow(row, 'ignored', row.reason || 'supporting_document');
-      summary.skipped++;
-      continue;
-    }
-    const identity = rowIdentity(row);
-    if (seenResults.has(identity)) {
-      await flushBatch();
-      const existing = seenResults.get(identity);
-      if (existing?.status === 'success') {
-        markRow(row, 'recognized', 'already_in_results');
-      } else if (existing?.status === 'partial') {
-        markRow(row, 'partial', existing.error || 'already_partial_in_results');
-      } else if (existing?.status === 'error') {
-        markRow(row, 'failed', existing.error || 'already_failed_in_results');
-      }
-      summary.skipped++;
-      continue;
-    }
-
-    const filePath = path.join(cfg.paths.invoices, row.filename);
-    if (!fs.existsSync(filePath)) {
-      await flushBatch();
-      recordFailure(row, `missing_file:${filePath}`);
-      checkpoint();
-      continue;
-    }
-
-    try {
-      const data = fs.readFileSync(filePath);
-      // APP-06B：识别前用与归档相同的算法重算内容指纹与大小。文件被替换、
-      // 编号复用或 pending 指向了别的文件时，继续识别会把票 B 的字段写在票 A 的身份下。
-      const mismatch = verifyArchivedBytes(row, filePath, data);
-      if (mismatch) {
-        await flushBatch();
-        recordFailure(row, mismatch);
-        checkpoint();
-        continue;
-      }
-      // 显式迁移（APP-06A）：老 pending 行没有 contentHash，用刚读到的归档字节补齐，
-      // 让它升级成强身份行；补不出来的行保持独立，不参与任何折叠。
-      if (!row.contentHash) {
-        row.contentHash = hashBytes(data);
-        pendingDirty = true;
-      }
-      batch.push({ row, data });
-      if (concurrency > 1 && batch.length >= concurrency) {
-        const jobs = batch.splice(0, batch.length);
-        await flushConcurrent(jobs);
-      } else if (batch.length >= (opts.singleItem ? 1 : cfg.ocr.batchSize)) {
-        await flushBatch();
-      }
-    } catch (err) {
-      await flushBatch();
-      recordFailure(row, err instanceof Error ? err.message : String(err));
-      checkpoint();
-    }
+    await processPendingRow(row, cfg, opts, concurrency, seenResults, summary, batch, actions);
   }
   if (concurrency > 1 && batch.length > 0) {
     const jobs = batch.splice(0, batch.length);

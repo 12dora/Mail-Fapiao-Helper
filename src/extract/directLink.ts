@@ -400,6 +400,173 @@ function plainLinks(mail: ParsedMail): string[] {
   return extractMailUrls(mail).filter((link) => !isSiteHandlerLink(link));
 }
 
+interface ClassifiedLinks {
+  strongCandidates: string[];
+  probedLinks: string[];
+  unprobedLinks: string[];
+}
+
+function classifyLinks(links: string[], ctx: Ctx): ClassifiedLinks {
+  // 强 PDF 特征的链接不限量；其余链接只是“可能是发票”，探测数量设上限并做有界
+  // 并发，避免退订/隐私政策/营销链接把处理时间拉成 链接数 × 重试次数 × timeout。
+  const strongCandidates: string[] = [];
+  const probeTargets: string[] = [];
+
+  for (const link of links) {
+    if (isPdfUrl(link) || isOfdUrl(link) || isZipUrl(link)) {
+      strongCandidates.push(link);
+      continue;
+    }
+
+    // 明确的图片后缀：没有发票语义证据时不要进入候选，避免营销图被当发票（NEW-DEFECT 2）。
+    if (isImageUrl(link) && !linkedImageHasInvoiceEvidence(link)) {
+      continue;
+    }
+
+    const pdfVariant = pdfVariantUrl(link);
+    if (pdfVariant) {
+      strongCandidates.push(pdfVariant);
+      continue;
+    }
+
+    if (isKnownPdfCandidate(link)) {
+      strongCandidates.push(link);
+      continue;
+    }
+
+    if (isProbeNoise(link)) {
+      continue;
+    }
+
+    probeTargets.push(link);
+  }
+
+  // EXT-02：按发票语义排序后再截断预算，而不是按正文出现顺序硬切。
+  probeTargets.sort((a, b) => invoiceProbeScore(b) - invoiceProbeScore(a));
+  const probedLinks = probeTargets.slice(0, MAX_PROBE_LINKS);
+  const unprobedLinks = probeTargets.slice(MAX_PROBE_LINKS);
+  if (unprobedLinks.length > 0) {
+    ctx.log.warn(
+      `directLink: probe budget ${MAX_PROBE_LINKS}/${probeTargets.length}; `
+      + `${unprobedLinks.length} candidate(s) left unchecked`,
+    );
+  }
+  return { strongCandidates, probedLinks, unprobedLinks };
+}
+
+async function probeCandidates(
+  classified: ClassifiedLinks,
+  ctx: Ctx,
+  issues: ExtractIssue[],
+): Promise<{ pdfCandidates: string[]; probeFailures: string[] }> {
+  const probeFailures: string[] = [];
+  const probed = await mapWithConcurrency(classified.probedLinks, PROBE_CONCURRENCY, async (link) => {
+    const safeUrl = redactUrlForLog(link);
+    try {
+      return await probeIsDocument(link, ctx) ? link : null;
+    } catch (err) {
+      const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
+      probeFailures.push(msg);
+      issues.push({ reason: `directLink:probe_failed:${msg}`, retryable: true });
+      ctx.log.warn(`PDF probe failed after retries for ${safeUrl}: ${msg}`);
+      return null;
+    }
+  });
+
+  return {
+    pdfCandidates: [
+      ...classified.strongCandidates,
+      ...probed.filter((link): link is string => link !== null),
+    ],
+    probeFailures,
+  };
+}
+
+interface DownloadedCandidates {
+  pdfs: PdfArtifact[];
+  networkFailures: string[];
+  rejectedCandidates: number;
+}
+
+async function downloadCandidates(
+  pdfCandidates: string[],
+  ctx: Ctx,
+  issues: ExtractIssue[],
+): Promise<DownloadedCandidates> {
+  const uniquePdfCandidates = Array.from(new Map(pdfCandidates.map((url) => [pdfCandidateKey(url), url])).values());
+  ctx.log.debug(`Found ${uniquePdfCandidates.length} PDF links`);
+
+  const pdfs: PdfArtifact[] = [];
+  const seenPdfs = new Set<string>();
+  const networkFailures: string[] = [];
+  // 只在“强特征候选”上把软拒绝算作真实缺票：被探测判定为 PDF 却下不下来同样算。
+  let rejectedCandidates = 0;
+
+  for (const url of uniquePdfCandidates) {
+    const safeUrl = redactUrlForLog(url);
+    let outcome: DownloadOutcome;
+    try {
+      outcome = await downloadDocument(url, ctx);
+    } catch (err) {
+      const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
+      networkFailures.push(msg);
+      issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true });
+      ctx.log.warn(`PDF download failed after retries for ${safeUrl}: ${msg}`);
+      continue;
+    }
+    if (!('data' in outcome)) {
+      rejectedCandidates++;
+      issues.push({ reason: `directLink:download_rejected:${outcome.rejected}` });
+      ctx.log.warn(`Failed to download ${safeUrl}: ${outcome.rejected}`);
+      continue;
+    }
+
+    const { data, kind } = outcome;
+    const converted = artifactsFromDownload(data, kind, url, ctx);
+    for (const issue of converted.issues) issues.push(issue);
+    if (converted.artifacts.length === 0) {
+      // ZIP 解不出条目等：已记 issue，算作该候选未产出文档。
+      rejectedCandidates++;
+      continue;
+    }
+
+    for (const artifact of converted.artifacts) {
+      const key = pdfContentKey(artifact.data);
+      if (seenPdfs.has(key)) continue;
+      seenPdfs.add(key);
+      pdfs.push(artifact);
+    }
+  }
+
+  return { pdfs, networkFailures, rejectedCandidates };
+}
+
+function buildExtractResult(
+  downloaded: DownloadedCandidates,
+  unprobedLinks: string[],
+  issues: ExtractIssue[],
+  mail: ParsedMail,
+  ctx: Ctx,
+): ExtractResult {
+  if (downloaded.pdfs.length === 0) {
+    if (downloaded.networkFailures.length > 0) {
+      throw new Error(downloaded.networkFailures[0]);
+    }
+    if (downloaded.rejectedCandidates === 0 && unprobedLinks.length === 0) {
+      return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
+    }
+    return { kind: 'manual', reason: issues[0]?.reason ?? 'directLink:download_failed' };
+  }
+
+  // 去重只丢弃“可靠匹配到同一张票的 PDF”的那份 OFD，与附件流程共用同一算法：
+  // 不再因为邮件里存在任意 PDF 就删掉不相关的 OFD（APP-02 / EXT-01）。
+  return {
+    kind: 'pdf',
+    pdfs: preferPdfOverDuplicateOfd(downloaded.pdfs, ctx.log, mail.subject ?? undefined),
+    issues,
+  };
+}
+
 const directLinkExtractor: Extractor = {
   name: 'directLink',
 
@@ -416,80 +583,22 @@ const directLinkExtractor: Extractor = {
       return { kind: 'not_applicable', reason: 'directLink:no_links' };
     }
 
-    // 强 PDF 特征的链接不限量；其余链接只是“可能是发票”，探测数量设上限并做有界
-    // 并发，避免退订/隐私政策/营销链接把处理时间拉成 链接数 × 重试次数 × timeout。
-    const strongCandidates: string[] = [];
-    const probeTargets: string[] = [];
-
-    for (const link of links) {
-      if (isPdfUrl(link) || isOfdUrl(link) || isZipUrl(link)) {
-        strongCandidates.push(link);
-        continue;
-      }
-
-      // 明确的图片后缀：没有发票语义证据时不要进入候选，避免营销图被当发票（NEW-DEFECT 2）。
-      if (isImageUrl(link) && !linkedImageHasInvoiceEvidence(link)) {
-        continue;
-      }
-
-      const pdfVariant = pdfVariantUrl(link);
-      if (pdfVariant) {
-        strongCandidates.push(pdfVariant);
-        continue;
-      }
-
-      if (isKnownPdfCandidate(link)) {
-        strongCandidates.push(link);
-        continue;
-      }
-
-      if (isProbeNoise(link)) {
-        continue;
-      }
-
-      probeTargets.push(link);
-    }
-
-    // EXT-02：按发票语义排序后再截断预算，而不是按正文出现顺序硬切。
-    probeTargets.sort((a, b) => invoiceProbeScore(b) - invoiceProbeScore(a));
-    const probedLinks = probeTargets.slice(0, MAX_PROBE_LINKS);
-    const unprobedLinks = probeTargets.slice(MAX_PROBE_LINKS);
-    if (unprobedLinks.length > 0) {
-      ctx.log.warn(
-        `directLink: probe budget ${MAX_PROBE_LINKS}/${probeTargets.length}; `
-        + `${unprobedLinks.length} candidate(s) left unchecked`,
-      );
-    }
-
-    const probeFailures: string[] = [];
+    const classified = classifyLinks(links, ctx);
     const issues: ExtractIssue[] = [];
 
     // 预算外的候选必须变成可见 issue，不能静默 not_applicable（EXT-02）。
     // CORE-08：只持久化类型化原因码 + 数量，禁止写入原始 signed URL。
-    if (unprobedLinks.length > 0) {
+    if (classified.unprobedLinks.length > 0) {
       issues.push({
-        reason: `directLink:probe_budget_exceeded:count=${unprobedLinks.length}`,
+        reason: `directLink:probe_budget_exceeded:count=${classified.unprobedLinks.length}`,
       });
     }
 
-    const probed = await mapWithConcurrency(probedLinks, PROBE_CONCURRENCY, async (link) => {
-      const safeUrl = redactUrlForLog(link);
-      try {
-        return await probeIsDocument(link, ctx) ? link : null;
-      } catch (err) {
-        const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
-        probeFailures.push(msg);
-        issues.push({ reason: `directLink:probe_failed:${msg}`, retryable: true });
-        ctx.log.warn(`PDF probe failed after retries for ${safeUrl}: ${msg}`);
-        return null;
-      }
-    });
-
-    const pdfCandidates = [...strongCandidates, ...probed.filter((link): link is string => link !== null)];
+    const { pdfCandidates, probeFailures } = await probeCandidates(classified, ctx, issues);
 
     if (pdfCandidates.length === 0) {
       // 有未检查候选或探测失败：这是部分失败，不能当成“本提取器不适用”。
-      if (unprobedLinks.length > 0 || probeFailures.length > 0) {
+      if (classified.unprobedLinks.length > 0 || probeFailures.length > 0) {
         const first = issues[0]?.reason
           ?? (probeFailures[0] ? `directLink:probe_unavailable:${probeFailures[0]}` : 'directLink:probe_budget_exceeded');
         return { kind: 'manual', reason: first };
@@ -498,68 +607,8 @@ const directLinkExtractor: Extractor = {
       return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
     }
 
-    const uniquePdfCandidates = Array.from(new Map(pdfCandidates.map((url) => [pdfCandidateKey(url), url])).values());
-    ctx.log.debug(`Found ${uniquePdfCandidates.length} PDF links`);
-
-    const pdfs: PdfArtifact[] = [];
-    const seenPdfs = new Set<string>();
-    const networkFailures: string[] = [];
-    // 只在“强特征候选”上把软拒绝算作真实缺票：被探测判定为 PDF 却下不下来同样算。
-    let rejectedCandidates = 0;
-
-    for (const url of uniquePdfCandidates) {
-      const safeUrl = redactUrlForLog(url);
-      let outcome: DownloadOutcome;
-      try {
-        outcome = await downloadDocument(url, ctx);
-      } catch (err) {
-        const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
-        networkFailures.push(msg);
-        issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true });
-        ctx.log.warn(`PDF download failed after retries for ${safeUrl}: ${msg}`);
-        continue;
-      }
-      if (!('data' in outcome)) {
-        rejectedCandidates++;
-        issues.push({ reason: `directLink:download_rejected:${outcome.rejected}` });
-        ctx.log.warn(`Failed to download ${safeUrl}: ${outcome.rejected}`);
-        continue;
-      }
-
-      const { data, kind } = outcome;
-      const converted = artifactsFromDownload(data, kind, url, ctx);
-      for (const issue of converted.issues) issues.push(issue);
-      if (converted.artifacts.length === 0) {
-        // ZIP 解不出条目等：已记 issue，算作该候选未产出文档。
-        rejectedCandidates++;
-        continue;
-      }
-
-      for (const artifact of converted.artifacts) {
-        const key = pdfContentKey(artifact.data);
-        if (seenPdfs.has(key)) continue;
-        seenPdfs.add(key);
-        pdfs.push(artifact);
-      }
-    }
-
-    if (pdfs.length === 0) {
-      if (networkFailures.length > 0) {
-        throw new Error(networkFailures[0]);
-      }
-      if (rejectedCandidates === 0 && unprobedLinks.length === 0) {
-        return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
-      }
-      return { kind: 'manual', reason: issues[0]?.reason ?? 'directLink:download_failed' };
-    }
-
-    // 去重只丢弃“可靠匹配到同一张票的 PDF”的那份 OFD，与附件流程共用同一算法：
-    // 不再因为邮件里存在任意 PDF 就删掉不相关的 OFD（APP-02 / EXT-01）。
-    return {
-      kind: 'pdf',
-      pdfs: preferPdfOverDuplicateOfd(pdfs, ctx.log, mail.subject ?? undefined),
-      issues,
-    };
+    const downloaded = await downloadCandidates(pdfCandidates, ctx, issues);
+    return buildExtractResult(downloaded, classified.unprobedLinks, issues, mail, ctx);
   },
 };
 

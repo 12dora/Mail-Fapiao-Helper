@@ -580,115 +580,74 @@ export function migrateRawConfig(raw: unknown): MigrateResult {
 // 校验
 // ---------------------------------------------------------------------------
 
-/**
- * 共享校验器（APP-08 契约 1）：先迁移，再一次性收集**全部**字段错误。
- * `loadConfig()` 与 GUI 保存前的校验都必须复用它，避免两套契约互相矛盾。
- */
-export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
-  const c = new ErrorCollector();
-
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { ok: false, errors: [{ path: '', message: '配置必须是一个 JSON 对象' }] };
-  }
-
-  let migrated: Record<string, unknown>;
-  try {
-    migrated = migrateRawConfig(raw).raw;
-  } catch (err) {
-    // CORE-10：未来版本或非法 schemaVersion 不得被静默盖章。
-    if (err instanceof ConfigVersionTooNewError || err instanceof ConfigSchemaVersionInvalidError) {
-      return {
-        ok: false,
-        errors: [{ path: 'schemaVersion', message: err.message }],
-      };
-    }
-    throw err;
-  }
-
-  const config: Config = {
-    schemaVersion: CONFIG_SCHEMA_VERSION,
-    imap: {
-      // 首次安装时凭据为空字符串（COPY-03），空值代表「尚未配置」而不是配置损坏；
-      // 真正的可用性检查在抓取入口做，并给出明确的中文提示。
-      host: readString(c, migrated, 'imap.host', { allowEmpty: true, fallback: '' }),
-      port: readNumber(c, migrated, 'imap.port', { min: 1, max: 65535, integer: true, fallback: 993 }),
-      user: readString(c, migrated, 'imap.user', { allowEmpty: true, fallback: '' }),
-      pass: readString(c, migrated, 'imap.pass', { allowEmpty: true, fallback: '' }),
-      tls: readBool(c, migrated, 'imap.tls', true),
-      mailbox: readMailboxList(c, migrated, 'imap.mailbox'),
-    },
-    filter: {
-      keywords: readStringArray(c, migrated, 'filter.keywords'),
-      matchSubject: readBool(c, migrated, 'filter.matchSubject'),
-      matchBody: readBool(c, migrated, 'filter.matchBody'),
-      sinceDays: readNumber(c, migrated, 'filter.sinceDays', { min: 1, unit: '天' }),
-      since: readDateBound(c, migrated, 'filter.since'),
-      until: readDateBound(c, migrated, 'filter.until'),
-    },
-    paths: {
-      samples: readString(c, migrated, 'paths.samples'),
-      invoices: readString(c, migrated, 'paths.invoices'),
-      pending: readString(c, migrated, 'paths.pending'),
-    },
-    output: {
-      csv: readString(c, migrated, 'output.csv', { fallback: DEFAULTS.outputCsv }),
-    },
-    rename: {
-      avoidConflictBeforeOcr: readBool(c, migrated, 'rename.avoidConflictBeforeOcr', true),
-      rule: readString(c, migrated, 'rename.rule'),
-      fallback: readString(c, migrated, 'rename.fallback'),
-      applyAfterOcr: readBool(c, migrated, 'rename.applyAfterOcr', false),
-      organizeByType: readBool(c, migrated, 'rename.organizeByType', false),
-      typeDirRule: readString(c, migrated, 'rename.typeDirRule', { fallback: DEFAULTS.renameTypeDirRule }),
-      organizedDir: readString(c, migrated, 'rename.organizedDir', { fallback: DEFAULTS.renameOrganizedDir }),
-    },
-    ocr: {
-      enabled: readBool(c, migrated, 'ocr.enabled'),
-      provider: readString(c, migrated, 'ocr.provider'),
-      binaryPath: readString(c, migrated, 'ocr.binaryPath', { fallback: DEFAULTS.ocrBinaryPath }),
-      ocrMode: readEnum(c, migrated, 'ocr.ocrMode', ['auto', 'disabled', 'required'] as const, 'auto'),
-      executionMode: readEnum(c, migrated, 'ocr.executionMode', ['auto', 'serve', 'cli'] as const, 'auto'),
-      // 默认空串，让 serviceHost/servicePort 保持权威；只有非空 serviceUrl 才表示
-      // 指向一个外部托管的 OCR 服务。
-      serviceUrl: readString(c, migrated, 'ocr.serviceUrl', { allowEmpty: true, fallback: '' }).replace(/\/+$/, ''),
-      serviceHost: readString(c, migrated, 'ocr.serviceHost', { fallback: DEFAULTS.ocrServiceHost }),
-      servicePort: readNumber(c, migrated, 'ocr.servicePort', {
-        min: 1, max: 65535, integer: true, fallback: DEFAULTS.ocrServicePort,
-      }),
-      serviceWorkers: readNumber(c, migrated, 'ocr.serviceWorkers', {
-        min: 1, integer: true, fallback: DEFAULTS.ocrServiceWorkers,
-      }),
-      serviceStartupMs: readNumber(c, migrated, 'ocr.serviceStartupMs', {
-        min: 1, unit: '毫秒', fallback: DEFAULTS.ocrServiceStartupMs,
-      }),
-      batchSize: readNumber(c, migrated, 'ocr.batchSize', {
-        min: 1, integer: true, fallback: DEFAULTS.ocrBatchSize,
-      }),
-      timeoutMs: readNumber(c, migrated, 'ocr.timeoutMs', {
-        min: 1, unit: '毫秒', fallback: DEFAULTS.ocrTimeoutMs,
-      }),
-      resultsCsv: readString(c, migrated, 'ocr.resultsCsv', { fallback: DEFAULTS.ocrResultsCsv }),
-      credentials: readCredentials(c, migrated, 'ocr.credentials'),
-    },
-    // llm / playwright.browserManagement 已在 v3 删除，这里不再读取（旧文件里的值
-    // 由 migrateRawConfig() 丢弃，不产生校验错误）。
-    playwright: {
-      headless: readBool(c, migrated, 'playwright.headless', true),
-      timeoutMs: readNumber(c, migrated, 'playwright.timeoutMs', { min: 1, unit: '毫秒', fallback: 30000 }),
-    },
-    network: {
-      retries: readNumber(c, migrated, 'network.retries', {
-        min: 0, integer: true, fallback: DEFAULTS.networkRetries,
-      }),
-      retryDelayMs: readNumber(c, migrated, 'network.retryDelayMs', {
-        min: 0, unit: '毫秒', fallback: DEFAULTS.networkRetryDelayMs,
-      }),
-      timeoutMs: readNumber(c, migrated, 'network.timeoutMs', {
-        min: 1, unit: '毫秒', fallback: DEFAULTS.networkTimeoutMs,
-      }),
-    },
+function readImapConfig(c: ErrorCollector, migrated: Record<string, unknown>): Config['imap'] {
+  return {
+    // 首次安装时凭据为空字符串（COPY-03），空值代表「尚未配置」而不是配置损坏；
+    // 真正的可用性检查在抓取入口做，并给出明确的中文提示。
+    host: readString(c, migrated, 'imap.host', { allowEmpty: true, fallback: '' }),
+    port: readNumber(c, migrated, 'imap.port', { min: 1, max: 65535, integer: true, fallback: 993 }),
+    user: readString(c, migrated, 'imap.user', { allowEmpty: true, fallback: '' }),
+    pass: readString(c, migrated, 'imap.pass', { allowEmpty: true, fallback: '' }),
+    tls: readBool(c, migrated, 'imap.tls', true),
+    mailbox: readMailboxList(c, migrated, 'imap.mailbox'),
   };
+}
 
+function readFilterConfig(c: ErrorCollector, migrated: Record<string, unknown>): Config['filter'] {
+  return {
+    keywords: readStringArray(c, migrated, 'filter.keywords'),
+    matchSubject: readBool(c, migrated, 'filter.matchSubject'),
+    matchBody: readBool(c, migrated, 'filter.matchBody'),
+    sinceDays: readNumber(c, migrated, 'filter.sinceDays', { min: 1, unit: '天' }),
+    since: readDateBound(c, migrated, 'filter.since'),
+    until: readDateBound(c, migrated, 'filter.until'),
+  };
+}
+
+function readRenameConfig(c: ErrorCollector, migrated: Record<string, unknown>): Config['rename'] {
+  return {
+    avoidConflictBeforeOcr: readBool(c, migrated, 'rename.avoidConflictBeforeOcr', true),
+    rule: readString(c, migrated, 'rename.rule'),
+    fallback: readString(c, migrated, 'rename.fallback'),
+    applyAfterOcr: readBool(c, migrated, 'rename.applyAfterOcr', false),
+    organizeByType: readBool(c, migrated, 'rename.organizeByType', false),
+    typeDirRule: readString(c, migrated, 'rename.typeDirRule', { fallback: DEFAULTS.renameTypeDirRule }),
+    organizedDir: readString(c, migrated, 'rename.organizedDir', { fallback: DEFAULTS.renameOrganizedDir }),
+  };
+}
+
+function readOcrConfig(c: ErrorCollector, migrated: Record<string, unknown>): Config['ocr'] {
+  return {
+    enabled: readBool(c, migrated, 'ocr.enabled'),
+    provider: readString(c, migrated, 'ocr.provider'),
+    binaryPath: readString(c, migrated, 'ocr.binaryPath', { fallback: DEFAULTS.ocrBinaryPath }),
+    ocrMode: readEnum(c, migrated, 'ocr.ocrMode', ['auto', 'disabled', 'required'] as const, 'auto'),
+    executionMode: readEnum(c, migrated, 'ocr.executionMode', ['auto', 'serve', 'cli'] as const, 'auto'),
+    // 默认空串，让 serviceHost/servicePort 保持权威；只有非空 serviceUrl 才表示
+    // 指向一个外部托管的 OCR 服务。
+    serviceUrl: readString(c, migrated, 'ocr.serviceUrl', { allowEmpty: true, fallback: '' }).replace(/\/+$/, ''),
+    serviceHost: readString(c, migrated, 'ocr.serviceHost', { fallback: DEFAULTS.ocrServiceHost }),
+    servicePort: readNumber(c, migrated, 'ocr.servicePort', {
+      min: 1, max: 65535, integer: true, fallback: DEFAULTS.ocrServicePort,
+    }),
+    serviceWorkers: readNumber(c, migrated, 'ocr.serviceWorkers', {
+      min: 1, integer: true, fallback: DEFAULTS.ocrServiceWorkers,
+    }),
+    serviceStartupMs: readNumber(c, migrated, 'ocr.serviceStartupMs', {
+      min: 1, unit: '毫秒', fallback: DEFAULTS.ocrServiceStartupMs,
+    }),
+    batchSize: readNumber(c, migrated, 'ocr.batchSize', {
+      min: 1, integer: true, fallback: DEFAULTS.ocrBatchSize,
+    }),
+    timeoutMs: readNumber(c, migrated, 'ocr.timeoutMs', {
+      min: 1, unit: '毫秒', fallback: DEFAULTS.ocrTimeoutMs,
+    }),
+    resultsCsv: readString(c, migrated, 'ocr.resultsCsv', { fallback: DEFAULTS.ocrResultsCsv }),
+    credentials: readCredentials(c, migrated, 'ocr.credentials'),
+  };
+}
+
+function validateCrossFieldRules(c: ErrorCollector, config: Config): void {
   // 跨字段约束
   if (config.filter.matchSubject === false && config.filter.matchBody === false) {
     c.add('filter.matchSubject', '「匹配邮件标题」和「匹配邮件正文」至少选择一项。');
@@ -728,6 +687,67 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
       // 非 IP 的 hostname（含 localhost）：运行时 resolveServiceUrl 再校验 DNS 结果。
     }
   }
+}
+
+/**
+ * 共享校验器（APP-08 契约 1）：先迁移，再一次性收集**全部**字段错误。
+ * `loadConfig()` 与 GUI 保存前的校验都必须复用它，避免两套契约互相矛盾。
+ */
+export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
+  const c = new ErrorCollector();
+
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, errors: [{ path: '', message: '配置必须是一个 JSON 对象' }] };
+  }
+
+  let migrated: Record<string, unknown>;
+  try {
+    migrated = migrateRawConfig(raw).raw;
+  } catch (err) {
+    // CORE-10：未来版本或非法 schemaVersion 不得被静默盖章。
+    if (err instanceof ConfigVersionTooNewError || err instanceof ConfigSchemaVersionInvalidError) {
+      return {
+        ok: false,
+        errors: [{ path: 'schemaVersion', message: err.message }],
+      };
+    }
+    throw err;
+  }
+
+  const config: Config = {
+    schemaVersion: CONFIG_SCHEMA_VERSION,
+    imap: readImapConfig(c, migrated),
+    filter: readFilterConfig(c, migrated),
+    paths: {
+      samples: readString(c, migrated, 'paths.samples'),
+      invoices: readString(c, migrated, 'paths.invoices'),
+      pending: readString(c, migrated, 'paths.pending'),
+    },
+    output: {
+      csv: readString(c, migrated, 'output.csv', { fallback: DEFAULTS.outputCsv }),
+    },
+    rename: readRenameConfig(c, migrated),
+    ocr: readOcrConfig(c, migrated),
+    // llm / playwright.browserManagement 已在 v3 删除，这里不再读取（旧文件里的值
+    // 由 migrateRawConfig() 丢弃，不产生校验错误）。
+    playwright: {
+      headless: readBool(c, migrated, 'playwright.headless', true),
+      timeoutMs: readNumber(c, migrated, 'playwright.timeoutMs', { min: 1, unit: '毫秒', fallback: 30000 }),
+    },
+    network: {
+      retries: readNumber(c, migrated, 'network.retries', {
+        min: 0, integer: true, fallback: DEFAULTS.networkRetries,
+      }),
+      retryDelayMs: readNumber(c, migrated, 'network.retryDelayMs', {
+        min: 0, unit: '毫秒', fallback: DEFAULTS.networkRetryDelayMs,
+      }),
+      timeoutMs: readNumber(c, migrated, 'network.timeoutMs', {
+        min: 1, unit: '毫秒', fallback: DEFAULTS.networkTimeoutMs,
+      }),
+    },
+  };
+
+  validateCrossFieldRules(c, config);
 
   // 注意：不再对 `llm.enabled=true` 报错。该字段已从 schema 中删除，旧文件里残留的
   // 值只会被迁移丢弃——报错会把一个升级前完全合法的配置文件变成阻断项。
