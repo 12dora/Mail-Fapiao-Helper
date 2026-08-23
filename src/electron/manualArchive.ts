@@ -305,102 +305,196 @@ interface StagedSource {
   hash: string;
 }
 
-export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult {
-  const empty: ManualArchiveResult = { ok: false, files: [], duplicates: [], pendingRemoved: 0 };
-  if (input.sources.length === 0) {
-    return { ...empty, code: 'manual_archive_no_files', message: '没有选择任何文件。' };
-  }
-  if (input.sources.length > MAX_BATCH_FILES) {
+type StageSourcesResult =
+  | { kind: 'ok'; staged: StagedSource[] }
+  | { kind: 'error'; result: ManualArchiveResult };
+
+type StageSourceResult =
+  | { kind: 'ok'; item: StagedSource; totalBytes: number }
+  | { kind: 'error'; result: ManualArchiveResult };
+
+interface ReconciledArchive {
+  duplicates: string[];
+  toInstall: StagedSource[];
+  toReuse: { item: StagedSource; filename: string }[];
+  messageId: string;
+  date: string;
+  from: string;
+  subject: string;
+}
+
+type DedupeAndReconcileResult =
+  | { kind: 'ok'; archive: ReconciledArchive }
+  | { kind: 'error'; result: ManualArchiveResult };
+
+interface ArchiveTransactionState {
+  plannedNames: string[];
+  plannedPaths: string[];
+  ledgerBase: number;
+  queueBase: number;
+  stagingDir: string;
+  stagingPaths: string[];
+  tx: ReturnType<typeof beginArchiveTransaction> | undefined;
+}
+
+function validateStagedBuffer(
+  source: string,
+  buffer: Buffer,
+  totalBytes: number,
+  empty: ManualArchiveResult,
+): StageSourceResult {
+  if (buffer.length === 0) {
     return {
-      ...empty,
-      code: 'manual_archive_too_many_files',
-      message: `一次最多选择 ${MAX_BATCH_FILES} 个文件，请分批归档。`,
+      kind: 'error',
+      result: { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` },
     };
   }
+  if (buffer.length > MAX_FILE_BYTES) {
+    return {
+      kind: 'error',
+      result: {
+        ...empty,
+        code: 'manual_archive_too_large',
+        message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
+      },
+    };
+  }
+  const detected = detectFormat(buffer);
+  if (detected.kind === 'archive') {
+    return {
+      kind: 'error',
+      result: {
+        ...empty,
+        code: 'manual_archive_is_zip',
+        message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
+      },
+    };
+  }
+  if (detected.kind !== 'ok') {
+    return {
+      kind: 'error',
+      result: {
+        ...empty,
+        code: 'manual_archive_unsupported_format',
+        message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
+      },
+    };
+  }
+  return {
+    kind: 'ok',
+    item: { source, data: buffer, format: detected.format, ext: detected.ext, hash: contentHash(buffer) },
+    totalBytes,
+  };
+}
 
+function stageSource(
+  source: string,
+  totalBytes: number,
+  empty: ManualArchiveResult,
+): StageSourceResult {
   // ELEC-10 / MUST-REWORK 12：同一 fd 上 open → fstat → read，杜绝 stat-then-read TOCTOU
   // 绕过大小上限。累计字节在 fstat 时强制。
-  const staged: StagedSource[] = [];
-  let totalBytes = 0;
-  for (const source of input.sources) {
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(source, 'r');
-      const stat = fs.fstatSync(fd);
-      if (!stat.isFile()) {
-        return { ...empty, code: 'manual_archive_not_a_file', message: `「${path.basename(source)}」不是一个文件。` };
-      }
-      if (stat.size === 0) {
-        return { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` };
-      }
-      if (stat.size > MAX_FILE_BYTES) {
-        return {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(source, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      return {
+        kind: 'error',
+        result: { ...empty, code: 'manual_archive_not_a_file', message: `「${path.basename(source)}」不是一个文件。` },
+      };
+    }
+    if (stat.size === 0) {
+      return {
+        kind: 'error',
+        result: { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` },
+      };
+    }
+    if (stat.size > MAX_FILE_BYTES) {
+      return {
+        kind: 'error',
+        result: {
           ...empty,
           code: 'manual_archive_too_large',
           message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
-        };
-      }
-      totalBytes += stat.size;
-      if (totalBytes > MAX_BATCH_BYTES) {
-        return {
+        },
+      };
+    }
+    const nextTotalBytes = totalBytes + stat.size;
+    if (nextTotalBytes > MAX_BATCH_BYTES) {
+      return {
+        kind: 'error',
+        result: {
           ...empty,
           code: 'manual_archive_batch_too_large',
           message: '所选文件合计超过 256 MB，请减少文件数量后分批归档。',
-        };
-      }
-      // 按 fstat 的 size 读，若中途被截断/扩展则按实际读到的字节重新校验上限。
-      const data = Buffer.allocUnsafe(stat.size);
-      let offset = 0;
-      while (offset < data.length) {
-        const n = fs.readSync(fd, data, offset, data.length - offset, offset);
-        if (n <= 0) break;
-        offset += n;
-      }
-      const buffer = offset === data.length ? data : data.subarray(0, offset);
-      if (buffer.length === 0) {
-        return { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` };
-      }
-      if (buffer.length > MAX_FILE_BYTES) {
-        return {
-          ...empty,
-          code: 'manual_archive_too_large',
-          message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
-        };
-      }
-      const detected = detectFormat(buffer);
-      if (detected.kind === 'archive') {
-        return {
-          ...empty,
-          code: 'manual_archive_is_zip',
-          message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
-        };
-      }
-      if (detected.kind !== 'ok') {
-        return {
-          ...empty,
-          code: 'manual_archive_unsupported_format',
-          message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
-        };
-      }
-      staged.push({ source, data: buffer, format: detected.format, ext: detected.ext, hash: contentHash(buffer) });
-    } catch (err) {
-      return {
+        },
+      };
+    }
+    // 按 fstat 的 size 读，若中途被截断/扩展则按实际读到的字节重新校验上限。
+    const data = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < data.length) {
+      const n = fs.readSync(fd, data, offset, data.length - offset, offset);
+      if (n <= 0) break;
+      offset += n;
+    }
+    const buffer = offset === data.length ? data : data.subarray(0, offset);
+    return validateStagedBuffer(source, buffer, nextTotalBytes, empty);
+  } catch (err) {
+    return {
+      kind: 'error',
+      result: {
         ...empty,
         code: 'manual_archive_unreadable',
         message: `无法读取「${path.basename(source)}」，请确认文件仍然存在且可访问。`,
         detail: sanitizeText(err instanceof Error ? err.message : String(err)),
-      };
-    } finally {
-      if (fd !== undefined) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // ignore
-        }
+      },
+    };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore
       }
     }
   }
+}
 
+function stageSources(input: ManualArchiveInput, empty: ManualArchiveResult): StageSourcesResult {
+  if (input.sources.length === 0) {
+    return {
+      kind: 'error',
+      result: { ...empty, code: 'manual_archive_no_files', message: '没有选择任何文件。' },
+    };
+  }
+  if (input.sources.length > MAX_BATCH_FILES) {
+    return {
+      kind: 'error',
+      result: {
+        ...empty,
+        code: 'manual_archive_too_many_files',
+        message: `一次最多选择 ${MAX_BATCH_FILES} 个文件，请分批归档。`,
+      },
+    };
+  }
+
+  const staged: StagedSource[] = [];
+  let totalBytes = 0;
+  for (const source of input.sources) {
+    const result = stageSource(source, totalBytes, empty);
+    if (result.kind === 'error') return result;
+    staged.push(result.item);
+    totalBytes = result.totalBytes;
+  }
+  return { kind: 'ok', staged };
+}
+
+function dedupeStagedBatch(input: ManualArchiveInput, staged: StagedSource[]): {
+  uniqueStaged: StagedSource[];
+  batchDuplicates: string[];
+} {
   // ELEC-09：同批按 contentHash 去重，只保留第一个来源。
   const batchSeen = new Set<string>();
   const uniqueStaged: StagedSource[] = [];
@@ -414,9 +508,13 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
     batchSeen.add(key);
     uniqueStaged.push(item);
   }
+  return { uniqueStaged, batchDuplicates };
+}
 
-  assertArchiveTransactionsRecovered(input.invoicesDir);
-
+function readArchiveIndexes(input: ManualArchiveInput): {
+  ledgerFilenameByKey: Map<string, string>;
+  queueSeen: Set<string>;
+} {
   // 2) 先 ensure+repair 台账（与 pipeline 一致：升级/回填 blank contentHash），再读去重索引。
   // 六列 legacy 升级不得留下空 contentHash，否则同票手工归档会装碰撞后缀副本。
   try {
@@ -445,6 +543,18 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
   const queueSeen = new Set(
     readCsvRows(input.ocrPendingCsv).map((row) => `${row.hash ?? ''}${SEP}${row.contentHash ?? ''}`),
   );
+  return { ledgerFilenameByKey, queueSeen };
+}
+
+function dedupeAndReconcile(
+  input: ManualArchiveInput,
+  staged: StagedSource[],
+  empty: ManualArchiveResult,
+): DedupeAndReconcileResult {
+  const { uniqueStaged, batchDuplicates } = dedupeStagedBatch(input, staged);
+
+  assertArchiveTransactionsRecovered(input.invoicesDir);
+  const { ledgerFilenameByKey, queueSeen } = readArchiveIndexes(input);
 
   const pending = input.pendingRow ?? {};
   const messageId = pending.messageId ?? '';
@@ -477,130 +587,123 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
 
   if (toInstall.length === 0 && toReuse.length === 0) {
     return {
-      ok: false,
-      code: 'manual_archive_all_duplicates',
-      message: '选择的文件都已经归档过了，没有新增内容。',
-      files: [],
-      duplicates,
-      pendingRemoved: 0,
+      kind: 'error',
+      result: {
+        ok: false,
+        code: 'manual_archive_all_duplicates',
+        message: '选择的文件都已经归档过了，没有新增内容。',
+        files: [],
+        duplicates,
+        pendingRemoved: 0,
+      },
     };
   }
 
+  return {
+    kind: 'ok',
+    archive: { duplicates, toInstall, toReuse, messageId, date, from, subject },
+  };
+}
+
+function prepareArchiveTransaction(
+  input: ManualArchiveInput,
+  toInstall: StagedSource[],
+  state: ArchiveTransactionState,
+): void {
   // 3) 规划最终文件名与 CSV 追加基线；先写 staging 再开 journal（OCR-05）。
   // NEW-DEFECT 2：staging 一旦创建，后续任意失败（含 journal 创建）都必须清理，
   // 不能把 journal 创建放在 cleanup-protected 块之外。
-  let plannedNames: string[] = [];
-  let ledgerBase = 0;
-  let queueBase = 0;
-  let stagingDir = '';
-  const stagingPaths: string[] = [];
-  let tx: ReturnType<typeof beginArchiveTransaction> | undefined;
-  const archived: ManualArchiveFile[] = [];
+  fs.mkdirSync(input.invoicesDir, { recursive: true });
+  state.plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
+  // 再次 ensure（幂等）：保证 append 前表头与 baseLength 基线正确。
+  ensureInvoiceLedgerSchema(input.ledgerCsv, input.invoicesDir);
+  ensureOcrPendingSchema(input.ocrPendingCsv);
+  state.ledgerBase = fs.statSync(input.ledgerCsv).size;
+  state.queueBase = fs.statSync(input.ocrPendingCsv).size;
 
-  try {
-    fs.mkdirSync(input.invoicesDir, { recursive: true });
-    plannedNames = planNumberedNames(input.invoicesDir, toInstall.map((item) => item.ext));
-    // 再次 ensure（幂等）：保证 append 前表头与 baseLength 基线正确。
-    ensureInvoiceLedgerSchema(input.ledgerCsv, input.invoicesDir);
-    ensureOcrPendingSchema(input.ocrPendingCsv);
-    ledgerBase = fs.statSync(input.ledgerCsv).size;
-    queueBase = fs.statSync(input.ocrPendingCsv).size;
-
-    stagingDir = path.join(
-      input.invoicesDir,
-      '.staging',
-      `manual-${input.hash.slice(0, 12)}-${process.pid.toString(36)}-${randomBytes(4).toString('hex')}`,
-    );
-    fs.mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
-    for (let i = 0; i < toInstall.length; i++) {
-      const item = toInstall[i];
-      if (!item) throw new Error('archive plan mismatch');
-      const stagingPath = path.join(stagingDir, `${i}.${item.ext}`);
-      fs.writeFileSync(stagingPath, item.data, { mode: 0o600 });
-      stagingPaths.push(stagingPath);
-    }
-
-    const plannedPaths = plannedNames.map((name) => path.join(input.invoicesDir, name));
-    const plannedFiles = plannedPaths.map((finalPath, i) => ({
-      path: finalPath,
-      stagingPath: stagingPaths[i],
-      stagingDir,
-    }));
-
-    tx = beginArchiveTransaction(input.invoicesDir, {
-      files: plannedFiles,
-      csv: [
-        { path: input.ledgerCsv, baseLength: ledgerBase },
-        { path: input.ocrPendingCsv, baseLength: queueBase },
-      ],
-      stagingDir,
-    });
-
-    // 4) hard-link 安装：与自动归档一致，prepared 阶段可用 inode 证明归属（OCR-05）。
-    for (let i = 0; i < toInstall.length; i++) {
-      const item = toInstall[i];
-      const target = plannedPaths[i];
-      const stagingPath = stagingPaths[i];
-      const name = plannedNames[i];
-      if (!item || !target || !stagingPath || !name) throw new Error('archive plan mismatch');
-      // 与自动归档一致：只用 hard-link。prepared 阶段恢复依赖 staging/final 同 inode
-      // 证明归属；copy 无法证明，故不回退（OCR-05）。
-      fs.linkSync(stagingPath, target);
-      archived.push({ filename: name, contentHash: item.hash, format: item.format });
-    }
-    tx.markStage('files-installed');
-
-    // 5) 先追加 OCR 队列，再追加台账（台账最后 → ledger-committed 才表示全部完成）。
-    const queueLines = [
-      ...toInstall.map((item, i) => csvLine([
-        input.hash, messageId, date, from, subject, plannedNames[i] ?? '',
-        path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive', item.hash,
-      ])),
-      ...toReuse.map(({ item, filename }) => csvLine([
-        input.hash, messageId, date, from, subject, filename,
-        path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive_repair', item.hash,
-      ])),
-    ];
-    fs.appendFileSync(input.ocrPendingCsv, queueLines.join(''), 'utf8');
-    if (testFaultEnabled('MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV')) {
-      throw new Error('forced_after_manual_queue_csv_failure');
-    }
-
-    // 6) 追加台账（只为本次真正新装的文件；第 8 列 mailHash 与 pipeline 一致）。
-    const ledgerLines = toInstall.map((item, i) => csvLine([
-      messageId, date, from, subject, plannedNames[i] ?? '', path.basename(item.source), item.hash, input.hash,
-    ]));
-    if (ledgerLines.length > 0) fs.appendFileSync(input.ledgerCsv, ledgerLines.join(''), 'utf8');
-    tx.markStage('ledger-committed');
-    tx.commit();
-    tx = undefined;
-  } catch (err) {
-    if (tx) {
-      try {
-        tx.rollback();
-      } catch (rollbackErr) {
-        if (stagingDir) removeDirQuietly(stagingDir);
-        if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
-        throw err;
-      }
-    }
-    if (stagingDir) removeDirQuietly(stagingDir);
-    const prepared = Boolean(tx) || stagingPaths.length > 0;
-    return {
-      ...empty,
-      code: prepared ? 'manual_archive_failed' : 'manual_archive_prepare_failed',
-      message: prepared
-        ? '归档没有完成，已撤销本次改动，请检查归档目录是否可写后重试。'
-        : '无法准备归档目录，请确认归档位置可写后重试。',
-      detail: sanitizeText(err instanceof Error ? err.message : String(err)),
-      duplicates,
-    };
+  state.stagingDir = path.join(
+    input.invoicesDir,
+    '.staging',
+    `manual-${input.hash.slice(0, 12)}-${process.pid.toString(36)}-${randomBytes(4).toString('hex')}`,
+  );
+  fs.mkdirSync(state.stagingDir, { recursive: true, mode: 0o700 });
+  for (let i = 0; i < toInstall.length; i++) {
+    const item = toInstall[i];
+    if (!item) throw new Error('archive plan mismatch');
+    const stagingPath = path.join(state.stagingDir, `${i}.${item.ext}`);
+    fs.writeFileSync(stagingPath, item.data, { mode: 0o600 });
+    state.stagingPaths.push(stagingPath);
   }
 
-  for (const { item, filename } of toReuse) {
-    archived.push({ filename, contentHash: item.hash, format: item.format });
+  state.plannedPaths = state.plannedNames.map((name) => path.join(input.invoicesDir, name));
+  const plannedFiles = state.plannedPaths.map((finalPath, i) => ({
+    path: finalPath,
+    stagingPath: state.stagingPaths[i],
+    stagingDir: state.stagingDir,
+  }));
+
+  state.tx = beginArchiveTransaction(input.invoicesDir, {
+    files: plannedFiles,
+    csv: [
+      { path: input.ledgerCsv, baseLength: state.ledgerBase },
+      { path: input.ocrPendingCsv, baseLength: state.queueBase },
+    ],
+    stagingDir: state.stagingDir,
+  });
+}
+
+function commitArchiveFilesAndCsv(
+  input: ManualArchiveInput,
+  archive: ReconciledArchive,
+  state: ArchiveTransactionState,
+  archived: ManualArchiveFile[],
+): void {
+  const { toInstall, toReuse, messageId, date, from, subject } = archive;
+  // 4) hard-link 安装：与自动归档一致，prepared 阶段可用 inode 证明归属（OCR-05）。
+  for (let i = 0; i < toInstall.length; i++) {
+    const item = toInstall[i];
+    const target = state.plannedPaths[i];
+    const stagingPath = state.stagingPaths[i];
+    const name = state.plannedNames[i];
+    if (!item || !target || !stagingPath || !name) throw new Error('archive plan mismatch');
+    // 与自动归档一致：只用 hard-link。prepared 阶段恢复依赖 staging/final 同 inode
+    // 证明归属；copy 无法证明，故不回退（OCR-05）。
+    fs.linkSync(stagingPath, target);
+    archived.push({ filename: name, contentHash: item.hash, format: item.format });
+  }
+  state.tx!.markStage('files-installed');
+
+  // 5) 先追加 OCR 队列，再追加台账（台账最后 → ledger-committed 才表示全部完成）。
+  const queueLines = [
+    ...toInstall.map((item, i) => csvLine([
+      input.hash, messageId, date, from, subject, state.plannedNames[i] ?? '',
+      path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive', item.hash,
+    ])),
+    ...toReuse.map(({ item, filename }) => csvLine([
+      input.hash, messageId, date, from, subject, filename,
+      path.basename(item.source), item.format, 'invoice', 'pending', 'manual_archive_repair', item.hash,
+    ])),
+  ];
+  fs.appendFileSync(input.ocrPendingCsv, queueLines.join(''), 'utf8');
+  if (testFaultEnabled('MFH_TEST_FAIL_AFTER_MANUAL_QUEUE_CSV')) {
+    throw new Error('forced_after_manual_queue_csv_failure');
   }
 
+  // 6) 追加台账（只为本次真正新装的文件；第 8 列 mailHash 与 pipeline 一致）。
+  const ledgerLines = toInstall.map((item, i) => csvLine([
+    messageId, date, from, subject, state.plannedNames[i] ?? '', path.basename(item.source), item.hash, input.hash,
+  ]));
+  if (ledgerLines.length > 0) fs.appendFileSync(input.ledgerCsv, ledgerLines.join(''), 'utf8');
+  state.tx!.markStage('ledger-committed');
+  state.tx!.commit();
+  state.tx = undefined;
+}
+
+function removePendingAfterCommit(
+  input: ManualArchiveInput,
+  archived: ManualArchiveFile[],
+  duplicates: string[],
+): ManualArchiveResult {
   // 7) 只有台账与队列都提交成功，才移除 pending 行；这一步失败不撤销归档，仅上报告警。
   let pendingRemoved = 0;
   let warning: string | undefined;
@@ -623,4 +726,56 @@ export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult
       }
       : {}),
   };
+}
+
+export function runManualArchive(input: ManualArchiveInput): ManualArchiveResult {
+  const empty: ManualArchiveResult = { ok: false, files: [], duplicates: [], pendingRemoved: 0 };
+  const stagedResult = stageSources(input, empty);
+  if (stagedResult.kind === 'error') return stagedResult.result;
+
+  const reconciledResult = dedupeAndReconcile(input, stagedResult.staged, empty);
+  if (reconciledResult.kind === 'error') return reconciledResult.result;
+  const archive = reconciledResult.archive;
+
+  const state: ArchiveTransactionState = {
+    plannedNames: [],
+    plannedPaths: [],
+    ledgerBase: 0,
+    queueBase: 0,
+    stagingDir: '',
+    stagingPaths: [],
+    tx: undefined,
+  };
+  const archived: ManualArchiveFile[] = [];
+
+  try {
+    prepareArchiveTransaction(input, archive.toInstall, state);
+    commitArchiveFilesAndCsv(input, archive, state, archived);
+  } catch (err) {
+    if (state.tx) {
+      try {
+        state.tx.rollback();
+      } catch (rollbackErr) {
+        if (state.stagingDir) removeDirQuietly(state.stagingDir);
+        if (rollbackErr instanceof ArchiveRecoveryError) throw rollbackErr;
+        throw err;
+      }
+    }
+    if (state.stagingDir) removeDirQuietly(state.stagingDir);
+    const prepared = Boolean(state.tx) || state.stagingPaths.length > 0;
+    return {
+      ...empty,
+      code: prepared ? 'manual_archive_failed' : 'manual_archive_prepare_failed',
+      message: prepared
+        ? '归档没有完成，已撤销本次改动，请检查归档目录是否可写后重试。'
+        : '无法准备归档目录，请确认归档位置可写后重试。',
+      detail: sanitizeText(err instanceof Error ? err.message : String(err)),
+      duplicates: archive.duplicates,
+    };
+  }
+
+  for (const { item, filename } of archive.toReuse) {
+    archived.push({ filename, contentHash: item.hash, format: item.format });
+  }
+  return removePendingAfterCommit(input, archived, archive.duplicates);
 }
