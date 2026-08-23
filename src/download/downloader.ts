@@ -282,6 +282,145 @@ function tryReuseArchived(
   return { path: existingPath, filename: leaf };
 }
 
+interface ArchiveBatchState {
+  invoicesDir: string;
+  log: Logger;
+  opts: DownloadOptions;
+  stagingDir: string;
+  reused: DownloadResult[];
+  staged: StagedDocument[];
+  plannedPaths: ArchivePlannedFile[];
+}
+
+function stageInputs(
+  pdfs: PdfArtifact[],
+  msgIdHash: string,
+  state: ArchiveBatchState,
+): void {
+  for (let i = 0; i < pdfs.length; i++) {
+    const raw = pdfs[i];
+    if (!raw) continue;
+
+    const ext = artifactExt(raw);
+    const pdf = normalizeArtifact(raw, ext);
+    const hash = contentHash(pdf.data);
+
+    const existing = state.opts.alreadyArchived?.get(hash);
+    if (existing) {
+      const hit = tryReuseArchived(state.invoicesDir, existing, hash, state.log);
+      if (hit) {
+        state.log.debug(`Reusing archived document ${hit.filename} for ${pdf.source}`);
+        state.reused.push({
+          sourceIndex: i,
+          finalPath: hit.path,
+          filename: hit.filename,
+          format: pdf.format ?? formatForExt(ext),
+          documentType: pdf.documentType ?? 'invoice',
+          requiresOcr: pdf.requiresOcr ?? true,
+          contentHash: hash,
+          reused: true,
+        });
+        continue;
+      }
+      // 映射损坏或不匹配：落入重新 staging/归档路径。
+    }
+
+    const stagingPath = path.join(state.stagingDir, `${i}.${ext}`);
+    fs.writeFileSync(stagingPath, pdf.data, { mode: isPosix() ? FILE_MODE : undefined });
+    hardenPath(stagingPath, FILE_MODE);
+    state.log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
+
+    state.staged.push({
+      index: i,
+      stagingPath,
+      ext,
+      targetName: finalFilename(
+        pdf.suggestedName || `${msgIdHash}-${i}`,
+        `${msgIdHash}-${i}`,
+        ext,
+      ),
+      artifact: pdf,
+      contentHash: hash,
+    });
+  }
+}
+
+function rollbackBatch(state: ArchiveBatchState): void {
+  for (const item of state.staged) {
+    const filePath = item.finalPath;
+    if (!filePath) continue;
+    try {
+      const finalStat = fs.statSync(filePath);
+      const stagingStat = fs.statSync(item.stagingPath);
+      if (finalStat.dev === stagingStat.dev && finalStat.ino === stagingStat.ino) {
+        fs.rmSync(filePath, { force: true });
+        state.log.warn(`Rolled back archived file ${filePath}`);
+      }
+    } catch (err) {
+      state.log.warn(`Rollback failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  removeStagingDir(state.stagingDir);
+}
+
+function planBatch(state: ArchiveBatchState): ArchivePlannedFile[] {
+  if (state.plannedPaths.length > 0) return state.plannedPaths.map((item) => ({ ...item }));
+  const reserved = new Set<string>();
+  for (const item of state.staged) {
+    const finalPath = state.opts.avoidConflictBeforeOcr === false
+      ? planNamed(path.join(state.invoicesDir, item.targetName), reserved)
+      : planNumbered(state.invoicesDir, item.ext, reserved);
+    item.finalPath = finalPath;
+    state.plannedPaths.push({
+      path: finalPath,
+      stagingPath: item.stagingPath,
+      stagingDir: state.stagingDir,
+    });
+  }
+  return state.plannedPaths.map((item) => ({ ...item }));
+}
+
+function commitBatch(state: ArchiveBatchState): DownloadResult[] {
+  if (state.plannedPaths.length === 0) planBatch(state);
+  const results: DownloadResult[] = [...state.reused];
+  try {
+    for (const item of state.staged) {
+      const finalPath = item.finalPath;
+      if (!finalPath) throw new Error('archive_batch_not_planned');
+      // 优先 hard-link staging -> final：若进程在 journal prepared 与
+      // files-installed 之间被强杀，恢复可以用 inode 证明 final 属于本事务。
+      try {
+        fs.linkSync(item.stagingPath, finalPath);
+      } catch (err) {
+        // Do not fall back to copy. Prepared-stage recovery proves ownership
+        // with the staging/final hard-link inode; a copied final file cannot be
+        // distinguished from a raced-in writer before `files-installed` is
+        // durably recorded.
+        throw err;
+      }
+      hardenPath(finalPath, FILE_MODE);
+      state.log.debug(`Finalized ${item.stagingPath} -> ${finalPath}`);
+
+      results.push({
+        sourceIndex: item.index,
+        finalPath,
+        filename: path.basename(finalPath),
+        format: item.artifact.format ?? formatForExt(item.ext),
+        documentType: item.artifact.documentType ?? 'invoice',
+        requiresOcr: item.artifact.requiresOcr ?? true,
+        contentHash: item.contentHash,
+        reused: false,
+      });
+    }
+  } catch (err) {
+    // 提交中途失败：整批回滚，绝不留下“部分批次”。
+    rollbackBatch(state);
+    throw err;
+  }
+  results.sort((a, b) => a.sourceIndex - b.sourceIndex);
+  return results;
+}
+
 export function stageDocuments(
   pdfs: PdfArtifact[],
   msgIdHash: string,
@@ -299,142 +438,32 @@ export function stageDocuments(
   ensureSecureDir(path.dirname(stagingDir));
   ensureSecureDir(stagingDir);
 
-  const reused: DownloadResult[] = [];
-  const staged: StagedDocument[] = [];
+  const state: ArchiveBatchState = {
+    invoicesDir,
+    log,
+    opts,
+    stagingDir,
+    reused: [],
+    staged: [],
+    plannedPaths: [],
+  };
 
   try {
-    for (let i = 0; i < pdfs.length; i++) {
-      const raw = pdfs[i];
-      if (!raw) continue;
-
-      const ext = artifactExt(raw);
-      const pdf = normalizeArtifact(raw, ext);
-      const hash = contentHash(pdf.data);
-
-      const existing = opts.alreadyArchived?.get(hash);
-      if (existing) {
-        const hit = tryReuseArchived(invoicesDir, existing, hash, log);
-        if (hit) {
-          log.debug(`Reusing archived document ${hit.filename} for ${pdf.source}`);
-          reused.push({
-            sourceIndex: i,
-            finalPath: hit.path,
-            filename: hit.filename,
-            format: pdf.format ?? formatForExt(ext),
-            documentType: pdf.documentType ?? 'invoice',
-            requiresOcr: pdf.requiresOcr ?? true,
-            contentHash: hash,
-            reused: true,
-          });
-          continue;
-        }
-        // 映射损坏或不匹配：落入重新 staging/归档路径。
-      }
-
-      const stagingPath = path.join(stagingDir, `${i}.${ext}`);
-      fs.writeFileSync(stagingPath, pdf.data, { mode: isPosix() ? FILE_MODE : undefined });
-      hardenPath(stagingPath, FILE_MODE);
-      log.debug(`Staged ${pdf.source} -> ${stagingPath}`);
-
-      staged.push({
-        index: i,
-        stagingPath,
-        ext,
-        targetName: finalFilename(
-          pdf.suggestedName || `${msgIdHash}-${i}`,
-          `${msgIdHash}-${i}`,
-          ext,
-        ),
-        artifact: pdf,
-        contentHash: hash,
-      });
-    }
+    stageInputs(pdfs, msgIdHash, state);
   } catch (err) {
     removeStagingDir(stagingDir);
     throw err;
   }
 
   /** 已规划的最终路径。 */
-  const plannedPaths: ArchivePlannedFile[] = [];
+  const rollback = (): void => rollbackBatch(state);
 
-  const rollback = (): void => {
-    for (const item of staged) {
-      const filePath = item.finalPath;
-      if (!filePath) continue;
-      try {
-        const finalStat = fs.statSync(filePath);
-        const stagingStat = fs.statSync(item.stagingPath);
-        if (finalStat.dev === stagingStat.dev && finalStat.ino === stagingStat.ino) {
-          fs.rmSync(filePath, { force: true });
-          log.warn(`Rolled back archived file ${filePath}`);
-        }
-      } catch (err) {
-        log.warn(`Rollback failed for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    removeStagingDir(stagingDir);
-  };
+  const plan = (): ArchivePlannedFile[] => planBatch(state);
 
-  const plan = (): ArchivePlannedFile[] => {
-    if (plannedPaths.length > 0) return plannedPaths.map((item) => ({ ...item }));
-    const reserved = new Set<string>();
-    for (const item of staged) {
-      const finalPath = opts.avoidConflictBeforeOcr === false
-        ? planNamed(path.join(invoicesDir, item.targetName), reserved)
-        : planNumbered(invoicesDir, item.ext, reserved);
-      item.finalPath = finalPath;
-      plannedPaths.push({
-        path: finalPath,
-        stagingPath: item.stagingPath,
-        stagingDir,
-      });
-    }
-    return plannedPaths.map((item) => ({ ...item }));
-  };
-
-  const commit = (): DownloadResult[] => {
-    if (plannedPaths.length === 0) plan();
-    const results: DownloadResult[] = [...reused];
-    try {
-      for (const item of staged) {
-        const finalPath = item.finalPath;
-        if (!finalPath) throw new Error('archive_batch_not_planned');
-        // 优先 hard-link staging -> final：若进程在 journal prepared 与
-        // files-installed 之间被强杀，恢复可以用 inode 证明 final 属于本事务。
-        try {
-          fs.linkSync(item.stagingPath, finalPath);
-        } catch (err) {
-          // Do not fall back to copy. Prepared-stage recovery proves ownership
-          // with the staging/final hard-link inode; a copied final file cannot be
-          // distinguished from a raced-in writer before `files-installed` is
-          // durably recorded.
-          throw err;
-        }
-        hardenPath(finalPath, FILE_MODE);
-        log.debug(`Finalized ${item.stagingPath} -> ${finalPath}`);
-
-        results.push({
-          sourceIndex: item.index,
-          finalPath,
-          filename: path.basename(finalPath),
-          format: item.artifact.format ?? formatForExt(item.ext),
-          documentType: item.artifact.documentType ?? 'invoice',
-          requiresOcr: item.artifact.requiresOcr ?? true,
-          contentHash: item.contentHash,
-          reused: false,
-        });
-      }
-    } catch (err) {
-      // 提交中途失败：整批回滚，绝不留下“部分批次”。
-      rollback();
-      throw err;
-    }
-    results.sort((a, b) => a.sourceIndex - b.sourceIndex);
-    return results;
-  };
+  const commit = (): DownloadResult[] => commitBatch(state);
 
   return {
-    pending: staged.length,
+    pending: state.staged.length,
     stagingDir,
     plan,
     commit,
