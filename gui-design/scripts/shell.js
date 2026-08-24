@@ -58,6 +58,10 @@ exposeCompatibilityApi({
     ICON,
 });
 
+// 壳层公开面已经装好，放行内联控制器里等在 MFH_SHELL_READY 上的交互入口。
+// 放在 wire() 之前即可：whenConfigReady() 本身还会继续等配置水合完成。
+window.__mfhShellReady?.();
+
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', wire);
 } else {

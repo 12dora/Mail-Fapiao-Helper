@@ -291,6 +291,7 @@
     </main>
 </div>
 
+<script src="../scripts/shell-ready.js"></script>
 <script type="module" src="../scripts/shell.js"></script>
 <script>
 /* Wrapped in an IIFE with a one-shot guard: the SPA loader may execute this
@@ -479,6 +480,14 @@
     }
 
     async function startRun() {
+        /* shell.js 现在是 type="module"（defer 执行），而本内联控制器在解析阶段
+           就跑完并绑好了按钮。若用户在模块图加载完之前按下「开始」，下面所有
+           `window.FPH?.…` 都会被可选链静默跳过——包括 whenConfigReady()，于是
+           发出的是 HTML 里的静态默认值，而不是用户存盘的配置。先等壳层就绪。
+
+           正常路径下 window.FPH 早已存在，这里不会产生任何 await，
+           FE-08「上锁必须发生在第一个 await 之前」的前提因此不受影响。 */
+        if (!window.FPH) await window.MFH_SHELL_READY;
         const fetchCheck = (key) => {
             const el = document.querySelector(`[data-fetch-check="${key}"]`);
             return window.FPH?.isChecked ? window.FPH.isChecked(el) : el?.checked === true;
