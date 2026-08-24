@@ -334,6 +334,37 @@ macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitle
 | `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` | Apple ID 公证（上面那组的替代） |
 | `WINDOWS_CERTIFICATE_PFX` / `WINDOWS_CERTIFICATE_PASSWORD` | Windows Authenticode 证书（base64 的 .pfx）与密码 |
 
+### 用 Docker 跑 CLI
+
+桌面端需要图形栈，不适合容器化；**容器里跑的是 CLI**（`fetch` / `run` / `ocr` / `pending` / `organize`），适合放在服务器上定时抓票。
+
+```bash
+# 1. 准备宿主机数据目录（已在 .gitignore 里，不会被提交）
+mkdir -p data && cp config.example.json data/config.json
+#    编辑 data/config.json，填 imap.host / imap.user / imap.pass
+
+# 2. 构建镜像
+docker build -t mail-fapiao-helper:latest .
+
+# 3. 抓邮件 → 归档
+docker run --rm -v "$PWD/data:/data" mail-fapiao-helper:latest fetch --config /data/config.json
+docker run --rm -v "$PWD/data:/data" mail-fapiao-helper:latest run   --config /data/config.json
+```
+
+或者用 `docker compose`（等价，少打点字）：
+
+```bash
+docker compose --profile cli run --rm mfh fetch --config /data/config.json
+docker compose --profile cli run --rm mfh run   --config /data/config.json
+```
+
+要点：
+
+- 邮件、附件、`state.json`、`config.json` 全部落在挂载的 `/data` 卷里，**镜像本身不含任何用户数据**；容器以非 root 的 `node` 用户运行。
+- 镜像内已装好 Playwright + Chromium，第三方开票平台的站点脚本可以正常跑。
+- **OCR 在容器里默认不可用**：`vendor/efapiao/` 只内置了 `darwin-arm64` 与 `windows-x86_64` 两个平台的引擎，上游未发布 Linux 包。如果你自行构建了 Linux 引擎，把它放到 `vendor/efapiao/0.1.3/linux-x86_64/efapiao` 再重新 `docker build` 即可；否则请在配置里把 `ocr.enabled` 设为 `false`，或改用腾讯 OCR。
+- 容器不监听任何端口，只需要出站网络访问你的 IMAP 服务器与开票平台。
+
 ### 其他文档
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 当前模块边界、事务、锁、schema v3

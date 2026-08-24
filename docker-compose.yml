@@ -1,0 +1,28 @@
+# 发票助手 CLI 的容器编排示例。
+#
+# 用法：
+#   1. cp config.example.json data/config.json，填好 imap.host / user / pass
+#   2. docker compose run --rm mfh fetch --config /data/config.json
+#   3. docker compose run --rm mfh run   --config /data/config.json
+#
+# 邮箱凭据建议走 data/config.json（挂载卷，不进镜像），不要写进本文件。
+
+services:
+  mfh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mail-fapiao-helper:latest
+    # CLI 是一次性任务，不是常驻服务；用 `docker compose run` 驱动。
+    profiles: ["cli"]
+    volumes:
+      - ./data:/data
+    environment:
+      MFH_DATA_DIR: /data
+      TZ: Asia/Shanghai
+    # 抓邮件只需要出站网络；不暴露任何端口。
+    init: true
+    # 容器内不需要提权，Chromium 用 Playwright 自带的沙箱降级策略。
+    security_opt:
+      - no-new-privileges:true
+    command: ["--help"]

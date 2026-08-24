@@ -17,6 +17,9 @@ pending/
 pending.csv
 .mfh-cache/
 
+# docker compose 的宿主机数据卷（含真实邮件内容与凭据）
+data/
+
 # local scratch / agent state
 tmp/
 .claude/settings.local.json

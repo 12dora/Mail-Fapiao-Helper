@@ -1,0 +1,16 @@
+node_modules
+dist
+release
+tmp
+.git
+.github
+docs/screenshots
+gui-design
+icon
+invoices
+samples
+pending
+state.json
+invoices.csv
+config.json
+*.log
