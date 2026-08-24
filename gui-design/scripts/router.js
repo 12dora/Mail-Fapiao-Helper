@@ -79,8 +79,10 @@ export async function loadPageMain(pageId, href) {
         document.querySelector('.app')?.appendChild(clone);
         upgradeStaticMarkup(clone);
         for (const script of doc.querySelectorAll('script')) {
-            if (script.src && script.src.includes('/scripts/shell.js')) continue;
-            if (script.src && script.getAttribute('src')?.includes('../scripts/shell.js')) continue;
+            // 壳层脚本只在首屏执行一次；SPA 导航重放它们会重复注册事件委托与
+            // 桥接订阅。shell-ready.js 自身幂等，这里跳过只是省一次无谓的取回。
+            if (script.src && /\/scripts\/shell(-ready)?\.js/.test(script.src)) continue;
+            if (script.src && /\.\.\/scripts\/shell(-ready)?\.js/.test(script.getAttribute('src') || '')) continue;
             const node = document.createElement('script');
             if (script.src) node.src = script.src;
             else node.textContent = script.textContent || '';
