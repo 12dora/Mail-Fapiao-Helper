@@ -71,7 +71,7 @@ GitHub [Releases](../../releases) 上可能同时存在：
 
 | 通道 | 如何识别 | 签名 | 适用场景 |
 |---|---|---|---|
-| **正式 Release（当前）** | GitHub 标记为 Latest；tag 形如 `v0.0.6`；标题含「未签名」；资产名含 `-unsigned` | **未签名、未公证** | 个人本机使用 |
+| **正式 Release（当前）** | GitHub 标记为 Latest；tag 形如 `v0.0.7`；标题含「未签名」；资产名含 `-unsigned` | **未签名、未公证** | 个人本机使用 |
 | **未签名 prerelease** | GitHub 标记为 **Pre-release**；tag 含 `-unsigned.N` | **未签名、未公证** | 内测 |
 | **开发构建 artifact** | 不在 Releases；只在 Actions workflow 产物里（约 14 天） | 未签名 | 本地联调 |
 
@@ -192,7 +192,7 @@ pending/               # 待确认邮件（含原 .eml 与索引）
 SHA-256 校验值再放行**：
 
 ```bash
-shasum -a 256 ~/Downloads/mail-fapiao-helper-0.0.6-arm64-unsigned.dmg
+shasum -a 256 ~/Downloads/mail-fapiao-helper-0.0.7-arm64-unsigned.dmg
 ```
 
 校验值一致后，正确做法是：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。
