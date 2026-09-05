@@ -119,14 +119,14 @@ export interface Config {
   };
 }
 
-export interface ConfigFieldError {
+interface ConfigFieldError {
   /** 形如 `ocr.servicePort` 的字段路径。 */
   path: string;
   /** 面向用户的中文说明，包含字段名与合法范围。 */
   message: string;
 }
 
-export type ValidateConfigResult =
+type ValidateConfigResult =
   | { ok: true; config: Config }
   | { ok: false; errors: ConfigFieldError[] };
 
@@ -461,7 +461,7 @@ function readCredentials(c: ErrorCollector, raw: unknown, path: string): Record<
 // 迁移
 // ---------------------------------------------------------------------------
 
-export interface MigrateResult {
+interface MigrateResult {
   /** 迁移后的原始对象（已补齐可选字段），不会修改调用方传入的对象。 */
   raw: Record<string, unknown>;
   /** 原始文件声明的版本；缺失视为 1。 */
@@ -489,7 +489,7 @@ function fillMissing(target: Record<string, unknown>, key: string, value: unknow
  * CORE-10：解析声明的 schemaVersion。必须是正整数；高于当前版本时抛专门错误，
  * 禁止旧程序静默把未来配置「盖章」成 v3。
  */
-export class ConfigVersionTooNewError extends Error {
+class ConfigVersionTooNewError extends Error {
   readonly code = 'config_version_too_new';
   readonly declared: number;
   readonly supported: number;
@@ -508,7 +508,7 @@ export class ConfigVersionTooNewError extends Error {
  * CORE-10：schemaVersion 已提供但不是正整数（如 `2.5`、`0`、`"999"`）。
  * 只有**缺省**才能隐含为 v1；非法值必须拒绝，不得静默回退再盖章为当前版本。
  */
-export class ConfigSchemaVersionInvalidError extends Error {
+class ConfigSchemaVersionInvalidError extends Error {
   readonly code = 'config_schema_version_invalid';
   readonly value: unknown;
 
@@ -757,7 +757,7 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
 }
 
 /** 把字段错误拼成一条可读的中文错误信息。 */
-export function formatConfigErrors(errors: ConfigFieldError[]): string {
+function formatConfigErrors(errors: ConfigFieldError[]): string {
   return errors.map((e) => `- ${e.message}`).join('\n');
 }
 

@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
+import { OCR_CSV_HEADER } from '../pipeline/csvDurability.js';
 import type { OcrProvider, OcrResult } from './types.js';
 import { csvCell, parseCsv, readCsvRows } from '../util/csv.js';
 import { contentHash as hashBytes } from '../util/hash.js';
@@ -29,7 +30,7 @@ interface ParseJob {
   data: Buffer;
 }
 
-export interface OcrRunSummary {
+interface OcrRunSummary {
   scanned: number;
   parsed: number;
   skipped: number;
@@ -125,9 +126,8 @@ function pendingLine(row: PendingRow): string {
 
 function writePendingCsv(csvPath: string, rows: PendingRow[]): void {
   ensureDir(path.dirname(csvPath));
-  const header = 'hash,messageId,date,from,subject,filename,source,format,documentType,status,reason,contentHash\n';
   const tmpPath = `${csvPath}.tmp`;
-  fs.writeFileSync(tmpPath, '﻿' + header + rows.map(pendingLine).join(''), 'utf8');
+  fs.writeFileSync(tmpPath, '﻿' + OCR_CSV_HEADER + rows.map(pendingLine).join(''), 'utf8');
   fs.renameSync(tmpPath, csvPath);
 }
 

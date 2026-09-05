@@ -92,7 +92,7 @@ export interface MailIdentity {
   legacy: string;
 }
 
-export interface ResolveMailIdentityInput {
+interface ResolveMailIdentityInput {
   messageId?: string | undefined;
   from: string;
   date: string;
@@ -161,18 +161,6 @@ export function identityMatches(onlyMail: string, identity: MailIdentity): boole
   if (identity.primary.toLowerCase() === target) return true;
   for (const a of identity.aliases) {
     if (a.toLowerCase() === target) return true;
-  }
-  return false;
-}
-
-/**
- * state / 并发集命中：默认用 `evidence`（安全），避免 Message-Id legacy 折叠不同邮件。
- * 若调用方显式传入 aliases 集合则按传入集合匹配。
- */
-export function identityInSet(identity: MailIdentity, set: { has(h: string): boolean }): boolean {
-  if (set.has(identity.primary)) return true;
-  for (const a of identity.evidence) {
-    if (set.has(a)) return true;
   }
   return false;
 }

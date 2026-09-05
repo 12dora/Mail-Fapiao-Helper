@@ -169,11 +169,6 @@ export function loadResolverProfile(): Promise<ResolverProfile> {
   return profile;
 }
 
-/** 测试用：丢弃缓存的画像。 */
-export function resetResolverProfile(): void {
-  cached = undefined;
-}
-
 /**
  * 这个地址是否是解析器给出的占位地址？
  * 只应在 `isBlockedIp()` 已经拒绝、且该地址来自**域名解析**时调用。

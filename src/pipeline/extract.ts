@@ -32,7 +32,7 @@ export interface AggregatedExtraction {
  * EXT-07：跨来源 PDF/OFD 去重只认**强发票身份**（20 位发票号一致）。
  * 文件名相等绝不足以删除另一来源的 OFD——附件 PDF 与站点 OFD 常撞名。
  */
-export function preferPdfOverStrongIdentityOfd(
+function preferPdfOverStrongIdentityOfd(
   artifacts: PdfArtifact[],
   log: Logger,
   subject?: string,

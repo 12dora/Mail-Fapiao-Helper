@@ -19,7 +19,7 @@ export interface Logger {
  * 增强通道（供未来/并行解析器）：
  * - 另发一行 `\x1eMFH_TERMINAL\x1e Run complete: …`，正则：`/^\x1eMFH_TERMINAL\x1e Run complete:/m`
  */
-export const MFH_TERMINAL_MARKER = '\x1eMFH_TERMINAL\x1e';
+const MFH_TERMINAL_MARKER = '\x1eMFH_TERMINAL\x1e';
 
 /**
  * CORE-13：把不可信文本里的换行/回车/控制字符转成可见转义，保证一条逻辑日志

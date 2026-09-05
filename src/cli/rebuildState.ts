@@ -10,7 +10,7 @@ import { parseRebuildStateArgs, type RebuildStateOpts } from './args.js';
 import { acquireCommandLock } from './lock.js';
 import { REBUILD_STATE_USAGE } from './usage.js';
 
-export async function* walkEmls(dir: string): AsyncGenerator<string> {
+async function* walkEmls(dir: string): AsyncGenerator<string> {
   if (!existsSync(dir)) return;
   const entries = readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
@@ -38,7 +38,7 @@ export async function collectEmlPaths(dir: string): Promise<string[]> {
  * - 禁止返回「32 位 + 其 12 位 legacy」双键——backfill 会把两者都写进 state，
  *   导致 processedHashes 基数 > 邮件数，并永久压制共享 Message-Id 的另一封邮件。
  */
-export function primaryHashFromLedgerRow(row: Record<string, string>): string | undefined {
+function primaryHashFromLedgerRow(row: Record<string, string>): string | undefined {
   const explicit = (row.mailHash ?? row.hash ?? '').trim();
   if (explicit && isMailHash(explicit)) return explicit.toLowerCase();
   const messageId = row.messageId ?? '';
@@ -54,7 +54,7 @@ export function primaryHashFromLedgerRow(row: Record<string, string>): string | 
  * 缓存 .eml 的文件名就是 fetch 身份，因此这是唯一可信的 fetched 证据来源：
  * 文件不在（或为空）就不该记为已抓取，否则又会回到 APP-11 的空目录假象。
  */
-export async function fetchedHashesFromCache(samplesDir: string): Promise<string[]> {
+async function fetchedHashesFromCache(samplesDir: string): Promise<string[]> {
   const out: string[] = [];
   for (const emlPath of await collectEmlPaths(samplesDir)) {
     if (!fileExistsNonEmpty(emlPath)) continue;
@@ -65,7 +65,7 @@ export async function fetchedHashesFromCache(samplesDir: string): Promise<string
 }
 
 /** 从 invoices.csv（已归档）与 pending.csv（已进入待确认）恢复 processed 身份（每行一条 primary）。 */
-export function processedHashesFromLedgers(cfg: Config): string[] {
+function processedHashesFromLedgers(cfg: Config): string[] {
   const out = new Set<string>();
   const add = (row: Record<string, string>): void => { const h = primaryHashFromLedgerRow(row); if (h) out.add(h); };
   for (const row of readCsvRows(resolve(cfg.output.csv))) add(row);
@@ -76,7 +76,7 @@ export function processedHashesFromLedgers(cfg: Config): string[] {
   return [...out];
 }
 
-export async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<State> {
+async function rebuildStateFromDisk(cfg: Config, samplesDir: string): Promise<State> {
   return { processedHashes: processedHashesFromLedgers(cfg), fetchedHashes: await fetchedHashesFromCache(samplesDir) };
 }
 
