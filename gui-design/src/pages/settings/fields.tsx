@@ -3,6 +3,7 @@
  */
 import { FolderOpenOutlined } from '@ant-design/icons';
 import { Button, Form, Input, Space } from 'antd';
+import type { FormInstance } from 'antd';
 import type { ReactNode } from 'react';
 import { bridge } from '../../bridge/index.js';
 import type { OpenLocation, SecretPresence } from '../../bridge/index.js';
@@ -35,19 +36,53 @@ export function TextField({ label, path, hint, placeholder, disabled }: TextFiel
 export interface PathFieldProps extends TextFieldProps {
   /** 有对应位置时右侧显示「打开」。 */
   location?: OpenLocation;
+  /** 传了表单实例才显示「选择…」：选完的路径要写回这个字段。 */
+  form?: FormInstance;
+  /** 选完之后通知页面重算「有未保存的修改」——程序化写值不会触发 onValuesChange。 */
+  onChanged?: () => void;
 }
 
 /**
- * 路径字段：可直接编辑，右侧「打开」调用主进程按位置打开。
- * 主进程没有目录选择通道，所以这里不做「选择…」。
+ * 路径字段：可直接编辑，右侧「打开」按位置调用主进程，「选择…」弹系统目录选择框。
+ *
+ * 选择框回的是原始绝对路径，原样写进表单再原样提交——脱敏只作用于 get-config 的
+ * 展示串，这里换成展示串就写不进配置文件了。
  */
-export function PathField({ label, path, hint, placeholder, location, disabled }: PathFieldProps): JSX.Element {
+export function PathField({
+  label,
+  path,
+  hint,
+  placeholder,
+  location,
+  form,
+  onChanged,
+  disabled,
+}: PathFieldProps): JSX.Element {
+  const canPick = Boolean(form) && bridge.supports('pickDirectory');
+
+  function pick(): void {
+    void bridge.pickDirectory({ title: `选择${label}目录` }).then((result) => {
+      if (result.canceled) return;
+      if (!result.ok || !result.path) {
+        notifyResult(result, { success: '已选择', failure: '没能选择目录' });
+        return;
+      }
+      form?.setFieldValue(toNamePath(path), result.path);
+      onChanged?.();
+    });
+  }
+
   return (
     <Form.Item label={label} extra={hint}>
       <Space.Compact style={{ width: '100%' }}>
         <Form.Item name={toNamePath(path)} noStyle>
           <Input placeholder={placeholder} disabled={disabled} autoComplete="off" spellCheck={false} />
         </Form.Item>
+        {canPick ? (
+          <Button disabled={disabled} onClick={pick}>
+            选择…
+          </Button>
+        ) : null}
         {location ? (
           <Button icon={<FolderOpenOutlined />} disabled={disabled} onClick={() => openLocation(location)}>
             打开

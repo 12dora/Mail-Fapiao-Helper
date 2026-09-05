@@ -1,16 +1,16 @@
 /**
  * 关于标签页：版本、数据位置、归档恢复、开发者重置。
  */
-import { FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Alert, App as AntApp, Button, Card, Descriptions, Space, Typography } from 'antd';
+import { ExportOutlined, FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Alert, App as AntApp, Button, Card, Descriptions, Space } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { bridge, reloadSummary, useAppInfo } from '../../bridge/index.js';
-import type { AppInfo, ArchiveJournalStatus } from '../../bridge/index.js';
+import type { AppInfo, ArchiveJournalStatus, ExternalUrl } from '../../bridge/index.js';
 import { PathText, notify, notifyResult, useBusy } from '../../components/index.js';
 import { openLocation } from './fields.js';
 
-const REPO_URL = 'https://github.com/12dora/Mail-Fapiao-Helper';
-const ISSUE_URL = 'https://github.com/12dora/Mail-Fapiao-Helper/issues';
+const REPO_URL: ExternalUrl = 'https://github.com/12dora/Mail-Fapiao-Helper';
+const ISSUE_URL: ExternalUrl = 'https://github.com/12dora/Mail-Fapiao-Helper/issues';
 
 const PLATFORM_NAMES: Record<string, string> = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
 
@@ -141,7 +141,15 @@ function JournalCard(): JSX.Element {
   );
 }
 
+function openExternal(url: ExternalUrl): void {
+  void bridge.openExternal(url).then((result) => {
+    if (!result.ok) notifyResult(result, { success: '已打开', failure: '打不开浏览器' });
+  });
+}
+
 function LinksCard(): JSX.Element {
+  // 老版本主进程没有这个通道，这时只给出可复制的地址，不放一个点不动的按钮。
+  const canOpen = bridge.supports('openExternal');
   return (
     <Card size="small" title="项目">
       <Descriptions column={1} size="small" colon={false} labelStyle={LABEL_STYLE}>
@@ -152,7 +160,16 @@ function LinksCard(): JSX.Element {
           <PathText path={ISSUE_URL} copiedTitle="链接已复制" />
         </Descriptions.Item>
       </Descriptions>
-      <Typography.Text type="secondary">应用不会打开浏览器，复制链接后在浏览器中打开。</Typography.Text>
+      {canOpen ? (
+        <Space size={8} wrap>
+          <Button icon={<ExportOutlined />} onClick={() => openExternal(REPO_URL)}>
+            项目地址
+          </Button>
+          <Button icon={<ExportOutlined />} onClick={() => openExternal(ISSUE_URL)}>
+            反馈问题
+          </Button>
+        </Space>
+      ) : null}
     </Card>
   );
 }

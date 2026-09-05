@@ -9,9 +9,11 @@ import { toNamePath } from './model.js';
 export interface StorageTabProps {
   form: FormInstance;
   disabled: boolean;
+  /** 「选择…」写完路径后通知页面重算「有未保存的修改」。 */
+  onChanged: () => void;
 }
 
-export function StorageTab({ form, disabled }: StorageTabProps): JSX.Element {
+export function StorageTab({ form, disabled, onChanged }: StorageTabProps): JSX.Element {
   const applyAfterOcr = Form.useWatch(toNamePath('rename.applyAfterOcr'), form) as boolean | undefined;
   const organizeByType = Form.useWatch(toNamePath('rename.organizeByType'), form) as boolean | undefined;
 
@@ -24,6 +26,8 @@ export function StorageTab({ form, disabled }: StorageTabProps): JSX.Element {
           location="invoices"
           placeholder="./invoices"
           hint="发票与行程单原件存放在这里。"
+          form={form}
+          onChanged={onChanged}
           disabled={disabled}
         />
         <PathField
@@ -32,6 +36,8 @@ export function StorageTab({ form, disabled }: StorageTabProps): JSX.Element {
           location="samples"
           placeholder="./samples/raw"
           hint="保留邮件原文，便于重新处理。"
+          form={form}
+          onChanged={onChanged}
           disabled={disabled}
         />
         <PathField
@@ -40,6 +46,8 @@ export function StorageTab({ form, disabled }: StorageTabProps): JSX.Element {
           location="pending"
           placeholder="./pending"
           hint="需要人工处理的邮件放在这里。"
+          form={form}
+          onChanged={onChanged}
           disabled={disabled}
         />
         <PathField
@@ -104,6 +112,8 @@ export function StorageTab({ form, disabled }: StorageTabProps): JSX.Element {
           location="organized"
           placeholder="./invoices/organized"
           hint="分类归档的副本存放在这里。"
+          form={form}
+          onChanged={onChanged}
           disabled={disabled || !organizeByType}
         />
       </Card>

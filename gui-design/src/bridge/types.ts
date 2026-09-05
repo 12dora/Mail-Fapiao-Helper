@@ -389,6 +389,33 @@ export interface OpenMailResult extends BaseResult {
   opened?: 'mail' | 'folder' | 'reveal_attempted' | 'none';
 }
 
+/** 只允许项目地址与反馈入口两个地址，主进程按完整串比对。 */
+export type ExternalUrl =
+  | 'https://github.com/12dora/Mail-Fapiao-Helper'
+  | 'https://github.com/12dora/Mail-Fapiao-Helper/issues';
+
+export interface PickDirectoryPayload {
+  title?: string;
+  defaultPath?: string;
+}
+
+export interface PickDirectoryResult extends BaseResult {
+  /** 原始绝对路径：渲染层原样送回 saveConfig，不能是脱敏展示串。 */
+  path?: string;
+  canceled?: boolean;
+}
+
+export interface ExportCsvPayload {
+  filename: string;
+  csv: string;
+}
+
+export interface ExportCsvResult extends BaseResult {
+  /** 脱敏后的展示路径，只用来提示用户存到哪儿了。 */
+  path?: string;
+  canceled?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // 详情（mfh:mail-detail / mfh:invoice-detail）
 // ---------------------------------------------------------------------------
@@ -661,11 +688,14 @@ export interface MfhBridge {
   onFileProgress(cb: (data: FileProgress) => void): void;
   onOpState(cb: (data: OpState) => void): void;
 
-  // ipc-contract.md 新增，主进程实现中；调用前用 hasMethod() 判断可用性。
+  // 旧版本可能没有的通道；调用前用 bridge.supports() 判断可用性。
   mailDetail?(payload: { hash: string }): Promise<MailDetailResult>;
   openMail?(payload: OpenMailPayload): Promise<OpenMailResult>;
   invoiceDetail?(payload: { filename: string }): Promise<InvoiceDetailResult>;
   dedupe?(payload: DedupePayload): Promise<DedupeResult>;
+  openExternal?(payload: { url: string }): Promise<BaseResult>;
+  pickDirectory?(payload: PickDirectoryPayload): Promise<PickDirectoryResult>;
+  exportCsv?(payload: ExportCsvPayload): Promise<ExportCsvResult>;
 }
 
 declare global {
