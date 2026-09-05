@@ -24,6 +24,8 @@ gui-design/src/
   components/         shared UI kit — anything used by two pages lives here
     documentType.ts   documentType/invoiceType → one Chinese name
     mail/             the mail-detail sections shared by inbox and pending
+  store/              module-level state that must outlive a route change
+    run.ts            the current run: range, switches, batch, local log notes
   pages/<name>/       one folder per route; page-local state stays inside it
 ```
 
@@ -66,6 +68,18 @@ never `window.mfhBridge` at all.
 `useSummary()`, `useConfig()` and `useAppInfo()` are backed by module-level
 stores: the data is fetched once and shared. After any write, call `reload()`
 from the hook or `reloadSummary()` from a plain callback.
+
+`primeSummary()` installs the summary a long task hands back in its terminal
+result. That one uses the backend's default row limit, not `SUMMARY_QUERY`, so
+it is stored as **partial** and only good for making the counters move: every
+call site must follow it with `reloadSummary()`, and a page that mounts on a
+partial summary reloads it itself.
+
+`useProgress()` reads a module-level store per channel that subscribes at
+startup, and the run's own state lives in `store/run.ts`. Both are outside the
+route switch on purpose: a run is a chain of awaits, and the user can leave the
+dashboard in the middle of one. State that lived in the page would come back
+empty while the task kept running.
 
 Routing is hash-only. `pushState` would create a new `file:` path that
 `isCanonicalAppPageUrl` rejects, which then breaks every IPC call through the

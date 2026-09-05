@@ -4,7 +4,7 @@
  * `useSummary` / `useConfig` 背后是模块级单例 store：同一份数据只请求一次，
  * 任何页面调用 `reload()` 都会通知全部订阅者，避免各页各自轮询。
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { bridge, lastEventOf, subscribe } from './bridge.js';
 import type {
   AppInfo,
@@ -202,38 +202,91 @@ function stamp(): string {
   ).padStart(2, '0')}`;
 }
 
+interface ChannelState {
+  latest: ProgressState['latest'];
+  lines: LogLine[];
+  active: boolean;
+}
+
+const EMPTY_CHANNEL: ChannelState = { latest: null, lines: [], active: false };
+
+/** 一条进度通道的累积状态。 */
+interface ChannelStore {
+  get(): ChannelState;
+  subscribe(cb: () => void): () => void;
+  append(text: string, kind?: ProgressKind): void;
+  clear(): void;
+}
+
 /**
- * 订阅一路进度事件，并把 message 累积成日志行。
- * 同一个通道可以被多个组件订阅——扇出在 bridge 里做，preload 只有一个监听器。
+ * 通道 store 在模块初始化时就挂到 hub 上，而不是等某个组件挂载。
+ *
+ * 页面组件会随路由卸载；订阅跟着组件走的话，用户切走的那段时间里的进度事件就
+ * 永远丢了，回来看到的是一段没有开头的日志。订阅放在这里，切页只是换一个读者。
+ */
+function createChannelStore(channel: ProgressChannel): ChannelStore {
+  let state = EMPTY_CHANNEL;
+  const subscribers = new Set<() => void>();
+  let seq = 0;
+
+  function commit(next: ChannelState): void {
+    state = next;
+    for (const cb of subscribers) cb();
+  }
+
+  /** 日志有上限：一次长跑几万行也不会把内存吃满。 */
+  function push(lines: LogLine[], text: string, kind: ProgressKind): LogLine[] {
+    const next = [...lines, { id: ++seq, time: stamp(), text, kind }];
+    return next.length > 500 ? next.slice(next.length - 500) : next;
+  }
+
+  function append(text: string, kind: ProgressKind = 'info'): void {
+    if (!text) return;
+    commit({ ...state, lines: push(state.lines, text, kind) });
+  }
+
+  subscribe(CHANNEL_MAP[channel], (data) => {
+    const lines = data.message ? push(state.lines, data.message, data.kind ?? 'info') : state.lines;
+    commit({ latest: data, active: !data.done, lines });
+  });
+
+  return {
+    get: () => state,
+    subscribe(cb) {
+      subscribers.add(cb);
+      return () => {
+        subscribers.delete(cb);
+      };
+    },
+    append,
+    clear: () => commit({ ...state, lines: [] }),
+  };
+}
+
+const channelStores: Record<ProgressChannel, ChannelStore> = {
+  fetch: createChannelStore('fetch'),
+  ocr: createChannelStore('ocr'),
+  files: createChannelStore('files'),
+};
+
+/**
+ * 读一路进度事件的累积状态。
+ * 同一个通道可以被多个组件读——扇出在 bridge 里做，preload 只有一个监听器。
  */
 export function useProgress(channel: ProgressChannel): ProgressState {
-  const [latest, setLatest] = useState<ProgressState['latest']>(null);
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [active, setActive] = useState(false);
-  const seq = useRef(0);
+  const store = channelStores[channel];
+  const state = useSyncExternalStore(store.subscribe, store.get, store.get);
 
-  const append = useCallback((text: string, kind: ProgressKind = 'info') => {
-    if (!text) return;
-    setLines((prev) => {
-      const id = ++seq.current;
-      const next = [...prev, { id, time: stamp(), text, kind }];
-      return next.length > 500 ? next.slice(next.length - 500) : next;
-    });
-  }, []);
+  const phase = state.latest ? ('step' in state.latest ? state.latest.step : state.latest.phase) : '';
+  const percent = state.latest ? Math.max(0, Math.min(100, Math.round(state.latest.percent))) : 0;
 
-  const clear = useCallback(() => setLines([]), []);
-
-  useEffect(() => {
-    const off = subscribe(CHANNEL_MAP[channel], (data) => {
-      setLatest(data);
-      setActive(!data.done);
-      if (data.message) append(data.message, data.kind);
-    });
-    return off;
-  }, [channel, append]);
-
-  const phase = latest ? ('step' in latest ? latest.step : latest.phase) : '';
-  const percent = latest ? Math.max(0, Math.min(100, Math.round(latest.percent))) : 0;
-
-  return { latest, percent, phase, active, lines, append, clear };
+  return {
+    latest: state.latest,
+    percent,
+    phase,
+    active: state.active,
+    lines: state.lines,
+    append: store.append,
+    clear: store.clear,
+  };
 }
