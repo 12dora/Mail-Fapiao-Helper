@@ -2,9 +2,9 @@ import { FolderOpenOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Button, Card, Checkbox, DatePicker, Progress, Segmented, Space, Switch, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { type Dayjs } from 'dayjs';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { bridge, primeSummary, reloadSummary, useProgress, useSummary } from '../../bridge/index.js';
-import type { BatchRow, LogLine, RunHistoryEntry } from '../../bridge/index.js';
+import type { BatchRow, LogLine, OpKind, RunHistoryEntry } from '../../bridge/index.js';
 import {
   DataTable,
   LogConsole,
@@ -114,7 +114,14 @@ export function DashboardPage(): JSX.Element {
     return merged.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
   }, [notes, fetchProgress.lines, fileProgress.lines, ocrProgress.lines]);
 
-  const activeProgress = running?.kind === 'ocr' ? ocrProgress : running?.kind === 'pipeline' ? fileProgress : fetchProgress;
+  // 任务结束后 running 变回 null，但进度条与说明要停在最后跑过的那一步上。
+  const [lastKind, setLastKind] = useState<OpKind>('fetch');
+  useEffect(() => {
+    if (running) setLastKind(running.kind);
+  }, [running]);
+
+  const shownKind = running?.kind ?? lastKind;
+  const activeProgress = shownKind === 'ocr' ? ocrProgress : shownKind === 'pipeline' ? fileProgress : fetchProgress;
   const phase = PHASE_TEXT[activeProgress.phase] ?? '';
 
   async function start(): Promise<void> {
@@ -275,7 +282,7 @@ export function DashboardPage(): JSX.Element {
             </Card>
           </div>
 
-          <div className="mfh-fill">
+          <div className="mfh-fill mfh-fill--float">
             <Card title="运行日志" size="small">
               <LogConsole lines={logLines} placeholder="点击「开始处理」后，这里显示每一步的结果" />
             </Card>

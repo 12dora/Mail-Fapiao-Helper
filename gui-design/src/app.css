@@ -195,6 +195,20 @@ body {
   flex-direction: column;
 }
 
+/*
+ * 右列不参与行高计算：行高只由左边的表单卡决定，日志卡绝对定位填满这一行。
+ * 否则日志一多就会反过来把左卡撑高，底部又空出一块。
+ */
+.mfh-fill--float {
+  position: relative;
+  min-height: 264px;
+}
+
+.mfh-fill--float > .ant-card {
+  position: absolute;
+  inset: 0;
+}
+
 /* --- 日志面板 ------------------------------------------------------------ */
 
 .mfh-log {
@@ -322,8 +336,13 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .mfh-run-grid .mfh-log {
-    min-height: 200px;
+  .mfh-fill--float {
+    position: static;
+    height: 280px;
+  }
+
+  .mfh-fill--float > .ant-card {
+    position: static;
   }
 }
 
