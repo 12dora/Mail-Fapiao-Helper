@@ -64,7 +64,7 @@ export function PathField({
     void bridge.pickDirectory({ title: `选择${label}目录` }).then((result) => {
       if (result.canceled) return;
       if (!result.ok || !result.path) {
-        notifyResult(result, { success: '已选择', failure: '没能选择目录' });
+        notifyResult(result, { success: '已选择', failure: '无法选择目录' });
         return;
       }
       form?.setFieldValue(toNamePath(path), result.path);

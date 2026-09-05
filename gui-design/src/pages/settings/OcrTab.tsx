@@ -56,7 +56,7 @@ export function OcrTab({ form, secrets, cleared, onClear, disabled }: OcrTabProp
         </Form.Item>
 
         <Space size={16} wrap>
-          <Form.Item label="每批数量" name={toNamePath('ocr.batchSize')} extra="一次送多少份进引擎。">
+          <Form.Item label="每批数量" name={toNamePath('ocr.batchSize')} extra="每批识别的文件数量。">
             <InputNumber min={1} max={200} precision={0} style={{ width: 160 }} disabled={off} />
           </Form.Item>
           <Form.Item label="超时" name={toNamePath('ocr.timeoutMs')} extra="单份文件的等待上限。">
@@ -134,7 +134,7 @@ export function OcrTab({ form, secrets, cleared, onClear, disabled }: OcrTabProp
                 </Form.Item>
 
                 <Space size={16} wrap>
-                  <Form.Item label="监听地址" name={toNamePath('ocr.serviceHost')} extra="只能是本机回环地址。">
+                  <Form.Item label="监听地址" name={toNamePath('ocr.serviceHost')} extra="仅支持本机地址。">
                     <Input placeholder="127.0.0.1" style={{ width: 180 }} disabled={off} autoComplete="off" />
                   </Form.Item>
                   <Form.Item label="端口" name={toNamePath('ocr.servicePort')} extra="被占用时改一个。">

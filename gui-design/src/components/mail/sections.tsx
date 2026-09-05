@@ -173,7 +173,7 @@ export function DocumentTable({ rows }: { rows: InvoiceRow[] }): JSX.Element {
       scrollX={false}
       onOpen={(row) => {
         void bridge.openFile(row.fileHandle || row.filePath).then((result) => {
-          if (!result.ok) notifyResult(result, { success: '已打开文件', failure: '打不开这份文件' });
+          if (!result.ok) notifyResult(result, { success: '已打开文件', failure: '无法打开文件' });
         });
       }}
       emptyText="这封邮件还没有归档文件"
