@@ -9,6 +9,8 @@ import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// antd 的类名统一收在测试帮手里，升级 antd 时只改那一个文件。
+import { openRow } from '../gui-design/tests/ui-helpers.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const uiRoot = path.join(root, 'gui-design');
@@ -80,7 +82,7 @@ for (const route of routes) {
   await page.waitForSelector('.mfh-sider', { state: 'visible' });
   await page.waitForTimeout(600);
   if (route.openRow) {
-    await page.locator('[data-testid="table-library"] .ant-table-tbody > tr.ant-table-row').first().click();
+    await openRow(page, 'table-library', 0);
     await page.waitForSelector('[data-testid="drawer-invoice"]', { state: 'visible' });
     await page.waitForTimeout(600);
   }

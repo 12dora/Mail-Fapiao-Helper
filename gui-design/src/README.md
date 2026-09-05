@@ -126,8 +126,10 @@ Playwright 套件只认下面这些钩子，别的地方一律不加——**新�
 现有的 `action-*`：`run-start`、`run-stop`、`export-csv`、`dedupe`、`dedupe-apply`、
 `library-ocr`、`pending-retry-all`、`settings-save`。
 
-其余选择器（分段筛选、分页、抽屉遮罩、toast）没有稳定的替代，统一收在
-`gui-design/tests/ui-helpers.mjs` 里，antd 升级时只改那一个文件。
+其余选择器（分段筛选、分页、抽屉、弹窗、进度条、Descriptions、toast）没有稳定的
+替代，统一收在 `gui-design/tests/ui-helpers.mjs` 里，antd 升级时只改那一个文件。
+截图脚本也从那里取。等待一律等状态（选中、当前页、行内容、探针收到的提示），
+不写固定的 `waitForTimeout`。
 
 ## Theme tokens
 
