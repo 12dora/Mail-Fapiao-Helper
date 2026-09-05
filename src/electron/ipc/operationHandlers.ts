@@ -184,6 +184,90 @@ type PrepareOcrResult =
   | { ok: true; operation: PreparedOcrOperation }
   | { ok: false; response: Record<string, unknown> };
 
+export interface DedupeReport {
+  mode: 'container' | 'invoice-no';
+  applied: boolean;
+  quarantineDir: string | null;
+  pairs: number;
+  redundant: number;
+  quarantined: number;
+  ledgerRowsRemoved: number;
+  ocrRowsRemoved: number;
+  recovered?: number;
+  groups: {
+    invoiceNo: string;
+    kept: { filename: string; date: string; seller: string; amount: string; format: string };
+    removed: { filename: string; date: string; seller: string; amount: string; format: string; reason: string }[];
+    conflict: boolean;
+    conflictReason: string;
+  }[];
+  conflicts: number;
+  skipped: { filename: string; reason: string }[];
+}
+
+/** CLI 日志前后可有普通文本；只接受最后一份完整 JSON 对象报告。 */
+export function parseDedupeReport(stdout: string): DedupeReport | null {
+  let last: unknown;
+  for (let start = 0; start < stdout.length; start++) {
+    if (stdout[start] !== '{') continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let end = start; end < stdout.length; end++) {
+      const char = stdout[end];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') quoted = true;
+      else if (char === '{') depth++;
+      else if (char === '}' && --depth === 0) {
+        try {
+          last = JSON.parse(stdout.slice(start, end + 1));
+          start = end;
+        } catch { /* 普通日志中的花括号不是报告。 */ }
+        break;
+      }
+    }
+  }
+  return validateDedupeReport(last);
+}
+
+function validateDedupeReport(value: unknown): DedupeReport | null {
+  const row = asObject(value);
+  const counters = ['pairs', 'redundant', 'quarantined', 'ledgerRowsRemoved', 'ocrRowsRemoved', 'conflicts'];
+  if ((row.mode !== 'container' && row.mode !== 'invoice-no') || typeof row.applied !== 'boolean'
+    || (row.quarantineDir !== null && typeof row.quarantineDir !== 'string')
+    || !counters.every((key) => typeof row[key] === 'number' && Number.isSafeInteger(row[key]) && Number(row[key]) >= 0)
+    || (row.recovered !== undefined && (!Number.isSafeInteger(row.recovered) || Number(row.recovered) < 0))
+    || !Array.isArray(row.groups) || !Array.isArray(row.skipped)) return null;
+  return row as unknown as DedupeReport;
+}
+
+function readDedupeReport(file: string, stdout: string): DedupeReport | null {
+  try {
+    const report = validateDedupeReport(JSON.parse(fs.readFileSync(file, 'utf8')));
+    if (report) return report;
+  } catch { /* 兼容尚未写报告文件的 CLI，也允许损坏文件回退到 stdout。 */ }
+  return parseDedupeReport(stdout);
+}
+
+function projectDedupeReport(report: DedupeReport, dataDir: string): DedupeReport {
+  let quarantineDir: string | null = null;
+  if (report.quarantineDir !== null) {
+    const relative = path.relative(dataDir, path.resolve(dataDir, report.quarantineDir));
+    const outside = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    quarantineDir = outside ? '' : relative.split(path.sep).join('/') || '.';
+  }
+  return {
+    ...report,
+    quarantineDir,
+    skipped: report.skipped.map((row) => ({ ...row, reason: sanitizeText(row.reason) })),
+  };
+}
+
 export function registerOperationHandlers(deps: OperationHandlerDependencies): {
   resolveOpenTarget(target: string): { ok: true; path: string } | { ok: false; code: string; message: string };
 } {
@@ -308,7 +392,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       try {
         batch = batchFromHashes(result.mails.saved);
       } catch {
-        enrichWarning = '邮件已保存，但本次列表明细暂时无法展示。请到「邮件记录」查看。';
+        enrichWarning = '邮件已保存，请到「邮件记录」查看明细。';
       }
     }
     const report = reportFor(
@@ -397,7 +481,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     try {
       batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
     } catch {
-      enrichWarning = '邮件已处理，但本次列表明细暂时无法展示。请刷新列表。';
+      enrichWarning = '邮件已处理，请刷新列表查看明细。';
     }
     const report = reportFor(
       'pipeline',
@@ -480,7 +564,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       } catch (restoreErr) {
         const error: UiError = {
           code: 'ocr_rerun_restore_failed',
-          message: '无法开始识别，且原有识别结果未能自动恢复。请重新打开应用后再试。',
+          message: '无法恢复原有识别结果，请重新打开应用后再试。',
           detail: sanitizeText(restoreErr instanceof Error ? restoreErr.message : String(restoreErr)),
         };
         sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
@@ -489,7 +573,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       const error: UiError = {
         code: 'ocr_config_write_failed',
         // COPY-10：配置写失败不一定是磁盘问题。
-        message: '无法开始识别。请稍后重试；若仍失败，请到「设置」检查识别选项。',
+        message: '无法开始识别，请稍后重试或在「设置」中检查识别选项。',
         detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       };
       sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
@@ -519,7 +603,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       skipped: 0,
       failed: 0,
       code: 'ocr_start',
-      message: `发现 ${pendingTotal} 个待识别文件，正在启动识别。当前并行数：${concurrency}。`,
+      message: `正在启动识别，共 ${pendingTotal} 个文件，并行数为 ${concurrency}。`,
     });
 
     const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal, jobId });
@@ -542,7 +626,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     } catch (txErr) {
       const error: UiError = {
         code: 'ocr_rerun_restore_failed',
-        message: '识别结束后无法可靠处理备份。请重新打开应用；若识别结果异常，请勿继续操作。',
+        message: '识别备份处理失败，请重新打开应用并确认结果后再继续操作。',
         detail: sanitizeText(txErr instanceof Error ? txErr.message : String(txErr)),
       };
       return { ok: false, ...error, jobId, summary: appSummary() };
@@ -605,7 +689,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     const ok = statusWithParseFails === 'success';
     const message = statusWithParseFails === 'success' || statusWithParseFails === 'partial'
       ? ocrRunMessage(result)
-      : '无法完成识别。请稍后重试；若仍失败，请到「设置」检查识别选项并查看技术详情。';
+      : '无法完成识别，请重试或在「设置」中检查识别选项。';
     const summaryPart = tryAppSummary(appSummary);
     const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
@@ -706,7 +790,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     if (looksLikeRedactedPathDisplay(target) || target.includes('<') || target.startsWith('…')) {
       const mapped = resolveDisplayOrRelativeToKnownRoot(target);
       if (mapped) return { ok: true, path: mapped };
-      return { ok: false, code: 'path_invalid', message: '路径无效。请使用位置标识打开目录。' };
+      return { ok: false, code: 'path_invalid', message: '无法打开该位置，请重新选择目录。' };
     }
 
     // 相对路径锚定到 dataDir（若 dataDir 规范化失败则用模块级 dataDir 词法路径）
@@ -843,7 +927,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'invalid_only_mail',
-          message: '单封邮件标识无效，请从待确认列表重新选择。',
+          message: '无法确认这封邮件，请从「待确认」列表重新选择。',
           normalizedFilter: normalizedFilterFrom(),
           summary: appSummary(),
         };
@@ -853,7 +937,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'invalid_only_mail',
-          message: '单封邮件标识无效，请从待确认列表重新选择。',
+          message: '无法确认这封邮件，请从「待确认」列表重新选择。',
           normalizedFilter: normalizedFilterFrom(),
           summary: appSummary(),
         };
@@ -900,7 +984,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         skipped: 0,
         failed: 0,
         code: 'ocr_no_work',
-        message: '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。',
+        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
         kind: 'warn',
         done: true,
       });
@@ -908,7 +992,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         ok: false,
         code: 'ocr_no_work',
         exitCode: 0,
-        message: '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。',
+        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
         summary,
       };
     }
@@ -977,7 +1061,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         : status !== 'success'
           ? `${baseLabel}没有完成，请查看诊断信息了解详情。`
           : scanned === 0
-            ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
+            ? '没有可整理的识别结果，请先获取邮件并完成识别。'
             : typeof scanned === 'number'
               ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
               : `${baseLabel}完成。`;
@@ -1017,6 +1101,57 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     }
   });
 
+  handleTrusted('mfh:dedupe', async (_event, payload: unknown) => {
+    const raw = asObject(payload);
+    if ((raw.by !== 'invoice-no' && raw.by !== 'container') || typeof raw.apply !== 'boolean') {
+      return { ok: false, status: 'failed', started: false, jobId: '', code: 'invalid_dedupe_options',
+        message: '清理选项无效，请重新选择。', report: null };
+    }
+    const gate = acquireOperation('pipeline');
+    if (!gate.ok) return { ...gate.response, status: 'failed', started: false, jobId: '', report: null };
+    const jobId = gate.lease.jobId;
+    const startedAt = Date.now();
+    try {
+      const recoveryError = ensureArchiveRecoveryReady();
+      if (recoveryError) {
+        return { ok: false, ...recoveryError, status: 'failed', started: false, jobId, report: null };
+      }
+      const reportFile = path.join(dataDir, '.mfh-cache', 'dedupe-report.json');
+      // 持有操作租约后清掉旧报告，避免本次 CLI 失败时误读上一次成功结果。
+      fs.rmSync(reportFile, { force: true });
+      const result = await runCli('dedupe', [
+        '--config', configPath, '--by', raw.by, ...(raw.apply ? ['--apply'] : []), '--json',
+      ], { jobId });
+      const rawReport = readDedupeReport(reportFile, result.stdout);
+      const report = rawReport ? projectDedupeReport(rawReport, dataDir) : null;
+      const status = deriveRunStatus({
+        code: result.code,
+        started: result.started,
+        succeeded: report ? (raw.apply ? report.quarantined : report.redundant) : 0,
+        failed: !report || result.code !== 0 ? 1 : 0,
+        partial: report ? report.conflicts + report.skipped.length : 0,
+      });
+      const message = status === 'success'
+        ? (raw.apply ? '重复发票清理完成。' : '重复发票检查完成。')
+        : status === 'partial'
+          ? '部分发票未能清理，请查看清理结果。'
+          : '重复发票清理未完成，请查看诊断信息。';
+      const historyWarning = recordHistory('dedupe', '清理重复发票', startedAt, result, status, message);
+      const cliReport = reportFor('dedupe', jobId, result,
+        { ok: 'dedupe_done', failed: 'dedupe_failed', partial: 'dedupe_partial' }, status);
+      const summaryPart = tryAppSummary(appSummary);
+      const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
+      return {
+        ok: status === 'success', status, started: result.started, ...cliReport, jobId, message, report,
+        ...(warning ? { warning } : {}),
+        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
+      };
+    } finally {
+      gate.lease.release();
+    }
+  });
+
   handleTrusted('mfh:stop-ocr', () => {
     if (ocrProcesses.size === 0) return { ok: false, code: 'ocr_not_running', message: '当前没有正在运行的识别任务。' };
     const details: string[] = [];
@@ -1032,7 +1167,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       return {
         ok: true,
         code: 'ocr_stopping_partial',
-        message: '正在停止识别。本机识别服务可能需要多等几秒才会完全退出。',
+        message: '正在停止识别，本机识别服务可能需要几秒才能退出。',
         detail: sanitizeText(details.join('；'), { maxLength: 200 }),
       };
     }
@@ -1051,8 +1186,8 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'path_location_unknown',
-          error: '未知的位置标识。',
-          message: '未知的位置标识。',
+          error: '无法识别该位置，请重新选择。',
+          message: '无法识别该位置，请重新选择。',
         };
       }
       const canon = resolveCanonicalPath(mapped);
@@ -1090,8 +1225,8 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       return {
         ok: false,
         code: 'path_invalid',
-        error: '请提供 location、handle 或 path。',
-        message: '请提供 location、handle 或 path。',
+        error: '请选择要打开的文件或文件夹。',
+        message: '请选择要打开的文件或文件夹。',
       };
     }
     const resolved = resolveOpenTarget(target);

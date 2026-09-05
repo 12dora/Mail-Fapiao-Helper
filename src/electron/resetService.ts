@@ -191,7 +191,7 @@ export function createResetService(deps: ResetServiceDeps): {
         return {
           ok: false,
           code: 'reset_confirmation_required',
-          message: '无界面模式下拒绝清空数据：当前数据目录不是可证明的临时测试目录。',
+          message: '无法确认当前数据可安全清空，已取消重置。',
           removed: [],
           skippedExternal: [],
         };
@@ -251,7 +251,7 @@ export function createResetService(deps: ResetServiceDeps): {
         response: {
           ok: false,
           code: 'reset_plan_changed',
-          message: '等待确认期间保存位置发生了变化，已取消重置以保护文件。请重新操作。',
+          message: '保存位置已变化，重置已取消，请重新操作。',
           removed: [],
           skippedExternal: [],
         },

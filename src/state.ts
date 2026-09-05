@@ -33,7 +33,7 @@ export class StateCorruptionError extends Error {
 }
 
 /** state.json 损坏时的隔离结果（APP-18A）。 */
-export interface StateQuarantine {
+interface StateQuarantine {
   /** 损坏文件被移动到的带时间戳备份路径。 */
   backupPath: string;
   /** 面向用户的中文说明。 */
@@ -165,7 +165,7 @@ export function quarantineCorruptState(path: string, reason: string): StateQuara
   };
 }
 
-export interface StateStoreOptions {
+interface StateStoreOptions {
   /** 累计多少条新增后落盘一次；默认 50。 */
   batchSize?: number;
   /** 距上次落盘超过多少毫秒后落盘一次；默认 2000。 */

@@ -22,15 +22,19 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.renderer.json",
     "pretest:cli": "node scripts/check-test-prereqs.mjs cli",
-    "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs",
+    "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs && node gui-design/tests/summary-unit.mjs",
     "pretest:electron": "node scripts/check-test-prereqs.mjs electron",
-    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs",
+    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs && node gui-design/tests/dedupe-ipc-unit.mjs && node gui-design/tests/detail-unit.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",
     "test:browser": "node gui-design/tests/e2e-fixes.mjs && node gui-design/tests/e2e.mjs",
-    "test:core": "npm run build && npm run typecheck && npm run test:cli && npm run test:electron",
+    "test:core": "npm run lint && npm run test:tooling && npm run build && npm run typecheck && npm run test:cli && npm run test:electron",
     "test": "npm run test:core",
     "test:all": "npm run test:core && npm run test:browser",
-    "screenshots": "node scripts/take-screenshots.mjs"
+    "screenshots": "node scripts/take-screenshots.mjs",
+    "lint": "eslint .",
+    "smells": "node scripts/code-smells.mjs",
+    "postinstall": "node scripts/install-git-hooks.mjs",
+    "test:tooling": "node scripts/check-code-gates.mjs && node --test scripts/code-smells.test.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -53,9 +57,13 @@
     "electron": "^42.2.0",
     "electron-builder": "^26.0.12",
     "esbuild": "0.28.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "typescript": "^5.4.0"
+    "simple-git-hooks": "^2.14.0",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.69.0"
   },
   "overrides": {
     "html-to-text": "10.0.1",
@@ -152,5 +160,8 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npm run lint -- --max-warnings 0 && npm run typecheck"
   }
 }

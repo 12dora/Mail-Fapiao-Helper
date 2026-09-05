@@ -279,7 +279,7 @@ function installPreparedState(
         ok: false,
         error: {
           code: 'ocr_rerun_restore_failed',
-          message: '重新识别准备失败，且无法自动恢复原有识别结果。请重新打开应用；若仍异常，请勿继续识别并保留备份文件。',
+          message: '无法恢复原有识别结果，请保留备份并重新打开应用，确认结果正常后再继续识别。',
           detail: sanitizeText(
             `${err instanceof Error ? err.message : String(err)}; restore: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
           ),

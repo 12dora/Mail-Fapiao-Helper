@@ -123,6 +123,124 @@ async function goTo(page, linkName, urlPattern) {
   await page.waitForURL(urlPattern);
 }
 
+/** Real MIME + CSV data for detail IPCs; run after UI assertions so list counts stay fixed. */
+async function verifyDetailIpc(page, config) {
+  const hash = 'd'.repeat(32);
+  const messageId = '<mfh-ipc-detail@example.com>';
+  const filename = 'detail-invoice.pdf';
+  const duplicateFilename = 'detail-copy.pdf';
+  const invoiceNo = '12345678901234567890';
+  const contentHash = '123456abcdef';
+  const date = '2026-05-21T09:30:00.000Z';
+  const from = 'Fixture <fixture@example.com>';
+  const subject = 'Invoice detail fixture';
+  const pdf = '%PDF-1.4\n% detail fixture\n';
+  const invoiceUrl = 'https://invoice.example.com/download/invoice.pdf?token=short-token';
+  const sourceUrl = `https://fixture-user:fixture-secret@invoice.example.com/invoice.pdf?token=${'s'.repeat(80)}&id=visible`;
+  const csv = (header, rows) => `${[header, ...rows].map((row) => row.map((cell) => JSON.stringify(String(cell))).join(',')).join('\n')}\n`;
+  await mkdir(config.paths.samples, { recursive: true });
+  await mkdir(config.paths.pending, { recursive: true });
+  await mkdir(join(config.paths.invoices, 'ocr'), { recursive: true });
+  await writeFile(join(config.paths.pending, `${hash}.eml`), [
+    `Message-ID: ${messageId}`, `Date: Thu, 21 May 2026 09:30:00 +0000`,
+    `From: ${from}`, 'To: receiver@example.com', `Subject: ${subject}`,
+    'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="detail-boundary"', '',
+    '--detail-boundary', 'Content-Type: text/html; charset=utf-8', '',
+    `<html><body><a href="${invoiceUrl}">Download invoice</a></body></html>`,
+    '--detail-boundary', 'Content-Type: application/pdf; name="detail-invoice.pdf"',
+    'Content-Disposition: attachment; filename="detail-invoice.pdf"',
+    'Content-Transfer-Encoding: base64', '', Buffer.from(pdf).toString('base64'),
+    '--detail-boundary--', '',
+  ].join('\r\n'));
+  await writeFile(join(config.paths.samples, 'INDEX.csv'), csv(
+    ['messageId', 'date', 'from', 'subject', 'mailbox', 'hasAttachment', 'bodyLinkCount', 'mailHash'],
+    [[messageId, date, from, subject, 'INBOX', '1', '1', hash]],
+  ));
+  await writeFile(join(config.paths.pending, 'pending.csv'), csv(
+    ['messageId', 'date', 'from', 'subject', 'reason', 'mailHash'],
+    [[messageId, date, from, subject, 'http_403', hash]],
+  ));
+  await writeFile(config.output.csv, csv(
+    ['messageId', 'date', 'from', 'subject', 'filename', 'source', 'contentHash', 'mailHash'],
+    [[messageId, date, from, subject, filename, sourceUrl, contentHash, hash],
+      ['<other@example.com>', date, from, 'Other mail', duplicateFilename, 'attachment', 'abcdef123456', 'e'.repeat(32)],
+      [messageId, date, from, subject, '../manual-rollback-source.pdf', 'attachment', '', hash]],
+  ));
+  const ocrHeader = ['hash', 'messageId', 'date', 'from', 'subject', 'filename', 'source', 'format',
+    'documentType', 'invoiceType', 'seller', 'amount', 'dateValue', 'invoiceNo', 'transport',
+    'extractedBy', 'parserVersion', 'ocrVendor', 'status', 'error', 'contentHash'];
+  const recognized = [hash, messageId, date, from, subject, filename, sourceUrl, 'pdf',
+    'invoice', '电子发票', 'Detail Seller', '123.45', '2026-05-21', invoiceNo, 'local',
+    'pdf-text', 'fixture-v1', '', 'success', '', contentHash];
+  const laterFailure = [...recognized];
+  laterFailure[18] = 'failed';
+  laterFailure[19] = 'later failure must not replace success';
+  const duplicate = [...recognized];
+  duplicate[0] = 'e'.repeat(32);
+  duplicate[1] = '<other@example.com>';
+  duplicate[5] = duplicateFilename;
+  duplicate[20] = 'abcdef123456';
+  await writeFile(config.ocr.resultsCsv, csv(ocrHeader, [recognized, laterFailure, duplicate]));
+  await writeFile(join(config.paths.invoices, filename), pdf);
+  await writeFile(join(config.paths.invoices, duplicateFilename), pdf);
+
+  for (const payload of [{}, { hash: 'f'.repeat(32) }, { hash: '../outside' }]) {
+    const result = await page.evaluate((value) => window.mfhBridge.openMail(value), payload);
+    if (result?.ok !== false || result?.code !== 'mail_not_found' || result?.opened !== 'none') {
+      fail(`openMail should reject unknown/invalid mail: ${JSON.stringify(result)}`);
+    }
+  }
+  const opened = await page.evaluate((hash_) => window.mfhBridge.openMail({ hash: hash_ }), hash);
+  if (!opened?.ok || !['mail', 'reveal_attempted'].includes(opened.opened)) {
+    fail(`pending MIME should open through no-GUI policy: ${JSON.stringify(opened)}`);
+  }
+  const revealed = await page.evaluate((hash_) => window.mfhBridge.openMail({ hash: hash_, reveal: true }), hash);
+  if (!revealed?.ok || revealed.opened !== 'reveal_attempted') {
+    fail(`explicit mail reveal must report reveal_attempted: ${JSON.stringify(revealed)}`);
+  }
+  const detail = await page.evaluate((hash_) => window.mfhBridge.mailDetail({ hash: hash_ }), hash);
+  const mail = detail?.mail;
+  if (!detail?.ok || mail?.mailHash !== hash || mail?.emlLocation !== 'pending' || !mail?.emlExists
+    || mail?.status !== 'archived' || mail?.messageId !== messageId) {
+    fail(`mail detail metadata/status incorrect: ${JSON.stringify(detail)}`);
+  }
+  if (!mail.attachments.some((row) => row.filename === filename && row.size === Buffer.byteLength(pdf)
+    && row.contentType === 'application/pdf') || !mail.links.some((row) => row.url === invoiceUrl && typeof row.label === 'string')) {
+    fail(`mail detail did not parse MIME attachments and invoice links: ${JSON.stringify(mail)}`);
+  }
+  const document = mail.documents.find((row) => row.filename === filename);
+  if (document?.seller !== 'Detail Seller' || document?.invoiceNo !== invoiceNo || document?.contentHash !== contentHash
+    || !document?.fileHandle || document.fileHandle !== document.filePath) {
+    fail(`mail documents did not join ledger/OCR/handle: ${JSON.stringify(mail.documents)}`);
+  }
+  if (mail.pending?.reason !== 'http_403' || !mail.pending?.category || !mail.pending?.userMessage || !mail.pending?.nextStep
+    || !Array.isArray(mail.history)) fail(`mail pending copy/history missing: ${JSON.stringify(mail)}`);
+  const missingMail = await page.evaluate(() => window.mfhBridge.mailDetail({ hash: 'f'.repeat(32) }));
+  if (missingMail?.ok !== false || missingMail?.code !== 'mail_not_found') fail(`missing mail detail: ${JSON.stringify(missingMail)}`);
+
+  const invoiceResult = await page.evaluate((filename_) => window.mfhBridge.invoiceDetail({ filename: filename_ }), filename);
+  const invoice = invoiceResult?.invoice;
+  if (!invoiceResult?.ok || invoice?.row?.filename !== filename || invoice?.ocr?.status !== 'success'
+    || invoice?.ocr?.parserVersion !== 'fixture-v1' || invoice?.ledger?.mailHash !== hash
+    || invoice?.file?.exists !== true || invoice?.file?.size !== Buffer.byteLength(pdf)
+    || invoice?.file?.format !== 'pdf' || invoice?.file?.handle !== invoice?.row?.fileHandle
+    || invoice?.duplicates?.length !== 1 || invoice.duplicates[0]?.filename !== duplicateFilename) {
+    fail(`invoice detail join/success-wins/file/duplicates incorrect: ${JSON.stringify(invoiceResult)}`);
+  }
+  for (const source of [document.source, invoice.row.source, invoice.ledger.source]) {
+    const url = new URL(source);
+    if (url.username || url.password || source.includes('s'.repeat(80)) || url.searchParams.get('id') !== 'visible') {
+      fail(`detail source must strip userinfo and redact long query values: ${source}`);
+    }
+  }
+  for (const candidate of ['missing.pdf', '../manual-rollback-source.pdf', join(config.paths.pending, `${hash}.eml`)]) {
+    const result = await page.evaluate((filename_) => window.mfhBridge.invoiceDetail({ filename: filename_ }), candidate);
+    if (result?.ok !== false || result?.code !== 'invoice_not_found') {
+      fail(`invoice detail must reject missing/outside files: ${JSON.stringify(result)}`);
+    }
+  }
+}
+
 async function main() {
   await assertFreshBuild();
 
@@ -529,7 +647,7 @@ async function main() {
     /* COPY-05: the result must say what was actually opened — `mail`, `folder` or
        `none` — instead of unconditionally claiming the original mail was opened. */
     if (!noGuiPendingOpen?.ok
-      || !/^(mail|folder|none)$/.test(noGuiPendingOpen.opened || '')
+      || !/^(mail|folder|reveal_attempted|none)$/.test(noGuiPendingOpen.opened || '')
       || !/^pending_mail_(opened|revealed|folder_opened|missing_local_copy)$/.test(noGuiPendingOpen.code || '')) {
       fail(`no-GUI pending refresh/open path should return deterministic success: ${JSON.stringify(noGuiPendingOpen)}`);
     }
@@ -727,6 +845,8 @@ async function main() {
     await smallWindow.evaluate((win) => win.setSize(900, 640));
     await page.waitForTimeout(200);
     await expectNoHorizontalOverflow(page, '900x640 小窗口');
+
+    await verifyDetailIpc(page, savedConfig);
   });
 }
 

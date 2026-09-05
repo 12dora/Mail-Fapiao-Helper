@@ -12,8 +12,8 @@ import { acquireCommandLock } from './lock.js';
 import { backfillProcessedFromLedgers, recoverQuarantinedState } from './rebuildState.js';
 import { FETCH_USAGE } from './usage.js';
 
-export const INDEX_HEADER = 'mailHash,messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
-export const INDEX_LEGACY_HEADERS = ['messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount'];
+const INDEX_HEADER = 'mailHash,messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount';
+const INDEX_LEGACY_HEADERS = ['messageId,date,from,subject,mailbox,hasAttachment,bodyLinkCount'];
 
 export function ensureIndexCsv(path: string): void {
   // CORE-05：空文件也要写表头，不能只判断 exists。
@@ -34,7 +34,7 @@ export function ensureIndexCsv(path: string): void {
 /**
  * 一次性读出 INDEX.csv 已有的 mailHash 集合（兼容旧表：无 mailHash 时退回 legacy）。
  */
-export function readIndexMailHashes(path: string): Set<string> {
+function readIndexMailHashes(path: string): Set<string> {
   const out = new Set<string>();
   for (const row of readCsvRows(path)) {
     const h = (row.mailHash ?? '').trim();
@@ -48,13 +48,13 @@ export function readIndexMailHashes(path: string): Set<string> {
   return out;
 }
 
-export function appendIndexRow(path: string, m: RawMail, mailHash: string): void {
+function appendIndexRow(path: string, m: RawMail, mailHash: string): void {
   const row = [csvCell(mailHash), csvCell(m.messageId ?? ''), csvCell(m.date.toISOString()), csvCell(m.from), csvCell(m.subject), csvCell(m.mailbox), m.hasAttachment ? '1' : '0', String(m.bodyLinkCount)].join(',');
   appendFileSync(path, `${row}\n`, 'utf8');
   secureFileMode(path);
 }
 
-export function writeEmlAtomic(path: string, data: Buffer): void {
+function writeEmlAtomic(path: string, data: Buffer): void {
   // 唯一临时名 + POSIX 0700/0600（APP-22）：固定的 `<path>.tmp` 会在多实例并发
   // 抓取时互相覆盖，默认 umask 又会让邮件原件对同机其他账号可读。
   ensureSecureDir(dirname(path));
@@ -64,7 +64,7 @@ export function writeEmlAtomic(path: string, data: Buffer): void {
   secureFileMode(path);
 }
 
-export function monthDir(d: Date): string {
+function monthDir(d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `${y}-${m}`;
@@ -83,7 +83,7 @@ interface FetchState {
   skippedKnown: number;
 }
 
-export async function openFetchState(opts: FetchOpts): Promise<FetchState | number> {
+async function openFetchState(opts: FetchOpts): Promise<FetchState | number> {
   let cfg: Config;
   try { cfg = loadConfig(resolve(opts.configPath)); } catch (e) { log.error((e as Error).message); return 2; }
   if (opts.sinceDaysOverride !== undefined) cfg = { ...cfg, filter: { ...cfg.filter, sinceDays: opts.sinceDaysOverride } };
@@ -119,7 +119,7 @@ export async function openFetchState(opts: FetchOpts): Promise<FetchState | numb
   return { cfg, opts, outDir, indexCsv, indexedMailHashes, store, seen: 0, saved: 0, repaired: 0, skippedKnown: 0 };
 }
 
-export function processFetchedMail(state: FetchState, mail: RawMail): void {
+function processFetchedMail(state: FetchState, mail: RawMail): void {
   state.seen++;
   // CORE-03：内容绑定 primary；fetched/INDEX 只用 evidence，绝不单靠 Message-Id 跳过。
   const identity = resolveMailIdentity({ messageId: mail.messageId, from: mail.from, date: mail.date.toISOString(), subject: mail.subject, raw: mail.raw });
@@ -164,7 +164,7 @@ export function processFetchedMail(state: FetchState, mail: RawMail): void {
   log.info(`saved ${hash} subject="${mail.subject}"`);
 }
 
-export function closeFetchState(state: FetchState): void {
+function closeFetchState(state: FetchState): void {
   // 命令结束时显式 flush 并注销，未达阈值的增量才算真正落盘。
   // dry-run 的只读 store 未注册 activeStores，dispose 也是安全的空 flush。
   if (!state.opts.dryRun) state.store.dispose();

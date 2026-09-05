@@ -5,7 +5,7 @@ import type { DocumentFormat, DocumentType } from '../extract/types.js';
  * 判断结构为空或关键字段缺失（APP-14B）：既不能算识别成功，也不是纯粹的失败，
  * 需要保留人工复核入口。
  */
-export type OcrStatus = 'success' | 'partial' | 'error';
+type OcrStatus = 'success' | 'partial' | 'error';
 
 export interface InvoiceFields {
   seller: string;

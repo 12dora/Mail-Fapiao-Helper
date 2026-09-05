@@ -315,7 +315,7 @@ export function parseOcrTerminal(text: string, current: OcrProgressState, emit: 
     if (current.total === 0) {
       phase = '没有文件';
       kind = 'warn';
-      message = '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。';
+      message = '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。';
     } else if (status === 'success') {
       phase = '识别完成';
       kind = 'ok';
@@ -327,7 +327,7 @@ export function parseOcrTerminal(text: string, current: OcrProgressState, emit: 
     } else {
       phase = '识别失败';
       kind = 'err';
-      message = `识别没有完成：失败 ${current.failed} 个。请稍后重试；若仍失败，请到「设置」检查识别选项。`;
+      message = `有 ${current.failed} 个文件识别失败，请重试或在「设置」中检查识别选项。`;
     }
     emit({
       operation: 'ocr',
@@ -364,7 +364,8 @@ export function parseOcrSuccess(text: string, current: OcrProgressState, emit: P
       skipped: current.skipped,
       failed: current.failed,
       code: 'ocr_item_ok',
-      message: `识别成功：${sanitizeText(parsed[1] ?? '', { maxLength: 120 })}`,
+      message: '文件识别成功。',
+      detail: sanitizeText(parsed[1] ?? '', { maxLength: 120 }),
       kind: 'ok',
     });
     return true;
@@ -388,8 +389,8 @@ export function parseOcrFailure(text: string, current: OcrProgressState, emit: P
       skipped: current.skipped,
       failed: current.failed,
       code: 'ocr_item_failed',
-      message: `识别失败：${sanitizeText(failed[1] ?? '', { maxLength: 120 })}`,
-      detail,
+      message: '文件识别失败，请查看技术详情。',
+      detail: [sanitizeText(failed[1] ?? '', { maxLength: 120 }), detail].filter(Boolean).join('：'),
       kind: 'warn',
     });
     return true;
@@ -503,7 +504,7 @@ export function parseFileTerminal(text: string, current: FileProgressState, emit
     if (markers.mailNotFound) {
       phase = '获取失败';
       kind = 'err';
-      message = '没有找到这封待处理邮件。请刷新「待确认」列表后再试。';
+      message = '没有找到这封待处理邮件，请刷新「待确认」列表后重试。';
     } else if (status === 'success') {
       phase = '获取完成';
       kind = 'ok';
@@ -511,13 +512,13 @@ export function parseFileTerminal(text: string, current: FileProgressState, emit
     } else if (status === 'partial') {
       phase = '部分完成';
       kind = 'warn';
-      message = `已处理 ${current.archived + current.pending} 封邮件，其中 ${current.failed} 封没有完成${pendingNote}${partialNote}。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+      message = `已处理 ${current.archived + current.pending} 封邮件，其中 ${current.failed} 封未完成${pendingNote}${partialNote}，请点击「重新获取」。`;
     } else {
       phase = '获取失败';
       kind = 'err';
       message = current.failed > 0
-        ? `处理没有完成：失败 ${current.failed} 封。请先重试；如仍失败，请展开「查看技术详情」。`
-        : '处理没有完成。请先重试；如仍失败，请展开「查看技术详情」。';
+        ? `有 ${current.failed} 封邮件处理失败，请重试或查看技术详情。`
+        : '邮件处理未完成，请重试或查看技术详情。';
     }
     emit({
       operation: 'files',

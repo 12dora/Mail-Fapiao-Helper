@@ -45,7 +45,10 @@ jobs:
         # APP-09: the runtime dependency tree must stay free of known advisories.
         run: npm audit --omit=dev --audit-level=moderate
 
-      # `npm test` = build + typecheck + test:cli + test:electron.
+      - name: Lint
+        run: npm run lint -- --max-warnings 0
+
+      # `npm test` = lint + test:tooling + build + typecheck + test:cli + test:electron.
       # Each suite has a pretest:* preflight that fails loudly when a runtime
       # prerequisite (build output, Electron binary, display) is missing, so a
       # skipped suite can never masquerade as a passing one.

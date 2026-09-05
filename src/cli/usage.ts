@@ -9,7 +9,7 @@ Commands:
   ocr            Run OCR for archived documents
   pending        Inspect manual processing queue
   organize       Copy archived invoices into optional OCR-based names/folders
-  dedupe         Remove OFD copies of invoices already archived as PDF
+  dedupe         Quarantine duplicate invoices by container or invoice number
   rebuild-state  Rebuild state.json from INDEX/cache/invoices.csv (no data deleted)
 
 Options:
@@ -137,27 +137,27 @@ Options:
   -h, --help           Show this help
 `;
 
-export const DEDUPE_USAGE = `mfh dedupe — remove OFD copies of invoices already archived as PDF
+export const DEDUPE_USAGE = `mfh dedupe — quarantine duplicate archived invoices
 
 Usage:
   mfh dedupe [options]
 
 Options:
-  --config <path>      Path to config.json        (default: ./config.json)
-  --apply              Perform the cleanup (without it, only report)
-  --json               Print machine-readable report
-  -h, --help           Show this help
+  --config <path>       Path to config.json (default: ./config.json)
+  --by <mode>           container or invoice-no (default: container)
+  --apply               Quarantine duplicates and prune matching CSV rows
+  --json                Print the full report as JSON
+  -h, --help            Show this help
 
-What counts as a duplicate:
-  Exactly the rule the extractor now applies while archiving — same email, same
-  container path, same stem, one .pdf and one .ofd. It is NOT a general
-  by-filename dedupe: two invoices that merely share a name are never merged.
+Modes:
+  container   Match PDF/OFD pairs from the same email, container and stem.
+  invoice-no  Match successful OCR results with the same 20-digit invoice number.
+              Keep PDF first, then earliest date, then smallest filename.
+              Skip groups with conflicting amounts or sellers.
 
 Safety:
-  * A row is only acted on when the file on disk matches the ledger contentHash.
-    Rows that do not match are reported and left completely untouched.
-  * Files are MOVED into invoices/.dedupe-quarantine/<timestamp>/, never deleted.
-    Remove that folder yourself once you have checked the result.
-  * invoices.csv, ocr-pending.csv and ocr-results.csv lose only the matching rows.
-  * Running it twice is a no-op.
+  Dry-run by default. Files must match their recorded contentHash.
+  Files move to invoices/.dedupe-quarantine/<timestamp>/ (invoice-no adds
+  by-invoice-no/). Matching ledger and OCR rows are pruned only after moving.
+  Repeated --apply runs leave already processed files unchanged.
 `;

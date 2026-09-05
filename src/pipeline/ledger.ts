@@ -11,7 +11,7 @@ import {
   withCsvRetry,
 } from './csvDurability.js';
 
-export interface ArchivedIndex {
+interface ArchivedIndex {
   /** `${messageId}\0${contentHash}` -> 已归档文件名。 */
   byKey: Map<string, string>;
   /** 本邮件已归档的 contentHash -> 文件名，用于归档前的幂等协调。 */
