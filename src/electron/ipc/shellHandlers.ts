@@ -6,8 +6,6 @@ import { electron } from '../electronApi.js';
 import { asObject } from '../payload.js';
 import { redactPath, sanitizeText } from '../sanitize.js';
 
-const { dialog, shell } = electron;
-
 type TrustedHandler = (
   event: ElectronAPI.IpcMainInvokeEvent,
   ...args: unknown[]
@@ -18,6 +16,9 @@ export interface ShellHandlerDeps {
   getMainWindow(): ElectronAPI.BrowserWindow | undefined;
   /** ELEC-01：await 对话框之后必须重新确认发起方。 */
   assertTrustedSender(event: ElectronAPI.IpcMainInvokeEvent): boolean;
+  /** 默认取 Electron 自带的实现；单元测试注入桩，不必起一个真窗口。 */
+  dialog?: Pick<ElectronAPI.Dialog, 'showOpenDialog' | 'showSaveDialog'>;
+  shell?: Pick<ElectronAPI.Shell, 'openExternal'>;
 }
 
 /**
@@ -69,6 +70,8 @@ function writeCsvAtomic(target: string, text: string): void {
 
 export function registerShellHandlers(deps: ShellHandlerDeps): void {
   const { handleTrusted, getMainWindow, assertTrustedSender } = deps;
+  const dialog = deps.dialog ?? electron.dialog;
+  const shell = deps.shell ?? electron.shell;
 
   /** 用系统浏览器打开项目地址或反馈入口；名单外的地址一律拒绝。 */
   handleTrusted('mfh:open-external', async (_event, payload: unknown) => {
