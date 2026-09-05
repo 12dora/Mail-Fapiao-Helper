@@ -111,7 +111,6 @@ export async function openRunContext(opts: RunOpts): Promise<RunContext | number
     backfillProcessedFromLedgers(store, cfg);
   } catch (e) { log.error((e as Error).message); return 1; }
 
-  let context: RunContext;
   const getBrowser = async (): Promise<Browser> => {
     if (!context.browserInstance) {
       // 当前站点 handler 默认不需要浏览器（EXT-09）；仅惰性启动。
@@ -120,7 +119,7 @@ export async function openRunContext(opts: RunOpts): Promise<RunContext | number
     }
     return context.browserInstance;
   };
-  context = {
+  const context: RunContext = {
     opts, cfg, store, accumulator: new RunAccumulator(opts.pendingRetry === true), rawDir: cfg.paths.samples,
     pendingDir: resolve(cfg.paths.pending), inFlight: new Set<string>(),
     // CORE-02：致命错误时 abort 所有 worker，并在归档临界区前再次检查。

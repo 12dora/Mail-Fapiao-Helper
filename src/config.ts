@@ -235,21 +235,6 @@ interface NumberRule {
   unit?: string;
 }
 
-function rangeText(rule: NumberRule): string {
-  const kind = rule.integer ? '整数' : '数字';
-  const unit = rule.unit ? `，单位：${rule.unit}` : '';
-  if (rule.min !== undefined && rule.max !== undefined) {
-    return `合法范围：${rule.min}..${rule.max} 之间的${kind}${unit}`;
-  }
-  if (rule.min !== undefined) {
-    return `合法范围：不小于 ${rule.min} 的${kind}${unit}`;
-  }
-  if (rule.max !== undefined) {
-    return `合法范围：不大于 ${rule.max} 的${kind}${unit}`;
-  }
-  return `合法范围：任意有限${kind}${unit}`;
-}
-
 /**
  * 数字字段读取。GUI 会把表单值持久化成字符串，所以接受数字字符串；但空字符串
  * 必须报错而不是被 `Number('')` 变成 0（APP-08 的核心陷阱）。

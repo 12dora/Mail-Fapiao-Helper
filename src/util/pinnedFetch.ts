@@ -87,7 +87,7 @@ function stampResponseUrl(response: Response, url: string): Response {
 
 /** 把 IPv6 压缩/映射形式归一成可比较的小写字面量。 */
 function normalizeIpLiteral(ip: string): string {
-  let s = ip.toLowerCase();
+  const s = ip.toLowerCase();
   if (s.startsWith('::ffff:') && net.isIPv4(s.slice(7))) return s.slice(7);
   const bytes = ipv6ToBytes(s);
   if (bytes) {
@@ -212,7 +212,7 @@ function defaultPort(protocol: string): string {
 }
 
 async function bodyToBuffer(body: RequestInit['body'] | undefined): Promise<Buffer | undefined> {
-  if (body == null) return undefined;
+  if (body === null || body === undefined) return undefined;
   if (Buffer.isBuffer(body)) return body;
   if (body instanceof ArrayBuffer) return Buffer.from(body);
   if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
@@ -272,7 +272,6 @@ function pinnedRequestOptions(
     // 禁止全局 Agent 连接池：池按 hostname 键控，会复用未走 pin lookup 的 socket（OCR-01）。
     agent: false,
     // 连接：lookup 固定到校验过的 IP，SNI 仍用 hostname（https 默认）。
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     lookup: ((
       _hostname: string,
       lookupOptions: unknown,
