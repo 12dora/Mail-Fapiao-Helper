@@ -20,10 +20,23 @@ gui-design/src/
   router.ts           hash router (#/dashboard …), useRoute(), navigate()
   theme.ts            antd tokens, light/dark, useColorScheme()
   app.css             only what tokens cannot express (height chain, log panel)
-  bridge/             types.ts, bridge.ts, fakeBridge.ts, hooks.ts
+  bridge/             types.ts (the IPC contract), bridge.ts, hooks.ts, fake/
   components/         shared UI kit — anything used by two pages lives here
+    documentType.ts   documentType/invoiceType → one Chinese name
+    mail/             the mail-detail sections shared by inbox and pending
   pages/<name>/       one folder per route; page-local state stays inside it
 ```
+
+## Preview data
+
+`bridge/fake/` answers every channel from memory when `window.mfhBridge` is
+missing or the URL carries `?fake=…`:
+
+| URL | what you get |
+| --- | --- |
+| `?fake=1` | a normal screenful; this is what `npm run screenshots` captures |
+| `?fake=empty` | no mail, no invoices, no pending — the empty states |
+| `?fake=broken` | a corrupt config file, every secret stored, `saveConfig` returning a field error |
 
 ## Adding a page
 
@@ -32,6 +45,9 @@ gui-design/src/
 3. Register the label, icon and component in `NAV` / `PAGES` in `App.tsx`.
 
 A page renders exactly two things: a `<PageHeader>` and a `<div className="mfh-scroll">`.
+Tables are always `DataTable` (search + chips + pagination); pass `query`/`filterKey`
+with their `onChange` when the page itself needs the visible rows — `filterRows()`
+is the same algorithm the table runs internally.
 The header stays fixed, the scroll area is the only scroller on the screen.
 Keep local state, column definitions and drawers inside the page folder; promote
 anything a second page needs into `components/` or `bridge/`.

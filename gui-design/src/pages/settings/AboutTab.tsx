@@ -141,35 +141,39 @@ function JournalCard(): JSX.Element {
   );
 }
 
-function openExternal(url: ExternalUrl): void {
-  void bridge.openExternal(url).then((result) => {
-    if (!result.ok) notifyResult(result, { success: '已打开', failure: '打不开浏览器' });
-  });
+function LinkRow({ url }: { url: ExternalUrl }): JSX.Element {
+  return (
+    <Space size={4}>
+      <PathText path={url} copiedTitle="链接已复制" />
+      {/* 老版本主进程没有这个通道，这时只留可复制的地址，不摆一个点不动的按钮。 */}
+      {bridge.supports('openExternal') ? (
+        <Button
+          type="text"
+          size="small"
+          icon={<ExportOutlined />}
+          aria-label="在浏览器中打开"
+          onClick={() => {
+            void bridge.openExternal(url).then((result) => {
+              if (!result.ok) notifyResult(result, { success: '已打开', failure: '打不开浏览器' });
+            });
+          }}
+        />
+      ) : null}
+    </Space>
+  );
 }
 
 function LinksCard(): JSX.Element {
-  // 老版本主进程没有这个通道，这时只给出可复制的地址，不放一个点不动的按钮。
-  const canOpen = bridge.supports('openExternal');
   return (
     <Card size="small" title="项目">
       <Descriptions column={1} size="small" colon={false} labelStyle={LABEL_STYLE}>
         <Descriptions.Item label="项目地址">
-          <PathText path={REPO_URL} copiedTitle="链接已复制" />
+          <LinkRow url={REPO_URL} />
         </Descriptions.Item>
         <Descriptions.Item label="反馈问题">
-          <PathText path={ISSUE_URL} copiedTitle="链接已复制" />
+          <LinkRow url={ISSUE_URL} />
         </Descriptions.Item>
       </Descriptions>
-      {canOpen ? (
-        <Space size={8} wrap>
-          <Button icon={<ExportOutlined />} onClick={() => openExternal(REPO_URL)}>
-            项目地址
-          </Button>
-          <Button icon={<ExportOutlined />} onClick={() => openExternal(ISSUE_URL)}>
-            反馈问题
-          </Button>
-        </Space>
-      ) : null}
     </Card>
   );
 }
