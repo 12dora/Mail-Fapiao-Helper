@@ -377,6 +377,8 @@ export function buildSummary(variant: FakeVariant): AppSummary {
     已归档: countBy(library, (r) => r.status === '已归档'),
     识别失败: countBy(library, (r) => r.status === '识别失败'),
   } as Record<LibraryStatus, number>;
+  // 同号组数从行里数出来：附属材料没有发票号，配对时会被跳过，不能直接用对子数。
+  const duplicateGroups = new Set(library.filter((r) => r.duplicateGroup).map((r) => r.duplicateGroup));
   const duplicateRows = countBy(library, (r) => r.duplicateCount > 0);
   const supporting = countBy(library, (r) => r.documentType === 'supporting');
 
@@ -411,7 +413,7 @@ export function buildSummary(variant: FakeVariant): AppSummary {
       offset: 0,
       limit: library.length,
       statusCounts,
-      duplicates: { groups: library.length ? DUPLICATE_PAIRS.length : 0, rows: duplicateRows },
+      duplicates: { groups: duplicateGroups.size, rows: duplicateRows },
       ocr: {
         pendingCsv: '~/发票助手/invoices/ocr/ocr-pending.csv',
         resultsCsv: '~/发票助手/invoices/ocr/ocr-results.csv',
