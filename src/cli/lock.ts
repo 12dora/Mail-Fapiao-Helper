@@ -25,7 +25,7 @@ let activeDataDirLeases: DataDirLease[] = [];
  * 规范化写目标路径：realpath 消除符号链接/大小写别名；路径尚不存在时
  * 回溯已存在祖先再拼回剩余段，保证同一物理目标得到同一字符串。
  */
-export function canonicalizePath(p: string): string {
+function canonicalizePath(p: string): string {
   const abs = resolve(p);
   try { return realpathSync(abs); } catch {
     // 目标尚不存在：规范化已存在的最长祖先。
@@ -56,7 +56,7 @@ export interface LockTargetOverrides {
  * CORE-01：收集本次命令的全部实际写目标（含 overrides），逐个 canonicalize。
  * 返回按字典序排序的去重列表，供 per-target 加锁或稳定 hash。
  */
-export function collectWriteTargets(cfg: Config, overrides: LockTargetOverrides = {}): string[] {
+function collectWriteTargets(cfg: Config, overrides: LockTargetOverrides = {}): string[] {
   const samples = overrides.samplesDir ?? cfg.paths.samples;
   const statePath = overrides.statePath;
   const targets = [samples, cfg.paths.invoices, cfg.paths.pending, dirname(resolve(cfg.output.csv)), join(cfg.paths.invoices, 'ocr')];
@@ -72,7 +72,7 @@ export function collectWriteTargets(cfg: Config, overrides: LockTargetOverrides 
  *   作为唯一锁目录——同一目标集永远同一把锁；目标集相交但不全等时，
  *   仍通过下方 per-target 锁覆盖交集。
  */
-export function scopeLockDir(targets: string[]): string {
+function scopeLockDir(targets: string[]): string {
   const fromEnv = process.env.MFH_DATA_DIR;
   if (fromEnv && fromEnv.length > 0) return canonicalizePath(fromEnv);
   if (targets.length === 0) return process.cwd();

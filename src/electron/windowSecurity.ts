@@ -136,7 +136,7 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
       if (event.sender.isDestroyed()) return false;
       if (event.sender.id !== mainWindow.webContents.id) return false;
       const mainFrame = event.sender.mainFrame;
-      if (!mainFrame || event.senderFrame == null || event.senderFrame !== mainFrame) return false;
+      if (!mainFrame || event.senderFrame === null || event.senderFrame === undefined || event.senderFrame !== mainFrame) return false;
       const url = event.senderFrame.url || event.sender.getURL();
       if (!isCanonicalAppPageUrl(url)) return false;
       return true;

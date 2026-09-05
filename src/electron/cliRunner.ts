@@ -368,7 +368,7 @@ function finalizeCliResult(
       failed: state.ocrCurrent.failed,
       code: 'ocr_failed',
       // COPY-10：识别失败原因多样（服务/凭据/解析），勿默认归咎磁盘。
-      message: '无法完成识别。请稍后重试；若连续失败，请到「设置」检查识别相关选项，并展开「查看技术详情」。',
+      message: '无法完成识别，请稍后重试或在「设置」中检查识别选项。',
       detail,
       kind: 'err',
       done: true,
@@ -386,7 +386,7 @@ function finalizeCliResult(
       failed: state.fileCurrent.failed,
       code: 'files_failed',
       // COPY-10：勿默认说成保存位置问题。
-      message: '获取发票文件没有完成。请先重试；若仍失败，请展开「查看技术详情」或检查网络与邮箱设置。',
+      message: '未能获取全部发票文件，请重试或检查网络与邮箱设置。',
       detail,
       kind: 'err',
       done: true,

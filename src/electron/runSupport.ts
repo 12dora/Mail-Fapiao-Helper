@@ -100,7 +100,7 @@ export function ocrRunMessage(result: RunCliResult): string {
   const counts = result.ocrCounts ?? parseOcrCompleteCounts(`${result.stdout}\n${result.stderr}`);
   if (!counts) return '已尝试识别本地文件。';
   if (counts.scanned === 0) {
-    return '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。';
+    return '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。';
   }
   if (counts.failed > 0 && counts.parsed > 0) {
     return `识别部分完成：成功 ${counts.parsed} 个，失败 ${counts.failed} 个，跳过 ${counts.skipped} 个。`;
@@ -119,7 +119,7 @@ export function pipelineRunMessage(
 ): string {
   if (mailNotFound) {
     return onlyMail
-      ? '没有找到这封待处理邮件。请刷新「待确认」列表后再试。'
+      ? '没有找到这封待处理邮件，请刷新「待确认」列表后重试。'
       : '没有找到要处理的邮件。';
   }
   if (status === 'success') {
@@ -134,16 +134,16 @@ export function pipelineRunMessage(
   }
   if (status === 'partial') {
     if (counts.failed > 0) {
-      return `已处理 ${counts.archived + counts.pending} 封邮件，其中 ${counts.failed} 封没有完成。请点击「重新获取」；如仍失败，请展开「查看技术详情」。`;
+      return `已处理 ${counts.archived + counts.pending} 封邮件，其中 ${counts.failed} 封未完成，请点击「重新获取」。`;
     }
     // partial 计数 > 0（有票落盘但仍有待确认子集）
     const partialNote = counts.partial > 0 ? `，其中 ${counts.partial} 封仍有待确认` : '';
-    return `已处理 ${counts.archived + counts.pending} 封邮件${partialNote}。请到「待确认」继续处理。`;
+    return `已处理 ${counts.archived + counts.pending} 封邮件${partialNote}，请到「待确认」继续处理。`;
   }
   if (onlyMail) {
-    return '这封邮件没有处理完成。请稍后重试；如仍失败，请展开「查看技术详情」。';
+    return '这封邮件处理未完成，请重试或查看技术详情。';
   }
-  return '处理缓存邮件没有完成。请先重试；如仍失败，请展开「查看技术详情」。';
+  return '已保存邮件处理未完成，请重试或查看技术详情。';
 }
 
 /**
@@ -170,11 +170,11 @@ export function pendingRetryRunMessage(
   }
   if (status === 'partial') {
     if (counts.failed > 0) {
-      return `已重试 ${attempted} 封，${resolved} 封已移出队列，另有 ${counts.failed} 封没有跑完。请稍后再试一次；如仍失败，请展开「查看技术详情」。`;
+      return `已重试 ${attempted} 封，${resolved} 封已移出队列，${counts.failed} 封未完成，请稍后重试。`;
     }
     return `已重试 ${attempted} 封：${resolved} 封已移出队列，${stillPending} 封仍需你确认。`;
   }
-  return '全部重试没有完成，待确认队列保持不变。请稍后再试；如仍失败，请展开「查看技术详情」。';
+  return '重试未完成，待确认队列未变，请稍后重试或查看技术详情。';
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ export function tryAppSummary(appSummary: () => AppSummary): {
   } catch (err) {
     return {
       summaryUnavailable: true,
-      warning: '操作已完成，但本地列表暂时无法刷新。请点击「刷新列表」。',
+      warning: '操作已完成，请点击「刷新列表」更新本地列表。',
       // detail kept out of renderer-facing field; message is user-safe.
       ...(err instanceof Error ? {} : {}),
     };

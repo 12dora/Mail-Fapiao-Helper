@@ -40,7 +40,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
     return {
       code: 'archive_recovery_blocked',
       // COPY-10：可执行动作；优先应用内隔离，而非让非技术用户改隐藏目录。
-      message: '上次保存发票时中断，当前无法继续修改。请先关闭可能占用发票清单的表格程序，然后重试。若仍无法继续，可在「设置」中查看归档恢复状态并确认隔离未解决的恢复记录（隔离前请勿删除文件）。',
+      message: '上次归档尚未恢复，请关闭占用发票清单的程序后重试，或在「设置」中查看归档恢复状态。',
       detail: extra
         ? sanitizeText(extra, { maxLength: 300 })
         : '归档事务恢复未完成或仍有未解决的 journal，写入已停止。',
@@ -268,7 +268,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
         ok: false,
         code: 'archive_journal_unreadable',
         status: 'unreadable',
-        message: '无法读取归档恢复记录（权限或 I/O 错误）。请检查磁盘权限后重试，勿当作「无残留」。',
+        message: '无法读取归档恢复记录，请检查磁盘权限后重试。',
         detail: sanitizeText(presence.detail, { maxLength: 200 }),
         residualCount: -1,
         blocked: true,
@@ -280,7 +280,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
         code: 'archive_journal_clear',
         status: 'clear',
         message: blocked
-          ? '未发现残留恢复记录，但写入门禁仍可能因其他原因阻断。请重试操作。'
+          ? '未发现残留恢复记录，请重试以确认能否继续保存。'
           : '没有未解决的归档恢复记录。',
         residualCount: 0,
         blocked: Boolean(blocked),
@@ -307,7 +307,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
       ok: false,
       code: 'archive_journal_residual',
       status: 'residual',
-      message: `发现 ${presence.names.length} 条未解决的归档恢复记录（可解析 ${parseable.length}，损坏或格式无效 ${corrupt.length}）。可重试自动恢复，或在确认后隔离这些记录以解除写入阻断。`,
+      message: `发现 ${presence.names.length} 条未解决的归档恢复记录，请重试恢复或确认隔离。`,
       residualCount: presence.names.length,
       parseableCount: parseable.length,
       corruptCount: corrupt.length,
@@ -336,7 +336,8 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
         return {
           ok: true,
           code: 'archive_journal_quarantined',
-          message: `已隔离 ${moved} 条归档恢复记录。写入门禁已解除；隔离副本仍保留在数据目录中，请勿删除直至确认发票清单无误。`,
+          message: `已隔离 ${moved} 条归档恢复记录，可以继续保存发票。`,
+          detail: '隔离副本保留在数据目录中，确认发票清单无误前请勿删除。',
           quarantined: moved,
           dest: redactPath(dest),
         };
@@ -349,7 +350,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
       return {
         ok: false,
         code: 'archive_journal_partial_live_process',
-        message: `已隔离 ${moved} 条归档恢复记录，但有 ${skippedLive.length} 条仍属于正在运行的进程，已跳过且写入门禁未解除。请等待当前任务结束后再试。`,
+        message: `已隔离 ${moved} 条恢复记录，另有 ${skippedLive.length} 条仍在使用，请等待当前任务结束后重试。`,
         quarantined: moved,
         skippedLive: skippedLive.length,
         dest: redactPath(dest),
@@ -376,7 +377,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
       return {
         ok: false,
         code: 'archive_journal_confirm_required',
-        message: '隔离归档恢复记录需要明确确认。请先查看状态后再确认操作。',
+        message: '请先查看归档恢复状态，再确认隔离操作。',
       };
     }
     const key = path.resolve(deps.invoicesDirPath());
@@ -385,7 +386,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
       return {
         ok: false,
         code: 'archive_journal_unreadable',
-        message: '无法读取归档恢复记录，已拒绝隔离（权限错误不能当作无残留）。',
+        message: '无法读取归档恢复记录，已取消隔离。',
         detail: sanitizeText(presence.detail, { maxLength: 200 }),
       };
     }
@@ -438,7 +439,7 @@ export function createArchiveRecovery(deps: ArchiveRecoveryDeps) {
       return {
         ok: false,
         code: 'archive_journal_live_process',
-        message: `有 ${skippedLive.length} 条归档恢复记录仍属于正在运行的进程，已拒绝隔离。请等待当前归档/处理任务结束后再试。`,
+        message: `有 ${skippedLive.length} 条恢复记录仍在使用，请等待当前任务结束后再隔离。`,
         quarantined: 0,
         skippedLive: skippedLive.length,
       };

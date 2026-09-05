@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron';
+import { registerDetailHandlers } from './detailHandlers.js';
+import { MAIL_HASH_RE } from '../../util/hash.js';
+import type { AppSummary } from '../summary.js';
 import { ImapFlow } from 'imapflow';
 import { ArchiveRecoveryError } from '../../download/archiveJournal.js';
 import { parseMailHash } from '../cliProtocol.js';
@@ -88,6 +91,8 @@ export interface RegisterMailHandlersDeps {
   ledgerCsvPath(): string;
   ocrPendingCsvPath(): string;
   appSummary(): unknown;
+  sanitizeAppSummary(summary: AppSummary): AppSummary;
+  issueOpenableHandle(target: string): string;
 }
 
 /** 连接测试/文件夹列举共用的 IMAP 参数解析（保存失败时回退到用户刚输入的值）。 */
@@ -123,7 +128,12 @@ export function imapParamsFor(
 async function openResolvedMail(
   targetPath: string,
   deps: RegisterMailHandlersDeps,
+  reveal = false,
 ): Promise<Record<string, unknown>> {
+  if (reveal) {
+    try { deps.showItemInFolderForUser(targetPath); } catch { /* best effort */ }
+    return { ok: true, opened: 'reveal_attempted', code: 'pending_mail_revealed', message: '已请求在文件管理器中显示原始邮件。' };
+  }
   const result = await deps.openOrRevealByPolicy(targetPath, {
     allowDirectoryOpen: false,
     allowFileOpen: true,
@@ -133,15 +143,15 @@ async function openResolvedMail(
       ok: true,
       opened: 'mail' as const,
       code: 'pending_mail_opened',
-      message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+      message: '已打开原始邮件。',
     };
   }
   if (result.ok && result.revealed) {
     return {
       ok: true,
-      opened: 'mail' as const,
+      opened: 'reveal_attempted' as const,
       code: 'pending_mail_revealed',
-      message: '已请求在文件管理器中显示原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。若未看到窗口，请到「已保存邮件」中查找。',
+      message: '已请求在文件管理器中显示原始邮件。',
     };
   }
   // 策略拒绝（可执行/bundle/替身/快捷方式等）：不得回退到无策略 open。
@@ -156,7 +166,7 @@ async function openResolvedMail(
       ok: false,
       opened: 'none' as const,
       code: result.code,
-      message: result.message ?? result.error ?? '出于安全考虑，无法打开该目标。',
+      message: result.message ?? '出于安全考虑，无法打开该目标。',
       error: result.error,
     };
   }
@@ -174,7 +184,7 @@ async function openResolvedMail(
     opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
     code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
     message: stillThere
-      ? '无法用默认应用打开原始邮件；已请求在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
+      ? '无法打开原始邮件，已请求在文件管理器中显示该文件。'
       : '无法打开原始邮件，且文件似乎已不存在。',
     error: result.error ? sanitizeText(result.error, { maxLength: 200 }) : undefined,
   };
@@ -212,7 +222,7 @@ async function openPendingFallback(
         ok: false,
         opened: 'none' as const,
         code: folderResult.code,
-        message: folderResult.message ?? folderResult.error ?? '出于安全考虑，无法打开该位置。',
+        message: folderResult.message ?? '出于安全考虑，无法打开该位置。',
         ...(folderResult.error ? { error: sanitizeText(folderResult.error, { maxLength: 200 }) } : {}),
       };
     }
@@ -223,8 +233,8 @@ async function openPendingFallback(
         opened: 'none' as const,
         code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
         message: row
-          ? '没有找到这封邮件的本地副本，且邮件缓存文件夹不存在。请先在「开始处理」中获取邮件，或到「配置」检查邮件缓存路径。'
-          : '没有找到这封邮件，且邮件缓存文件夹不存在。请先获取邮件或检查配置中的邮件缓存路径。',
+          ? '没有找到邮件的本地副本，请检查已保存邮件的位置。'
+          : '没有找到这封邮件，请先获取邮件或检查保存位置。',
         ...(folderResult.error ? { error: sanitizeText(folderResult.error, { maxLength: 200 }) } : {}),
       };
     }
@@ -245,8 +255,8 @@ async function openPendingFallback(
       opened: 'folder' as const,
       code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
       message: row
-        ? '没有找到原始邮件文件，已请求在文件管理器中显示邮件缓存位置，请手动查找后再到开票平台重新下载。若未看到窗口，请到「配置」核对邮件缓存路径。'
-        : '没有找到这封邮件，已请求在文件管理器中显示邮件缓存位置。若未看到窗口，请到「配置」核对邮件缓存路径。',
+        ? '没有找到原始邮件，已请求在文件管理器中显示保存位置。'
+        : '没有找到这封邮件，已请求在文件管理器中显示保存位置。',
     };
   }
   // COPY-05：打开的是文件夹，不是原始邮件本身。
@@ -255,20 +265,23 @@ async function openPendingFallback(
     opened: 'folder' as const,
     code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
     message: row
-      ? '没有找到原始邮件文件，已打开已保存邮件文件夹，请手动查找后再到开票平台重新下载。'
+      ? '未找到原始邮件，已打开邮件保存文件夹供您查找。'
       : '没有找到这封邮件，已打开已保存邮件文件夹。',
   };
 }
 
-async function refreshPendingLink(
+async function openMail(
   payload: unknown,
   deps: RegisterMailHandlersDeps,
 ): Promise<Record<string, unknown>> {
   const raw = asObject(payload);
-  const hash = parseMailHash(raw.hash);
-  if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。' };
+  const hash = typeof raw.hash === 'string' && MAIL_HASH_RE.test(raw.hash) ? raw.hash.toLowerCase() : '';
+  if (!hash) return { ok: false, opened: 'none', code: 'mail_not_found', message: '没有找到这封邮件。' };
+  if (raw.reveal !== undefined && typeof raw.reveal !== 'boolean') return { ok: false, opened: 'none', code: 'invalid_payload', message: '打开方式无效。' };
   const row = deps.findPendingRow(hash);
-  const emlPath = deps.pendingEmlPathForHash(hash);
+  const sample = path.join(deps.samplesDirPath(), `${hash}.eml`);
+  const emlPath = fs.existsSync(sample) ? sample : deps.pendingEmlPathForHash(hash);
+  if ((!emlPath || !fs.existsSync(emlPath)) && !row) return { ok: false, opened: 'none', code: 'mail_not_found', message: '没有找到这封邮件。' };
 
   /**
    * B2：所有桌面打开必须经 openOrRevealByPolicy（containment 之后的类型/目录/bundle 策略）。
@@ -285,16 +298,18 @@ async function refreshPendingLink(
       const rel = base ? path.relative(base, emlPath) : emlPath;
       const openedRel = deps.resolveOpenTarget(rel);
       if (!openedRel.ok) {
-        return { ok: false, code: openedRel.code, message: openedRel.message };
+        return { ok: false, opened: 'none', code: openedRel.code, message: openedRel.message };
       }
-      return openResolvedMail(openedRel.path, deps);
+      return openResolvedMail(openedRel.path, deps, raw.reveal === true);
     }
-    return openResolvedMail(opened.path, deps);
+    return openResolvedMail(opened.path, deps, raw.reveal === true);
   }
   return openPendingFallback(row, deps);
 }
 
 export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
+  registerDetailHandlers(deps);
+  deps.handleTrusted('mfh:open-mail', (_event, payload) => openMail(payload, deps));
   deps.handleTrusted('mfh:test-connection', async (_event, payload: unknown) => {
     // ELEC-02：配置落盘必须占锁；忙时仍可用表单值测连，但不写盘。
     let saved = false;
@@ -341,7 +356,8 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
             ok: true,
             kind: 'warn',
             code: 'imap_mailbox_fallback',
-            message: `邮箱连接正常，但找不到配置的文件夹「${mailbox}」，已临时打开「${fallbackMailbox}」。请在配置中重新选择目标文件夹。`,
+            message: '邮箱连接正常，但目标文件夹不可用，请在设置中重新选择。',
+            detail: sanitizeText(`目标文件夹：${mailbox}；临时打开：${fallbackMailbox}`, { maxLength: 200 }),
           };
         }
         return { ok: true, code: 'imap_ok', message: '邮箱连接正常，可以获取邮件。' };
@@ -437,7 +453,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
   });
 
   deps.handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => (
-    refreshPendingLink(payload, deps)
+    openMail(payload, deps)
   ));
 
   deps.handleTrusted('mfh:pending-manual-archive', async (event, payload: unknown) => {
@@ -511,7 +527,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
           canceled: false,
           code: result.code ?? 'manual_archive_failed',
           message: result.message
-            ?? (isDup ? '选择的文件都已经归档过了，没有新增内容。' : '文件没有归档成功，待确认记录保持不变。'),
+            ?? (isDup ? '所选文件均已归档，无需重复添加。' : '文件没有归档成功，待确认记录保持不变。'),
           ...(result.detail ? { detail: result.detail } : {}),
           files: [],
           duplicates: result.duplicates,
@@ -530,7 +546,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
       } else if (pendingRemoved > 0) {
         message = `文件已保存，并已从「待确认」移除${skipped}。`;
       } else {
-        message = `文件已保存，并会在下次识别时处理；但这封邮件仍在「待确认」中${skipped}。请刷新列表后重试移除。`;
+        message = `文件已保存并加入识别队列${skipped}，请刷新「待确认」列表后重试移除这封邮件。`;
       }
       const summaryPart = deps.tryAppSummary();
       return {

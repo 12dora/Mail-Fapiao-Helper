@@ -31,7 +31,7 @@ export function csvCell(v: string): string {
   return s;
 }
 
-export function parseCsvLine(line: string): string[] {
+function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '';
   let quoted = false;
@@ -144,7 +144,7 @@ function hardenCsvMode(file: string): void {
  * 原子写入 CSV 内容（BOM + 全文），fsync 文件与父目录，POSIX 下 mode 0600。
  * 供 schema 创建、legacy 升级与行级修复共用，保证 OCR-03 的 durability。
  */
-export function writeCsvAtomic(csvPath: string, body: string): void {
+function writeCsvAtomic(csvPath: string, body: string): void {
   const dir = path.dirname(csvPath);
   fs.mkdirSync(dir, { recursive: true, mode: isWindows ? undefined : 0o700 });
   const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -178,7 +178,7 @@ export function rewriteCsvRows(
   writeCsvAtomic(csvPath, `\uFEFF${lines.join('\n')}\n`);
 }
 
-export interface EnsureCsvSchemaOptions {
+interface EnsureCsvSchemaOptions {
   /**
    * 已知可升级的旧表头（不含 BOM、可带或不带尾部换行）。
    * 命中时按列名映射重写为 expectedHeader，缺失列填空；幂等且崩溃安全（原子替换）。
@@ -256,15 +256,26 @@ export function ensureCsvSchema(
   );
 }
 
-export function readCsvRows(csvPath: string): Record<string, string>[] {
-  if (!fs.existsSync(csvPath)) return [];
-  // 空文件没有合法表头：当作尚无数据，避免把第一行数据当 header（CORE-05）。
-  try {
-    if (fs.statSync(csvPath).size === 0) return [];
-  } catch {
-    return [];
+export function readCsvRows(csvPath: string, opts: { strict?: boolean } = {}): Record<string, string>[] {
+  let text: string;
+  if (opts.strict) {
+    // Destructive callers must distinguish an absent CSV from an inaccessible one.
+    try {
+      text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  } else {
+    if (!fs.existsSync(csvPath)) return [];
+    // 空文件没有合法表头：当作尚无数据，避免把第一行数据当 header（CORE-05）。
+    try {
+      if (fs.statSync(csvPath).size === 0) return [];
+    } catch {
+      return [];
+    }
+    text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   }
-  const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(text);
   if (records.length === 0) return [];
   const header = records[0] ?? [];

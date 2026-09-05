@@ -137,9 +137,9 @@ export class OperationCoordinator {
         code: acquired.code === 'data_dir_lock_failed' ? 'operation_lock_failed' : 'operation_locked_externally',
         // COPY-10：面向办公室用户的可执行动作，原始错误进 detail 不进主文案。
         message: acquired.code === 'data_dir_lock_failed'
-          ? '另一个发票处理任务正在使用这些文件。请等待它完成；如果没有任务在运行，请重新打开应用。'
+          ? '文件正被其他任务使用，请等待任务完成或重新打开应用。'
           : (acquired.message.includes('占用') || acquired.message.includes('锁')
-            ? '另一个发票处理任务正在使用这些文件。请等待它完成；如果没有任务在运行，请重新打开应用。'
+            ? '文件正被其他任务使用，请等待任务完成或重新打开应用。'
             : acquired.message),
         detail: acquired.message,
         running: this.running,
