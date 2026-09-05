@@ -195,7 +195,7 @@ function runFakeCli(
   }
   const combined = `${fake.stdout}\n${fake.stderr}`;
   for (const line of combined.split(/\r?\n/)) state.handleLine(line);
-  resolve({
+  const finish = (): void => resolve({
     ...fake,
     started: true,
     mails: state.mails(),
@@ -203,6 +203,12 @@ function runFakeCli(
     ocrCounts: state.capturedOcrCounts ?? parseOcrCompleteCounts(combined),
     ...(state.capturedTerminalMailNotFound ? { terminalMailNotFound: true } : {}),
   });
+  /* 假后端是同步的，任务持锁的时间为零，e2e 里根本观察不到 OperationCoordinator
+     的互斥。给它一个可配置的停留时间，测试才能对「已有任务正在运行」下断言。
+     只有假后端已加载（非打包 + MFH_E2E_FAKE_CLI=1）时才走到这里。 */
+  const holdMs = Number(process.env.MFH_E2E_FAKE_CLI_HOLD_MS ?? '');
+  if (Number.isFinite(holdMs) && holdMs > 0) setTimeout(finish, Math.min(holdMs, 5000));
+  else finish();
 }
 
 function spawnCli(

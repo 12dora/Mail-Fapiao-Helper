@@ -195,6 +195,53 @@ function fakeOcr(ctx: FakeBackendContext): FakeCliResult {
 }
 
 /**
+ * `mfh dedupe --json` 的假报告。
+ *
+ * 主进程只认 stdout 里最后一份完整 JSON（或 `.mfh-cache/dedupe-report.json`），
+ * 所以这里连同前后的普通日志一起输出，覆盖真实的解析路径。`quarantineDir` 写成
+ * 相对 dataDir 的路径：绝对路径会被投影层判成越界并抹成空串。
+ */
+function fakeDedupe(_ctx: FakeBackendContext, args: string[]): FakeCliResult {
+  const apply = args.includes('--apply');
+  const byIndex = args.indexOf('--by');
+  const mode = byIndex >= 0 && args[byIndex + 1] === 'container' ? 'container' : 'invoice-no';
+  const member = (filename: string, reason?: string) => ({
+    filename,
+    date: '2026-05-21',
+    seller: '国家电网有限公司',
+    amount: '318.42',
+    format: 'pdf',
+    ...(reason ? { reason } : {}),
+  });
+  const report = {
+    mode,
+    applied: apply,
+    quarantineDir: apply ? 'invoices/.dedupe-quarantine/20260521-1000/by-invoice-no' : null,
+    pairs: 1,
+    redundant: 1,
+    quarantined: apply ? 1 : 0,
+    ledgerRowsRemoved: apply ? 1 : 0,
+    ocrRowsRemoved: apply ? 1 : 0,
+    conflicts: 0,
+    groups: [
+      {
+        invoiceNo: '1234567890',
+        kept: member('0001.pdf'),
+        removed: [member('0001-copy.pdf', 'same_invoice_no')],
+        conflict: false,
+        conflictReason: '',
+      },
+    ],
+    skipped: [] as { filename: string; reason: string }[],
+  };
+  return {
+    code: 0,
+    stdout: `scanning archive {not a report}\n${JSON.stringify(report)}\ndone\n`,
+    stderr: '',
+  };
+}
+
+/**
  * @param args 真实传给 CLI 的 argv。fixture 必须按同一批参数分支（例如 `--dry-run`
  *   不写盘也不产生 `saved` 行），否则 fixture 覆盖的就不是真实契约。
  */
@@ -204,6 +251,7 @@ export function runFakeCli(command: string, args: string[], ctx: FakeBackendCont
   // 「全部重试」走 `pending retry`：与 run 同样的终态行契约，fake 侧共用同一实现。
   if (command === 'pending' && args[0] === 'retry') return fakePipeline(ctx, args.slice(1));
   if (command === 'ocr') return fakeOcr(ctx);
+  if (command === 'dedupe') return fakeDedupe(ctx, args);
   if (command === 'organize') {
     const paths = fakeConfigPaths(ctx);
     fs.mkdirSync(paths.organizedDir, { recursive: true });

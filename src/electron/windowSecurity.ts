@@ -46,24 +46,33 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
 } {
   let mainWindow: ElectronAPI.BrowserWindow | undefined;
 
-  /** 应用内页面根目录（gui-design/pages）。 */
+  /** 应用内页面根目录（gui-design）。 */
   function appPagesRoot(): string {
-    return deps.uiPath('pages');
+    return deps.uiPath();
+  }
+
+  /**
+   * 唯一的应用页面：gui-design/index.html。
+   * 渲染层是单页应用，路由走 hash（`#/dashboard` 等），不会产生新的 file: 路径。
+   */
+  function appEntryFile(): string {
+    return deps.uiPath('index.html');
   }
 
   /**
    * 判定 URL 是否为本应用合法 GUI 页面（ELEC-01）。
-   * 必须是 file: 且 realpath 落在 gui-design/pages 下的 .html。
+   * 必须是 file:，且 realpath 正好是 gui-design/index.html；query 与 hash 先剥掉，
+   * 所以任意 `#/route` 都算合法，跨目录的 .html 一律拒绝。
    */
   function isCanonicalAppPageUrl(url: string): boolean {
     if (typeof url !== 'string' || !url.startsWith('file:')) return false;
     try {
       const filePath = fileURLToPath(url.split('?')[0]!.split('#')[0]!);
-      let pagesRoot: string;
+      let entry: string;
       try {
-        pagesRoot = fs.realpathSync(appPagesRoot());
+        entry = fs.realpathSync(appEntryFile());
       } catch {
-        pagesRoot = path.resolve(appPagesRoot());
+        entry = path.resolve(appEntryFile());
       }
       let realFile: string;
       try {
@@ -72,9 +81,7 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
         // 页面文件必须真实存在；失败则拒绝。
         return false;
       }
-      const rel = path.relative(pagesRoot, realFile);
-      if (rel.startsWith('..') || path.isAbsolute(rel)) return false;
-      return rel.toLowerCase().endsWith('.html') && !rel.includes('..');
+      return path.relative(entry, realFile) === '';
     } catch {
       return false;
     }
@@ -97,7 +104,7 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
         nodeIntegration: false,
       },
     });
-    // ELEC-01：只允许导航到本应用 gui-design/pages 下的 file: 页面，并禁止 window.open。
+    // ELEC-01：只允许导航到唯一的应用页面 gui-design/index.html，并禁止 window.open。
     mainWindow.webContents.on('will-navigate', (event, url) => {
       if (!isCanonicalAppPageUrl(url)) event.preventDefault();
     });
@@ -110,7 +117,7 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
     mainWindow.webContents.once('did-finish-load', () => {
       deps.sendToRenderer('op-state', sanitizeOpState(deps.coordinatorState()) as unknown as Record<string, unknown>);
     });
-    void mainWindow.loadFile(deps.uiPath('pages', 'dashboard.html'));
+    void mainWindow.loadFile(appEntryFile());
   }
 
   function getMainWindow(): ElectronAPI.BrowserWindow | undefined {

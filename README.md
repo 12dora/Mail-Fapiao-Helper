@@ -106,27 +106,29 @@ GitHub [Releases](../../releases) 上可能同时存在：
 
 ### 1. 填写邮箱
 
-进入左侧菜单 **邮箱与保存**，填 IMAP 服务器、端口、邮箱账号、**授权码**（不是邮箱登录密码；常见邮箱在网页里开通 IMAP 服务时会给到一串授权码）。可以勾选要扫描哪些邮件夹。点击 **测试邮箱连接** 验证。
+进入左侧菜单 **设置 → 邮箱**，填 IMAP 服务器、端口、邮箱账号、**授权码**（不是邮箱登录密码；常见邮箱在网页里开通 IMAP 服务时会给到一串授权码）。可以勾选要扫描哪些邮件夹。点 **测试连接** 验证，改完在页面底部点 **保存**。
 
-![邮箱配置页](docs/screenshots/05-config.png)
+![设置页](docs/screenshots/05-settings.png)
 
-### 2. 抓取邮件
+### 2. 抓取并归档
 
-回到 **开始处理** 页，选好日期范围（默认本月以来），点 **开始获取邮件**。命中关键字的邮件会缓存到本机的 `.eml` 文件，不会修改邮箱里的原邮件。
+回到 **开始处理** 页，选好日期范围（默认近 30 天），点 **开始处理**。一次点击依次做三件事：抓邮件、从邮件里取出发票文件、识别票面字段。右侧的运行日志实时显示每一步的结果。想先看看会命中哪些邮件，可以打开 **试运行（不下载）**。
 
 ![开始处理](docs/screenshots/01-dashboard.png)
 
-> 第二步 **获取发票文件** 会从本地缓存的邮件中抽取附件、跟踪正文直链、调度第三方站点脚本，把发票文件归档到 `invoices/`。
+命中关键字的邮件会缓存成本机的 `.eml` 文件，不会修改邮箱里的原邮件；取出的发票文件归档到 `invoices/`。
 
-### 3. 识别字段（可选）
+### 3. 查看发票
 
-切到 **发票库** 页，点 **开始识别**。内置 OCR 引擎离线识别票号、金额、卖方、日期、文档类型（普票/电子发票/行程单/支撑材料）。可以按发票类型筛选、按销售方搜索，也支持手动重跑 OCR。
+切到 **发票库** 页。默认只看发票——费用汇总单一类的 **附属材料** 报销用不上，收在同名筛选里。点任意一行打开详情抽屉，能看到识别结果、来源邮件和磁盘上的文件状态，也能直接打开文件或跳到那封邮件。
 
 ![发票库](docs/screenshots/03-library.png)
 
+![发票详情](docs/screenshots/06-invoice-drawer.png)
+
 ### 4. 处理待确认队列
 
-链接过期、平台不支持、附件格式特殊的邮件会自动归档到 **待确认** 队列，并按处置策略分组（可刷新链接 / 手动归档 / 可忽略）。
+链接过期、平台不支持、附件格式特殊的邮件会进 **待确认** 队列，每一行都写清了为什么停在这里、下一步该做什么，并给出打开邮件、重试、手动归档、忽略四个入口。
 
 ![待确认队列](docs/screenshots/04-pending.png)
 
@@ -134,22 +136,25 @@ GitHub [Releases](../../releases) 上可能同时存在：
 
 ## 五、页面一览
 
+界面是一个五页的单窗口应用，左侧菜单切换。
+
 | 页面 | 用途 |
 |---|---|
-| **开始处理** | 当前主要工作流：获取邮件 → 获取发票文件 → 识别 → 整理 |
-| **邮件记录** | 已抓取的邮件清单，可按主题/发件人/编号搜索，可导出表格、定位本地 `.eml` |
-| **发票库** | 已归档发票一览，含识别字段、状态、文档类型筛选、整理输出入口 |
-| **待确认** | 自动处理失败的邮件分组（链接过期 / 无下载文件 / 平台不支持等），给出原文打开、刷新链接、手动归档、忽略入口 |
-| **邮箱与保存** | IMAP 设置、过滤关键字、保存目录、命名规则、整理规则、OCR 引擎配置 |
-| **关于** | 版本、隐私说明、本机数据目录入口、识别引擎状态 |
+| **开始处理** | 一次运行的入口：选时间范围与匹配范围，点一次跑完抓取 → 取件 → 识别，右侧实时日志，下面是本次结果与最近运行。 |
+| **邮件记录** | 已抓取的邮件清单，按状态筛选、按发件人/主题搜索；点开一行看附件、正文链接、归档文件与处理记录，也能打开原始邮件。 |
+| **发票库** | 已归档文件的总表。默认「仅发票」，另有已识别 / 待补充 / 识别失败 / 重复 / **附属材料** 筛选；页头提供 **导出 CSV**（导出当前筛选出来的行）、**清理重复**、整理文件与开始识别。 |
+| **待确认** | 自动处理没走完的邮件队列，按原因分组筛选；逐封重试、手动归档、忽略，或整队 **全部重试**。 |
+| **设置** | 四个标签页：邮箱（IMAP、关键词、匹配范围）、保存（各目录、命名规则、按类型整理）、识别（引擎、模式、云端凭据）、关于（版本、数据目录、归档恢复、项目地址）。 |
 
 **邮件记录**：
 
 ![邮件记录](docs/screenshots/02-inbox.png)
 
-**关于**（含本机数据目录、识别引擎状态、隐私说明）：
+**详情抽屉**：邮件记录、发票库、待确认三页的行都可以点开，右侧滑出详情，不会挡住刚点的那一行。
 
-![关于](docs/screenshots/06-settings.png)
+**清理重复**：发票库页头的 **清理重复** 先做一次试算，列出每组同号发票里保留哪份、移出哪几份；金额或销售方对不上的组标成「需要人工核对」并跳过。确认后被移出的文件进隔离目录，不是删除。
+
+**导出 CSV**：导出的是当前搜索与筛选之后看到的那些行，日期、销售方、发票号、金额、类型、状态、文件名七列。
 
 ---
 
@@ -340,8 +345,15 @@ node <仓库路径>/dist/index.js dedupe --config ./config.json --apply  # 确�
 
 ```bash
 npm install
-npm run electron          # 编译 TS + 以 Electron 模式打开界面
+npm run electron          # 编译主进程与渲染层 + 以 Electron 模式打开界面
+npm run dev:renderer      # 只改界面时：esbuild watch，改完刷新窗口即可
+npm run screenshots       # 自带静态服务器，按路由截图到 docs/screenshots/
 ```
+
+界面是 React 18 + Ant Design 5 的单页应用，源码在 `gui-design/src/`，约定见
+[gui-design/src/README.md](gui-design/src/README.md)。不装 Electron 也能看界面：
+`npm run build:renderer` 之后从 `gui-design/` 起个静态服务器，打开
+`index.html?fake=1`（`?fake=empty` 看空状态，`?fake=broken` 看配置损坏）。
 
 仅 CLI 调试：
 
@@ -358,18 +370,21 @@ CLI 读取项目根目录的 `config.json`（参考 `config.example.json`）。
 ### 代码质量与提交检查
 
 ```bash
-npm run lint              # ESLint，所有规则均为错误
+npm run lint              # ESLint，所有规则均为错误；覆盖后端、脚本、渲染层与测试
+npm run typecheck         # tsc 检查主进程与渲染层两份 tsconfig
 npm run smells            # 文件大小、长函数和导出数量报告（不阻止提交）
 npm run smells -- --json  # JSON 报告
-MFH_INSTALL_GIT_HOOKS=1 npm run postinstall  # 自愿启用本地提交检查
+MFH_INSTALL_GIT_HOOKS=1 npm run postinstall  # 自愿启用本地提交钩子
 ```
+
+启用后的 pre-commit 钩子执行 `npm run lint -- --max-warnings 0 && npm run typecheck`。
 
 安装依赖时也可设置 `MFH_INSTALL_GIT_HOOKS=1` 启用 simple-git-hooks；CI 中不会安装钩子。
 提交前依次执行 `npm run lint -- --max-warnings 0` 与 `npm run typecheck`。
 确需跳过本次本地检查时使用 `SKIP_SIMPLE_GIT_HOOKS=1 git commit ...`，CI 仍会检查。
 Windows PowerShell 可先用 `$env:MFH_INSTALL_GIT_HOOKS="1"` 设置环境变量，再运行 `npm run postinstall`。
 
-ESLint 覆盖后端、脚本、GUI 测试与将来的 React TS/TSX 源码；现有结构性超限记录在
+ESLint 覆盖后端、脚本、渲染层 TS/TSX 与 GUI 测试；现有结构性超限记录在
 `eslint.config.mjs`，仅为指定文件或具名工厂保留有限额度，后续重构时应收紧。
 文件上限只计非空、非注释行；体积报告使用源文件的物理行数，方便定位。
 本次基线、死代码清理和完整文案对照见 [质量门禁记录](docs/QUALITY_GATES.md)。
@@ -378,7 +393,9 @@ ESLint 覆盖后端、脚本、GUI 测试与将来的 React TS/TSX 源码；现�
 
 ```bash
 npm test                  # lint + 工具检查 + build + typecheck + CLI 回归 + Electron 端到端
-npm run test:browser      # 渲染进程 E2E，需要 Playwright Chromium，单独跑
+npm run test:cli          # CLI 回归与集成
+npm run test:electron     # 真 Electron 冒烟 + IPC fixture + 单元套件
+npm run test:browser      # 渲染层浏览器 E2E，需要 Playwright Chromium，单独跑
 ```
 
 每个 `test:*` 前都会执行 `scripts/check-test-prereqs.mjs` 做前置检查（是否已编译、Electron 二进制是否安装、Chromium 是否就位、Linux 上有没有显示服务）。**缺少前置条件时会直接失败并说明原因，不会静默跳过。** Linux 上跑 GUI 相关套件请用 `xvfb-run -a npm test`。
@@ -481,7 +498,7 @@ docker compose --profile cli run --rm mfh run   --config /data/config.json
 - [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) — main 必过检查（需 owner 配置）
 - [docs/SECURITY_NOTES.md](docs/SECURITY_NOTES.md) — 已知残留风险与接受理由
 - [docs/SECURITY_HISTORY_CLEANUP.md](docs/SECURITY_HISTORY_CLEANUP.md) — 历史隐私净化步骤（**未执行**，需人工批准）
-- [gui-design/README.md](gui-design/README.md) — 桌面界面静态预览；截图可用 `npm run screenshots`（需先本地静态服务器）
+- [gui-design/README.md](gui-design/README.md) — 桌面界面：目录、路由、静态预览与测试套件；渲染层约定见 [gui-design/src/README.md](gui-design/src/README.md)
 - 过程性/历史文档已移至 `docs/archive/` 与 `docs/audit-2026-07-29/`，不作为现行规约
 
 ---
@@ -490,6 +507,6 @@ docker compose --profile cli run --rm mfh run   --config /data/config.json
 
 - 所有邮件、附件、识别结果、邮箱配置都保存在你电脑的用户数据目录，应用不上传邮件内容
 - `config.json` 含 IMAP 授权码，POSIX 平台写盘时已做 `chmod 600`
-- 默认 OCR 走本机离线引擎，**不调用任何云服务**；如要启用腾讯 OCR 或 API Key，需要你在 **邮箱与保存** 页显式填写
+- 默认 OCR 走本机离线引擎，**不调用任何云服务**；如要启用腾讯 OCR 或 API Key，需要你在 **设置 → 识别** 里显式填写
 - IMAP 仅使用 TLS 加密连接
 - 第三方开票平台跳转使用 Playwright 浏览器自动化，默认无头运行，不保留 cookies
