@@ -133,7 +133,7 @@ function listAllMailboxPaths(client: ImapFlow): Promise<string[]> {
 
 /** Coerce a Date or date-string to a real, finite Date; otherwise undefined. */
 function validDate(d: string | Date | null | undefined): Date | undefined {
-  if (d == null) return undefined;
+  if (d === null || d === undefined) return undefined;
   const date = d instanceof Date ? d : new Date(d);
   return Number.isFinite(date.getTime()) ? date : undefined;
 }
