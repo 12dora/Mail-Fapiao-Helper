@@ -30,6 +30,7 @@ import { openSync, readSync, closeSync, readdirSync, statSync, existsSync, readF
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { auditAsarEntries } from './asar-hygiene.mjs';
 import { EFAPIAO_VENDOR_VERSIONS } from './efapiao-vendor.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -237,17 +238,9 @@ function checkAsarHygiene(root) {
     errors.push(`cannot read app.asar header: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  const banned = [
-    { pattern: /^gui-design\/tests(\/|$)/, label: 'test suite (gui-design/tests)' },
-    { pattern: /(^|\/)devFakeBackend\.js(\.map)?$/, label: 'dev fake backend (devFakeBackend.js)' },
-  ];
-  for (const { pattern, label } of banned) {
-    const hits = entries.filter((entry) => pattern.test(entry));
-    if (hits.length > 0) {
-      errors.push(`production app.asar still contains the ${label}: ${hits.slice(0, 5).join(', ')}${hits.length > 5 ? ` (+${hits.length - 5} more)` : ''}`);
-    }
-  }
-  notes.push(`app.asar carries ${entries.length} entries, free of test code`);
+  const audit = auditAsarEntries(entries);
+  errors.push(...audit.errors);
+  notes.push(...audit.notes);
 }
 
 /* ------------------------------------------------------- channel + signature */
