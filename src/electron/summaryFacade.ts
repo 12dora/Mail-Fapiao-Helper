@@ -29,6 +29,7 @@ export interface SummaryFacadeDeps {
 
 /** 主进程签发的外部文件 opaque 句柄（renderer 不可伪造路径）。 */
 const externalFileHandles = new Map<string, string>();
+const handlesByPath = new Map<string, string>();
 
 export function createSummaryFacade(deps: SummaryFacadeDeps) {
   function asSummaryOptions(value: unknown): SummaryPageOptions | undefined {
@@ -70,15 +71,24 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
   function registerExternalFileHandle(canonicalPath: string): string {
     // 签发时也必须在当前允许根内，否则拒绝铸造
     if (!deps.isInsideOpenPathAllowedRoots(canonicalPath)) return '';
-    for (const [id, p] of externalFileHandles) {
-      if (p === canonicalPath) return id;
+    const existing = handlesByPath.get(canonicalPath);
+    if (existing) {
+      // 刷新顺序，避免本次响应刚复用的旧句柄被后续签发驱逐。
+      externalFileHandles.delete(existing);
+      externalFileHandles.set(existing, canonicalPath);
+      return existing;
     }
     const id = `ext:${randomBytes(12).toString('hex')}`;
     externalFileHandles.set(id, canonicalPath);
-    // 防止无限增长：超过 500 个时丢掉最旧的一半。
-    if (externalFileHandles.size > 500) {
-      const keys = Array.from(externalFileHandles.keys()).slice(0, 250);
-      for (const k of keys) externalFileHandles.delete(k);
+    handlesByPath.set(canonicalPath, id);
+    // 覆盖单次最多 100000 行的响应，同时保持注册表有界。
+    if (externalFileHandles.size > 200000) {
+      const keys = externalFileHandles.keys();
+      for (let i = 0; i < 50000; i++) {
+        const oldest = keys.next().value!;
+        handlesByPath.delete(externalFileHandles.get(oldest)!);
+        externalFileHandles.delete(oldest);
+      }
     }
     return id;
   }
@@ -92,6 +102,7 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
     // 赎回时按当前允许根重验；配置改掉后旧句柄失效
     if (!deps.isInsideOpenPathAllowedRoots(canon)) {
       externalFileHandles.delete(id);
+      handlesByPath.delete(registered);
       return undefined;
     }
     return canon;
@@ -195,6 +206,7 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
   }
 
   return {
+    issueOpenableHandle: rendererOpenablePath,
     asSummaryOptions,
     sanitizeAppSummary,
     appSummary,
