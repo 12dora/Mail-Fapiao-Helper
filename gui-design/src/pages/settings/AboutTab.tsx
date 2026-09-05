@@ -154,7 +154,7 @@ function LinkRow({ url }: { url: ExternalUrl }): JSX.Element {
           aria-label="在浏览器中打开"
           onClick={() => {
             void bridge.openExternal(url).then((result) => {
-              if (!result.ok) notifyResult(result, { success: '已打开', failure: '打不开浏览器' });
+              if (!result.ok) notifyResult(result, { success: '已打开', failure: '无法打开浏览器' });
             });
           }}
         />

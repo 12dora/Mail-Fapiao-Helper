@@ -68,7 +68,7 @@ function Sidebar(): JSX.Element {
     <Layout.Sider width={204} className="mfh-sider" theme="light">
       <div className="mfh-brand">
         <span className="mfh-brand__name">发票助手</span>
-        <span className="mfh-brand__sub">本机运行，数据不外传</span>
+        <span className="mfh-brand__sub">数据保存在本机</span>
       </div>
       <Menu
         mode="inline"

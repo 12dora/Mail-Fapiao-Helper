@@ -24,7 +24,7 @@ const FAILURE_TEXT: Record<string, { title: string; detail: string }> = {
   eml_unreadable: { title: '无法读取原始邮件', detail: '文件可能已损坏或被移走。' },
 };
 
-const FALLBACK_FAILURE = { title: '读不到邮件详情', detail: '稍后重试，或重新获取这封邮件。' };
+const FALLBACK_FAILURE = { title: '无法读取邮件详情', detail: '稍后重试，或重新获取这封邮件。' };
 
 function failureText(result: BaseResult): { title: string; detail: string } {
   const preset = result.code ? FAILURE_TEXT[result.code] : undefined;
@@ -117,7 +117,7 @@ function MailBody({ detail }: { detail: MailDetail }): JSX.Element {
 async function openMailAt(hash: string, reveal: boolean): Promise<void> {
   const result = await bridge.openMail({ hash, reveal });
   if (!result.ok) {
-    notifyResult(result, { success: '已打开', failure: reveal ? '显示不了这封邮件' : '打不开原始邮件' });
+    notifyResult(result, { success: '已打开', failure: reveal ? '无法显示邮件位置' : '无法打开原始邮件' });
     return;
   }
   if (!reveal && result.opened === 'folder') notify.info('已打开所在目录');

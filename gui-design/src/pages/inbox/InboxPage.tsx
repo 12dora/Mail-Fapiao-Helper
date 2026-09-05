@@ -88,7 +88,7 @@ const COLUMNS: ColumnsType<InboxRow> = [
 
 function openSamples(): void {
   void bridge.openPath({ location: 'samples' }).then((result) => {
-    if (!result.ok) notifyResult(result, { success: '已打开', failure: '打不开邮件目录' });
+    if (!result.ok) notifyResult(result, { success: '已打开', failure: '无法打开邮件目录' });
   });
 }
 
