@@ -34,7 +34,7 @@
     "lint": "eslint .",
     "smells": "node scripts/code-smells.mjs",
     "postinstall": "node scripts/install-git-hooks.mjs",
-    "test:tooling": "node scripts/check-code-gates.mjs && node --test scripts/code-smells.test.mjs scripts/fetch-efapiao.test.mjs scripts/efapiao-vendor.test.mjs"
+    "test:tooling": "node scripts/check-code-gates.mjs && node --test scripts/code-smells.test.mjs scripts/fetch-efapiao.test.mjs scripts/efapiao-vendor.test.mjs scripts/asar-hygiene.test.mjs scripts/build-renderer.test.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -87,6 +87,7 @@
       "gui-design/**/*",
       "!gui-design/tests/**",
       "!gui-design/src/**",
+      "!gui-design/**/*.map",
       "icon/**/*",
       "config.example.json",
       "package.json"
