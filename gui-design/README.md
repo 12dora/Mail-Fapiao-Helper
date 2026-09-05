@@ -1,60 +1,47 @@
-# 发票助手 · 桌面界面预览
+# 发票助手 · 桌面界面
 
-这里是发票助手的桌面界面。普通浏览器里可以作为静态预览打开；在 Electron 里会通过 `window.mfhBridge` 连接本机配置、邮件缓存、OCR 汇总和 CLI 操作。
+单页界面，React 18 + Ant Design 5，由 esbuild 打包成 `gui-design/dist/app.js`。
+Electron 里通过 `window.mfhBridge` 连接本机配置、邮件缓存、OCR 汇总和 CLI 操作；
+浏览器里带 `?fake=1` 打开时使用内存假数据，只用于查看界面。
 
-## 打开方式
-
-桌面应用开发模式：
-
-```bash
-npm run electron
-```
-
-这会先编译 TypeScript，再打开 Electron 窗口。Electron 会读取项目根目录的 `config.json`；邮件缓存、发票原件、识别结果都保存在本机，不会上传。
-
-静态预览：
-
-从项目根目录启动本地预览：
-
-```bash
-cd gui-design && python3 -m http.server 5175
-```
-
-然后打开 <http://127.0.0.1:5175/>。静态预览不会调用本机 CLI，主要用于查看界面。
-
-## 页面
+## 目录
 
 ```
 gui-design/
-  index.html                 — 入口页
-  styles/main.css            — 亮色默认、深色可选的桌面端样式
-  scripts/shell.js           — 侧栏、主题、按钮反馈、Electron 数据绑定
-  tests/e2e.mjs              — Playwright 端到端检查
-  tests/electron-smoke.mjs   — Electron 桥接冒烟检查
-  pages/
-    dashboard.html           — 开始处理：抓邮件、保存票据、查看进度
-    inbox.html               — 邮件记录：已扫描邮件与来源
-    library.html             — 发票库：识别结果、支撑材料、整理入口
-    pending.html             — 待确认：链接过期、缺文件、需手动处理
-    config.html              — 邮箱与保存：邮箱登录、保存位置、命名方式
-    settings.html            — 关于：隐私说明、版本、后续计划
+  index.html   唯一入口，带 CSP，加载 dist/app.js
+  src/         渲染层源码，见 src/README.md
+  dist/        构建产物，不入库
+  tests/       Playwright 检查
 ```
 
-## 设计要求
+## 开发
 
-- 默认使用亮色主题，用户可以切换深色主题。
-- 面向非技术用户，页面避免直接暴露内部状态词。
-- 侧栏、按钮和运行日志均已中文化。
-- Electron 中通过 `window.mfhBridge` 读取真实摘要，并调用本地 `fetch/run/ocr/organize/pending` 能力。
-- 所有邮件、附件、识别结果都按“先保存原件，再识别整理”的用户心智呈现。
+```bash
+npm run electron       # 编译主进程 + 渲染层，打开 Electron 窗口
+npm run dev:renderer   # 渲染层 watch 构建
+npm run screenshots    # 自带静态服务器，按路由截图到 docs/screenshots/
+```
+
+静态预览：先 `npm run build:renderer`，再从 `gui-design/` 起一个静态服务器，
+打开 `index.html?fake=1#/dashboard`。
+
+## 路由
+
+| 路由 | 页面 |
+| --- | --- |
+| `#/dashboard` | 开始处理：时间范围、匹配范围、试运行、运行日志、本次结果、最近运行 |
+| `#/inbox` | 邮件记录 |
+| `#/library` | 发票库 |
+| `#/pending` | 待确认 |
+| `#/settings` | 设置：邮箱 / 保存与整理 / 识别 / 关于 |
+
+路由只走 hash：主进程只允许加载 `gui-design/index.html`，换成新的 `file:` 路径会被
+`isCanonicalAppPageUrl` 拒绝，进而挡掉所有 IPC。
+
+## 约定
+
+界面文案、桥接订阅规则、主题令牌与新增页面的步骤见 [`src/README.md`](src/README.md)。
 
 ## 测试
 
-从项目根目录运行：
-
-```bash
-node gui-design/tests/e2e.mjs
-node gui-design/tests/electron-smoke.mjs
-```
-
-测试会检查默认亮色主题、中文导航、开始处理流程、待确认页按钮反馈、设置页文案、主题切换、页面是否横向溢出，以及 Electron preload 桥是否可用。
+`gui-design/tests/` 下的用例仍指向旧界面，会随本次重写另行更新。
