@@ -12,6 +12,7 @@ export interface EfapiaoPayload {
   document_type?: string | null;
   invoice_type?: string | null;
   format?: string | null;
+  extra?: Record<string, unknown>;
 }
 
 export interface EfapiaoBatchPayload {
@@ -43,6 +44,7 @@ export function nestedRecord(v: unknown, key: string): Record<string, unknown> {
 }
 
 function documentTypeFromEfapiao(value: string, fallback: DocumentType): DocumentType {
+  if (fallback === 'supporting' || /^(pdf|ofd|image)-supporting$/.test(value)) return 'supporting';
   if (value.includes('itinerary') || value.includes('rail')) return 'itinerary';
   if (value.includes('fapiao')) return 'invoice';
   return fallback;
@@ -74,6 +76,7 @@ function filled(value: string | undefined): boolean {
  * 返回空字符串表示通过，否则返回可读的缺失说明。
  */
 function missingCoreFields(documentType: DocumentType, fields: Partial<InvoiceFields>): string {
+  if (documentType === 'supporting') return '';
   const present = [
     filled(fields.invoiceNo) ? 'invoiceNo' : '',
     filled(fields.seller) ? 'seller' : '',
@@ -108,6 +111,14 @@ export function okResult(payload: EfapiaoPayload, fallbackDocumentType: Document
     documentType: documentTypeFromEfapiao(documentTypeRaw, fallbackDocumentType),
     invoiceType,
   };
+  if (fields.documentType === 'supporting') {
+    // CSV has no title/remark column. For supporting rows only, seller holds the
+    // display title; transport and error retain their operational meaning.
+    fields.seller = stringValue(nestedRecord(data, 'extra').title) || stringValue(payload.extra?.title);
+    fields.invoiceNo = '';
+    fields.amount = '';
+    fields.date = '';
+  }
   const missing = missingCoreFields(fields.documentType ?? fallbackDocumentType, fields);
   return {
     // 字段不完整时给出明确的 partial 状态，保留已解析字段供人工复核。

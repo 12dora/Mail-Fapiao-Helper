@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.js';
+import { isSupportingDocument } from '../extract/classify.js';
 import type { Logger } from '../log.js';
 import { csvCell, readCsvRows } from '../util/csv.js';
 import { contentHash } from '../util/hash.js';
@@ -42,7 +43,7 @@ function resultRow(raw: Record<string, string>): OcrResultRow {
     filename: raw.filename ?? '',
     source: raw.source ?? '',
     format: raw.format ?? '',
-    documentType: raw.documentType ?? '',
+    documentType: isSupportingDocument(raw) ? 'supporting' : raw.documentType ?? '',
     invoiceType: raw.invoiceType ?? '',
     seller: raw.seller ?? '',
     amount: raw.amount ?? '',
@@ -254,6 +255,11 @@ function resultIsUsable(row: OcrResultRow): boolean {
   return status === '' || status === 'success' || status === 'ok' || status === 'recognized';
 }
 
+function organizeSkipReason(row: OcrResultRow, includeSupporting: boolean | undefined): string {
+  if (isSupportingDocument(row)) return includeSupporting ? '' : 'supporting_document';
+  return resultIsUsable(row) ? '' : row.error || `status=${row.status}`;
+}
+
 export function readOcrResults(csvPath: string): OcrResultRow[] {
   const index = new ArtifactIndex<OcrResultRow>();
   for (const row of readCsvRows(csvPath).map(resultRow)) {
@@ -262,6 +268,20 @@ export function readOcrResults(csvPath: string): OcrResultRow[] {
     index.set(rowIdentity(row), row, (existing, next) => (
       !(existing.status.toLowerCase() === 'success' && next.status.toLowerCase() !== 'success')
     ));
+  }
+  return index.values();
+}
+
+function readOrganizeRows(resultsCsv: string, supportingCsv: string | undefined, includeSupporting?: boolean): OcrResultRow[] {
+  const rows = readOcrResults(resultsCsv);
+  if (!supportingCsv) return rows;
+  const index = new ArtifactIndex<OcrResultRow>();
+  for (const row of rows) index.set(rowIdentity(row), row);
+  for (const row of readOcrResults(supportingCsv).filter(isSupportingDocument)) {
+    const identity = rowIdentity(row);
+    const existing = index.get(identity);
+    if (existing) existing.documentType = 'supporting';
+    else if (includeSupporting) index.set(identity, row);
   }
   return index.values();
 }
@@ -326,13 +346,15 @@ function probeAuditSink(auditCsv: string): string | undefined {
   }
 }
 
-export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { resultsCsv?: string; outDir?: string; applyRename?: boolean } = {}): OrganizeSummary {
+export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { resultsCsv?: string; outDir?: string; applyRename?: boolean; includeSupporting?: boolean } = {}): OrganizeSummary {
   const resultsCsv = path.resolve(opts.resultsCsv ?? cfg.ocr.resultsCsv);
   const invoicesDir = path.resolve(cfg.paths.invoices);
   const organizedDir = path.resolve(opts.outDir ?? cfg.rename.organizedDir);
   const applyRename = opts.applyRename ?? cfg.rename.applyAfterOcr;
   const auditCsv = path.join(organizedDir, 'organize-results.csv');
-  const rows = readOcrResults(resultsCsv);
+  const supportingCsv = !opts.resultsCsv
+    ? path.join(invoicesDir, 'ocr', 'ocr-pending.csv') : undefined;
+  const rows = readOrganizeRows(resultsCsv, supportingCsv, opts.includeSupporting);
   const summary: OrganizeSummary = { scanned: rows.length, copied: 0, skipped: 0, failed: 0 };
 
   if (rows.length === 0) {
@@ -363,9 +385,10 @@ export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { results
   }
 
   for (const row of rows) {
-    if (!resultIsUsable(row)) {
+    const skipReason = organizeSkipReason(row, opts.includeSupporting);
+    if (skipReason) {
       summary.skipped++;
-      safeAudit(row, '', 'skipped', row.error || `status=${row.status}`);
+      safeAudit(row, '', 'skipped', skipReason);
       continue;
     }
 

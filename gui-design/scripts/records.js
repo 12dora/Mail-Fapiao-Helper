@@ -47,7 +47,7 @@ export function mergeSection(kind, payload) {
         getState()[storeKey] = incoming.slice();
         getState()[`${kind}Cursor`] = incoming.length;
     }
-    getState()[`${kind}Total`] = Number(payload.total ?? getState()[storeKey].length);
+    getState()[`${kind}Total`] = Number((kind === 'library' ? payload.documentTotal : undefined) ?? payload.total ?? getState()[storeKey].length);
     getState()[`${kind}Limit`] = Number(payload.limit || PAGE_SIZE) || PAGE_SIZE;
     return getState()[storeKey].length;
 }
@@ -91,7 +91,7 @@ export async function loadMoreRows(kind, button) {
         return;
     }
     const section = kind === 'inbox' ? summary?.inbox : summary?.library;
-    const total = Number(section?.total ?? prevTotal);
+    const total = Number((kind === 'library' ? section?.documentTotal : undefined) ?? section?.total ?? prevTotal);
     // The dataset moved under us (a run added/removed records): every
     // server-side slice shifted, so anything we keep would silently skip or
     // duplicate boundary rows. Restart from page one.
