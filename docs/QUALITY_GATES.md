@@ -17,7 +17,7 @@ This records the `be3-gates` adoption baseline; `eslint.config.mjs` is the execu
 
 | File | Current code lines | Limit |
 | --- | ---: | ---: |
-| src/electron/ipc/operationHandlers.ts | 1099 | 1100 |
+| src/electron/ipc/operationHandlers.ts | 1006 | 1006 |
 
 All other backend files are below 700 after excluding blanks and comments.
 
@@ -33,9 +33,9 @@ DI factories stay intact per the backend brief §B memory note. The wrapper dele
 | src/electron/pathPolicy.ts | createPathPolicy | 261 | 300 |
 | src/electron/resetService.ts | createResetService | 289 | 300 |
 | src/electron/ipc/mailHandlers.ts | registerMailHandlers | 241 | 250 |
-| src/electron/ipc/operationHandlers.ts | registerOperationHandlers | 882 | 900 |
+| src/electron/ipc/operationHandlers.ts | registerOperationHandlers | 840 | 840 |
 | src/electron/operationSupport.ts | createOperationSupport | 169 | 200 |
-| src/electron/summaryFacade.ts | createSummaryFacade | 149 | 150 |
+| src/electron/summaryFacade.ts | createSummaryFacade | 126 | 126 |
 | src/extract/attachment.ts | extract | 133 | 150 |
 | src/electron/summary.ts | summarizeLibrary | 133 | 150 |
 
@@ -197,3 +197,7 @@ All 80 per-file old → new entries follow (shared text appears once per affecte
 `npm run lint -- --max-warnings 0`, build, typecheck, CLI regression/integration/summary tests and Electron smoke/IPC/dedupe/detail tests passed. Gate fixtures verify named limits, file limits and IIFE/test behavior; report fixtures cover source scanning.
 
 No changes to `gui-design/`, `src/electron/ipc/detailHandlers.ts`, `src/electron/mailStatus.ts`, `src/cli/dedupe.ts`, `src/electron/summary.ts`, or `docs/archive`. Structural refactoring of these files and the DI factories is intentionally deferred. Browser E2E is outside the requested verification scope.
+
+## Dedupe review follow-up
+
+Recovery plan discovery and validation now use named steps in `dedupeJournal.ts`; CSV pruning, move replay, and journal finalization retain their existing order. `dedupeHandlers.ts` owns dedupe IPC and report parsing/projection and is registered explicitly in `main.ts`. The legacy operation registration and report exports delegate to it so existing tests require no `gui-design/` edits. `openableHandles.ts` owns the shared bounded handle registry, reverse lookup, eviction, and permission revalidation; summary unit coverage continues through the facade. The three affected file/function ceilings above only shrink.

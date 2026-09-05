@@ -13,9 +13,9 @@ const functionBaselines = {
   'src/electron/pathPolicy.ts': { createPathPolicy: 300 }, // path-policy DI closure (261)
   'src/electron/resetService.ts': { createResetService: 300 }, // reset DI closure (289)
   'src/electron/ipc/mailHandlers.ts': { registerMailHandlers: 250 }, // mail IPC DI closure (241)
-  'src/electron/ipc/operationHandlers.ts': { registerOperationHandlers: 900 }, // operation IPC DI closure (882)
+  'src/electron/ipc/operationHandlers.ts': { registerOperationHandlers: 840 }, // operation IPC DI closure (840)
   'src/electron/operationSupport.ts': { createOperationSupport: 200 }, // operation DI closure (169)
-  'src/electron/summaryFacade.ts': { createSummaryFacade: 150 }, // summary DI closure (149)
+  'src/electron/summaryFacade.ts': { createSummaryFacade: 126 }, // summary DI closure (126)
   // installLifecycle and createWindowSecurity are below 120 after skipping comments/blanks.
   'src/extract/attachment.ts': { extract: 150 }, // existing attachment traversal needs a separate structural refactor (133)
   'src/electron/summary.ts': { summarizeLibrary: 150 }, // newly landed summary is reserved for separate review (133)
@@ -113,8 +113,8 @@ export default [
     },
   },
   {
-    files: ['src/electron/ipc/operationHandlers.ts'], // 1099 code lines at adoption, rounded up to 50
-    rules: { 'max-lines': ['error', { max: 1100, skipBlankLines: true, skipComments: true }] },
+    files: ['src/electron/ipc/operationHandlers.ts'], // 1006 code lines after dedupe handler extraction
+    rules: { 'max-lines': ['error', { max: 1006, skipBlankLines: true, skipComments: true }] },
   },
   // Existing unused test helpers are retained because gui-design/ belongs to concurrent work.
   { files: ['gui-design/tests/_shared.mjs'], rules: { '@typescript-eslint/no-unused-vars': ['error', { varsIgnorePattern: '^readdir$', argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }] } },
