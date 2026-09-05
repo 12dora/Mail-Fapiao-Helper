@@ -355,10 +355,29 @@ node dist/index.js organize   # 按规则整理输出
 
 CLI 读取项目根目录的 `config.json`（参考 `config.example.json`）。
 
+### 代码质量与提交检查
+
+```bash
+npm run lint              # ESLint，所有规则均为错误
+npm run smells            # 文件大小、长函数和导出数量报告（不阻止提交）
+npm run smells -- --json  # JSON 报告
+MFH_INSTALL_GIT_HOOKS=1 npm run postinstall  # 自愿启用本地提交检查
+```
+
+安装依赖时也可设置 `MFH_INSTALL_GIT_HOOKS=1` 启用 simple-git-hooks；CI 中不会安装钩子。
+提交前依次执行 `npm run lint -- --max-warnings 0` 与 `npm run typecheck`。
+确需跳过本次本地检查时使用 `SKIP_SIMPLE_GIT_HOOKS=1 git commit ...`，CI 仍会检查。
+Windows PowerShell 可先用 `$env:MFH_INSTALL_GIT_HOOKS="1"` 设置环境变量，再运行 `npm run postinstall`。
+
+ESLint 覆盖后端、脚本、GUI 测试与将来的 React TS/TSX 源码；现有结构性超限记录在
+`eslint.config.mjs`，仅为指定文件或具名工厂保留有限额度，后续重构时应收紧。
+文件上限只计非空、非注释行；体积报告使用源文件的物理行数，方便定位。
+本次基线、死代码清理和完整文案对照见 [质量门禁记录](docs/QUALITY_GATES.md)。
+
 ### 跑测试
 
 ```bash
-npm test                  # build + typecheck + CLI 回归 + Electron 端到端
+npm test                  # lint + 工具检查 + build + typecheck + CLI 回归 + Electron 端到端
 npm run test:browser      # 渲染进程 E2E，需要 Playwright Chromium，单独跑
 ```
 
