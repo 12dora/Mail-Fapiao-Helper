@@ -41,6 +41,7 @@ export interface RunOpts {
 }
 
 export interface DedupeOpts {
+  by: 'container' | 'invoice-no';
   configPath: string;
   /** 默认 dry-run；只有显式 `--apply` 才动磁盘。 */
   apply: boolean;
@@ -204,11 +205,17 @@ export function parsePendingArgs(argv: string[]): PendingOpts | 'help' {
 }
 
 export function parseDedupeArgs(argv: string[]): DedupeOpts | 'help' {
-  const opts: DedupeOpts = { configPath: './config.json', apply: false, json: false };
+  const opts: DedupeOpts = { configPath: './config.json', apply: false, json: false, by: 'container' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
+    if (a === '--by') {
+      const by = requireValue(argv, ++i, a);
+      if (by !== 'container' && by !== 'invoice-no') throw new Error('--by must be container or invoice-no');
+      opts.by = by;
+      continue;
+    }
     if (a === '--apply') { opts.apply = true; continue; }
     if (a === '--json') { opts.json = true; continue; }
     throw new Error(`unknown option: ${a}`);

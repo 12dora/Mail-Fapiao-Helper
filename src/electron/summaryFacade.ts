@@ -145,11 +145,15 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
         ...summary.library,
         pendingCsv: summary.library.pendingCsv ? redactPath(summary.library.pendingCsv) : '',
         resultsCsv: summary.library.resultsCsv ? redactPath(summary.library.resultsCsv) : '',
-        rows: summary.library.rows.map((row) => ({
-          ...row,
-          filePath: row.filePath ? rendererOpenablePath(row.filePath) : '',
-          error: row.error ? sanitizeText(row.error, { maxLength: 200 }) : row.error,
-        })),
+        rows: summary.library.rows.map((row) => {
+          const fileHandle = row.filePath ? rendererOpenablePath(row.filePath) : '';
+          return {
+            ...row,
+            filePath: fileHandle,
+            fileHandle,
+            error: row.error ? sanitizeText(row.error, { maxLength: 200 }) : row.error,
+          };
+        }),
         ocr: sanitizeOcrSummary(summary.library.ocr),
       },
       inbox: {
