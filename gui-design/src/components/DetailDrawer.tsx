@@ -18,6 +18,8 @@ export interface DetailDrawerProps {
   /** 底部操作按钮，从左到右按重要性递增。 */
   actions?: ReactNode;
   width?: number;
+  /** 测试用的稳定钩子，落在抽屉正文的外层容器上。 */
+  testId?: string;
 }
 
 /** 行详情统一用右侧抽屉，宽 560，不用弹窗——弹窗会挡住用户刚点的那一行。 */
@@ -32,6 +34,7 @@ export function DetailDrawer({
   children,
   actions,
   width = 560,
+  testId,
 }: DetailDrawerProps): JSX.Element {
   return (
     <Drawer
@@ -41,24 +44,28 @@ export function DetailDrawer({
       destroyOnClose
       title={
         <div>
-          <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>{title}</div>
+          <div data-testid="drawer-title" style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.35 }}>
+            {title}
+          </div>
           {subtitle ? <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>{subtitle}</div> : null}
         </div>
       }
       footer={actions ? <Space style={{ width: '100%', justifyContent: 'flex-end' }}>{actions}</Space> : null}
       styles={{ body: { paddingTop: 16 } }}
     >
-      {loading ? (
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '48px 0' }}>
-          <Spin />
-        </div>
-      ) : (
-        <>
-          {before}
-          {items?.length ? <Descriptions column={1} size="small" colon={false} items={items} /> : null}
-          {children}
-        </>
-      )}
+      <div data-testid={testId}>
+        {loading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '48px 0' }}>
+            <Spin />
+          </div>
+        ) : (
+          <>
+            {before}
+            {items?.length ? <Descriptions column={1} size="small" colon={false} items={items} /> : null}
+            {children}
+          </>
+        )}
+      </div>
     </Drawer>
   );
 }

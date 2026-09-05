@@ -78,16 +78,20 @@ function Sidebar(): JSX.Element {
         items={NAV.map((item) => ({
           key: item.key,
           icon: item.icon,
+          // antd 的 Menu 不会把额外属性透传到 DOM，钩子只能挂在 label 里。
           label:
             item.key === 'pending' && pendingCount > 0 ? (
-              <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span
+                data-testid={`nav-${item.key}`}
+                style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}
+              >
                 <span>{item.label}</span>
                 <span className="mfh-num" style={{ opacity: 0.6 }}>
                   {pendingCount}
                 </span>
               </span>
             ) : (
-              item.label
+              <span data-testid={`nav-${item.key}`}>{item.label}</span>
             ),
         }))}
       />

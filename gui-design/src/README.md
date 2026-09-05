@@ -86,6 +86,35 @@ trusted-sender check.
   `notifyResult(result, { success, failure })`. No `window.alert` / `confirm`;
   use antd `Modal.confirm` for destructive actions.
 
+## 测试钩子（`data-testid`）
+
+Playwright 套件只认下面这些钩子，别的地方一律不加——**新增前先问：不加会不会
+逼测试去写 antd 的内部类名？** 会，才加。
+
+| 钩子 | 位置 | 谁在用 |
+| --- | --- | --- |
+| `nav-<route>` | `App.tsx` 侧栏菜单项的 label | 切页、断言五个路由 |
+| `page-title` | `PageHeader` 的 `<h1>` | 每个路由的标题 |
+| `op-banner` | `OpBanner` 的 Alert | 运行中提示条是否出现 |
+| `log-console` | `LogConsole` 根节点 | 日志行、空态文案 |
+| `run-card` / `log-card` | 首页运行区的左右两列 | 日志卡必须与运行卡等高 |
+| `table-<name>` | `DataTable` 外层容器（`testId` 属性） | 行数、筛选、分页 |
+| `table-<name>-search` | 同一张表的搜索框 | 搜索收窄结果 |
+| `drawer-<name>` | `DetailDrawer` 正文容器（`testId` 属性） | 抽屉内容 |
+| `drawer-title` | `DetailDrawer` 的标题行 | 抽屉标题 |
+| `dedupe-report` | 清理重复弹窗的报告区 | 试算结果 |
+| `config-error` | 设置页的配置损坏警示条 | `?fake=broken` |
+| `action-*` | 主操作按钮 | 点击入口 |
+| `toggle-dry-run` | 首页的「试运行」开关 | 预览分支 |
+
+现有的 `table-*`：`batch`、`history`、`inbox`、`library`、`pending`、`dedupe`、
+`duplicates`、`mail-documents`。现有的 `drawer-*`：`mail`、`invoice`、`pending`。
+现有的 `action-*`：`run-start`、`run-stop`、`export-csv`、`dedupe`、`dedupe-apply`、
+`library-ocr`、`pending-retry-all`、`settings-save`。
+
+其余选择器（分段筛选、分页、抽屉遮罩、toast）没有稳定的替代，统一收在
+`gui-design/tests/ui-helpers.mjs` 里，antd 升级时只改那一个文件。
+
 ## Theme tokens
 
 Set in `theme.ts`, consumed through `ConfigProvider`. Do not hardcode colors in

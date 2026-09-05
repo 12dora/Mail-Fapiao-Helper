@@ -164,6 +164,7 @@ const DOCUMENT_COLUMNS: ColumnsType<InvoiceRow> = [
 export function DocumentTable({ rows }: { rows: InvoiceRow[] }): JSX.Element {
   return (
     <DataTable<InvoiceRow>
+      testId="table-mail-documents"
       rows={rows}
       columns={DOCUMENT_COLUMNS}
       rowKey={(row) => row.filename}

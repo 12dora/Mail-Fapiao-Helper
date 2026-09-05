@@ -57,6 +57,60 @@ const COLUMNS: ColumnsType<DedupeGroup> = [
   },
 ];
 
+/** 试算 / 清理结果：一句话结论、冲突提醒、分组表、跳过清单。 */
+function ReportBody({ report }: { report: DedupeReport | null }): JSX.Element {
+  const groups = report?.groups ?? [];
+  const removable = report?.redundant ?? 0;
+  const skipped = report?.skipped ?? [];
+  return (
+    <div data-testid="dedupe-report" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ fontSize: 12, color: 'var(--mfh-text-dim)' }}>
+        {groups.length > 0
+          ? `发现 ${groups.length} 组同号发票，可移出 ${removable} 份。保留的一份留在归档目录。`
+          : '没有同号重复的发票。'}
+      </div>
+      {report && report.conflicts > 0 && (
+        <Alert type="warning" showIcon message={`${report.conflicts} 组金额或销售方不一致，这次不会清理。`} />
+      )}
+      {groups.length > 0 && (
+        <DataTable<DedupeGroup>
+          rows={groups}
+          columns={COLUMNS}
+          rowKey={(group) => group.invoiceNo}
+          testId="table-dedupe"
+          searchKeys={[]}
+          pagination={groups.length > 20}
+          defaultPageSize={20}
+          scrollX={false}
+          emptyText="没有同号重复的发票"
+        />
+      )}
+      {skipped.length > 0 && (
+        <Collapse
+          size="small"
+          ghost
+          items={[
+            {
+              key: 'skipped',
+              label: `跳过 ${skipped.length} 份`,
+              children: (
+                <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12 }}>
+                  {skipped.map((item) => (
+                    <li key={item.filename}>
+                      <span style={{ fontFamily: 'var(--mfh-mono)' }}>{item.filename}</span>
+                      <span style={{ color: 'var(--mfh-text-dim)', marginInlineStart: 8 }}>{item.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              ),
+            },
+          ]}
+        />
+      )}
+    </div>
+  );
+}
+
 export function DedupeModal({ open, onClose }: DedupeModalProps): JSX.Element {
   const { busy } = useBusy();
   const [report, setReport] = useState<DedupeReport | null>(null);
@@ -97,9 +151,7 @@ export function DedupeModal({ open, onClose }: DedupeModalProps): JSX.Element {
     }
   }
 
-  const groups = report?.groups ?? [];
   const removable = report?.redundant ?? 0;
-  const skipped = report?.skipped ?? [];
 
   return (
     <Modal
@@ -116,6 +168,7 @@ export function DedupeModal({ open, onClose }: DedupeModalProps): JSX.Element {
         <Button
           key="apply"
           type="primary"
+          data-testid="action-dedupe-apply"
           loading={applying}
           disabled={busy || scanning || removable === 0}
           onClick={() => void apply()}
@@ -129,54 +182,7 @@ export function DedupeModal({ open, onClose }: DedupeModalProps): JSX.Element {
           <Spin />
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ fontSize: 12, color: 'var(--mfh-text-dim)' }}>
-            {groups.length > 0
-              ? `发现 ${groups.length} 组同号发票，可移出 ${removable} 份。保留的一份留在归档目录。`
-              : '没有同号重复的发票。'}
-          </div>
-          {report && report.conflicts > 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              message={`${report.conflicts} 组金额或销售方不一致，这次不会清理。`}
-            />
-          )}
-          {groups.length > 0 && (
-            <DataTable<DedupeGroup>
-              rows={groups}
-              columns={COLUMNS}
-              rowKey={(group) => group.invoiceNo}
-              searchKeys={[]}
-              pagination={groups.length > 20}
-              defaultPageSize={20}
-              scrollX={false}
-              emptyText="没有同号重复的发票"
-            />
-          )}
-          {skipped.length > 0 && (
-            <Collapse
-              size="small"
-              ghost
-              items={[
-                {
-                  key: 'skipped',
-                  label: `跳过 ${skipped.length} 份`,
-                  children: (
-                    <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12 }}>
-                      {skipped.map((item) => (
-                        <li key={item.filename}>
-                          <span style={{ fontFamily: 'var(--mfh-mono)' }}>{item.filename}</span>
-                          <span style={{ color: 'var(--mfh-text-dim)', marginInlineStart: 8 }}>{item.reason}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ),
-                },
-              ]}
-            />
-          )}
-        </div>
+        <ReportBody report={report} />
       )}
     </Modal>
   );

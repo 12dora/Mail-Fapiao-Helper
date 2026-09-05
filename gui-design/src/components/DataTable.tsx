@@ -40,6 +40,8 @@ export interface DataTableProps<T> {
   pagination?: boolean;
   /** 表格最小宽度：数字表示窄于它才横向滚动，false 表示永不滚（抽屉、弹窗里用）。 */
   scrollX?: number | 'max-content' | false;
+  /** 测试用的稳定钩子：外层拿 `data-testid`，搜索框拿 `<testId>-search`。 */
+  testId?: string;
 }
 
 function columnKeys<T>(columns: ColumnsType<T>): (keyof T)[] {
@@ -101,6 +103,7 @@ function useControlled(
 }
 
 interface ToolbarProps {
+  testId?: string;
   searchable: boolean;
   query: string;
   onQuery: (next: string) => void;
@@ -112,6 +115,7 @@ interface ToolbarProps {
 }
 
 function TableToolbar({
+  testId,
   searchable,
   query,
   onQuery,
@@ -127,6 +131,7 @@ function TableToolbar({
       {searchable ? (
         <Input.Search
           allowClear
+          data-testid={testId ? `${testId}-search` : undefined}
           size="small"
           style={{ width: 240 }}
           placeholder={placeholder}
@@ -169,6 +174,7 @@ export function DataTable<T extends object>({
   defaultPageSize = 50,
   pagination = true,
   scrollX = 'max-content',
+  testId,
 }: DataTableProps<T>): JSX.Element {
   const [query, setQuery] = useControlled(queryProp, '', onQueryChange);
   const [requestedKey, setFilterKey] = useControlled(filterKeyProp, defaultFilterKey, onFilterChange);
@@ -184,8 +190,9 @@ export function DataTable<T extends object>({
   );
 
   return (
-    <div ref={wrapper}>
+    <div ref={wrapper} data-testid={testId}>
       <TableToolbar
+        testId={testId}
         searchable={keys.length > 0}
         query={query}
         onQuery={setQuery}

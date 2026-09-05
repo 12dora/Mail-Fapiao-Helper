@@ -51,7 +51,7 @@ export function LogConsole({ lines, placeholder = '运行日志会显示在这�
   }
 
   return (
-    <div className="mfh-log">
+    <div className="mfh-log" data-testid="log-console">
       <div className="mfh-log__body" ref={body} role="log" aria-live="polite">
         {lines.length === 0 ? (
           <div className="mfh-log__empty">{placeholder}</div>

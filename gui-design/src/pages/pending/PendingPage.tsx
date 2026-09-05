@@ -119,7 +119,12 @@ function HeaderActions({ total, actions, loading, reload }: {
         cancelText="取消"
         onConfirm={() => void actions.retryAll()}
       >
-        <Button type="primary" disabled={actions.disabled || total === 0} loading={actions.working}>
+        <Button
+          type="primary"
+          data-testid="action-pending-retry-all"
+          disabled={actions.disabled || total === 0}
+          loading={actions.working}
+        >
           全部重试
         </Button>
       </Popconfirm>
@@ -174,6 +179,7 @@ export function PendingPage(): JSX.Element {
               onOpen={(row) => setActive(row)}
               defaultPageSize={20}
               emptyText="没有符合条件的邮件"
+              testId="table-pending"
             />
           </Card>
         )}

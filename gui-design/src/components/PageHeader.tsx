@@ -13,7 +13,9 @@ export function PageHeader({ title, subtitle, actions }: PageHeaderProps): JSX.E
   return (
     <header className="mfh-pageheader">
       <div>
-        <h1 className="mfh-pageheader__title">{title}</h1>
+        <h1 className="mfh-pageheader__title" data-testid="page-title">
+          {title}
+        </h1>
         {subtitle ? <p className="mfh-pageheader__sub">{subtitle}</p> : null}
       </div>
       {actions ? <div className="mfh-pageheader__actions">{actions}</div> : null}

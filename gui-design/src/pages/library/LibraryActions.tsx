@@ -75,6 +75,7 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
     <Space>
       <Button
         size="small"
+        data-testid="action-export-csv"
         disabled={visible.length === 0}
         loading={action === 'export'}
         onClick={() => void exportCsv()}
@@ -85,7 +86,7 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
         打开归档目录
       </Button>
       {bridge.supports('dedupe') && (
-        <Button size="small" disabled={busy} onClick={onDedupe}>
+        <Button size="small" data-testid="action-dedupe" disabled={busy} onClick={onDedupe}>
           清理重复
         </Button>
       )}
@@ -100,7 +101,14 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
           整理文件
         </Button>
       </Popconfirm>
-      <Button size="small" type="primary" disabled={busy} loading={action === 'ocr'} onClick={() => void run('ocr')}>
+      <Button
+        size="small"
+        type="primary"
+        data-testid="action-library-ocr"
+        disabled={busy}
+        loading={action === 'ocr'}
+        onClick={() => void run('ocr')}
+      >
         开始识别
       </Button>
     </Space>

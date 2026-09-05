@@ -83,10 +83,10 @@ export function DashboardPage(): JSX.Element {
         <StatsRow summary={summary} loading={firstLoad} />
 
         <div className="mfh-run-grid">
-          <div className="mfh-fill">
+          <div className="mfh-fill" data-testid="run-card">
             <RunCard run={run} />
           </div>
-          <div className="mfh-fill mfh-fill--float">
+          <div className="mfh-fill mfh-fill--float" data-testid="log-card">
             <Card title="运行日志" size="small">
               <LogConsole lines={run.logLines} placeholder="点击「开始处理」后，这里显示每一步的结果" />
             </Card>
