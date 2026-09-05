@@ -4,8 +4,7 @@
  * 会写盘的三个动作（识别、整理、清理重复）在有任务运行时一律置灰——长任务在主
  * 进程是互斥的，抢跑只会拿到一条失败回执。
  *
- * 「导出 CSV」是复制到剪贴板：桥接层没有「另存为」通道，桌面端要真正落盘得先加
- * 一个保存对话框的 IPC。
+ * 「导出 CSV」走系统保存框落盘；主进程没有这个通道时退回复制到剪贴板。
  */
 import { FolderOpenOutlined } from '@ant-design/icons';
 import { Button, Popconfirm, Space } from 'antd';
@@ -23,7 +22,7 @@ export interface LibraryActionsProps {
 
 export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.Element {
   const { busy } = useBusy();
-  const [action, setAction] = useState<'' | 'ocr' | 'organize'>('');
+  const [action, setAction] = useState<'' | 'ocr' | 'organize' | 'export'>('');
 
   async function run(kind: 'ocr' | 'organize'): Promise<void> {
     setAction(kind);
@@ -42,11 +41,28 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
     }
   }
 
-  function exportCsv(): void {
-    void bridge.copyText(rowsToCsv(visible)).then((result) => {
+  function copyCsv(csv: string): void {
+    void bridge.copyText(csv).then((result) => {
       if (result.ok) notify.success('已复制 CSV', `共 ${visible.length} 行，粘贴到表格软件即可。`);
       else notifyResult(result, { success: '已复制 CSV', failure: '复制失败' });
     });
+  }
+
+  async function exportCsv(): Promise<void> {
+    const csv = rowsToCsv(visible);
+    if (!bridge.supports('exportCsv')) {
+      copyCsv(csv);
+      return;
+    }
+    setAction('export');
+    try {
+      const result = await bridge.exportCsv({ filename: `发票清单-${new Date().toISOString().slice(0, 10)}.csv`, csv });
+      if (result.canceled) return;
+      if (result.ok) notify.success('已导出', `共 ${visible.length} 行，已存到 ${result.path ?? '所选位置'}。`);
+      else notifyResult(result, { success: '已导出', failure: '导出未完成' });
+    } finally {
+      setAction('');
+    }
   }
 
   function openArchive(): void {
@@ -57,7 +73,12 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
 
   return (
     <Space>
-      <Button size="small" disabled={visible.length === 0} onClick={exportCsv}>
+      <Button
+        size="small"
+        disabled={visible.length === 0}
+        loading={action === 'export'}
+        onClick={() => void exportCsv()}
+      >
         导出 CSV
       </Button>
       <Button size="small" icon={<FolderOpenOutlined />} onClick={openArchive}>

@@ -20,7 +20,7 @@ import { useSettingsForm, type SettingsFormState } from './useSettingsForm.js';
 const TAB_LABELS: Record<TabKey, string> = { mail: '邮箱', storage: '保存', ocr: '识别', about: '关于' };
 
 function tabItems(state: SettingsFormState): { key: string; label: string; children: JSX.Element }[] {
-  const { form, payload, cleared, onClear, locked } = state;
+  const { form, payload, cleared, onClear, locked, onValuesChange } = state;
   return [
     {
       key: 'mail',
@@ -29,7 +29,11 @@ function tabItems(state: SettingsFormState): { key: string; label: string; child
         <MailTab form={form} secrets={payload?.secrets} cleared={cleared} onClear={onClear} disabled={locked} />
       ),
     },
-    { key: 'storage', label: TAB_LABELS.storage, children: <StorageTab form={form} disabled={locked} /> },
+    {
+      key: 'storage',
+      label: TAB_LABELS.storage,
+      children: <StorageTab form={form} disabled={locked} onChanged={onValuesChange} />,
+    },
     {
       key: 'ocr',
       label: TAB_LABELS.ocr,

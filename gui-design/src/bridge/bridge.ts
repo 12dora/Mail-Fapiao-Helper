@@ -7,7 +7,8 @@
  *    所以订阅必须集中：本模块在启动时各注册一次，再向订阅者扇出。
  *    组件用 `subscribe(name, cb)` 拿到取消函数即可。
  */
-import { createFakeBridge } from './fakeBridge.js';
+import { createFakeBridge } from './fake/index.js';
+import type { FakeVariant } from './fake/data.js';
 import type {
   AppInfo,
   AppSummary,
@@ -20,6 +21,9 @@ import type {
   DedupePayload,
   DedupeResult,
   DeveloperResetResult,
+  ExportCsvPayload,
+  ExportCsvResult,
+  ExternalUrl,
   InvoiceDetailResult,
   ListMailboxesResult,
   MailDetailResult,
@@ -32,6 +36,8 @@ import type {
   OrganizePayload,
   OrganizeResult,
   PendingIgnoreResult,
+  PickDirectoryPayload,
+  PickDirectoryResult,
   PendingManualArchiveResult,
   RunOcrPayload,
   RunPipelinePayload,
@@ -50,18 +56,24 @@ const UNSUPPORTED: BaseResult = {
   detail: '升级到包含该功能的版本后重试。',
 };
 
-function useFake(): boolean {
-  if (typeof window === 'undefined') return true;
-  if (window.location.search.includes('fake=1')) return true;
-  return !window.mfhBridge;
+/**
+ * 假数据的变体：`?fake=1` 是正常一屏，`?fake=empty` 是空状态，`?fake=broken` 是
+ * 配置损坏。不带参数但也没有 `window.mfhBridge`（纯浏览器打开）时用正常那一份。
+ */
+function detectFakeVariant(): FakeVariant | null {
+  if (typeof window === 'undefined') return 'demo';
+  const value = new URLSearchParams(window.location.search).get('fake');
+  if (value === 'empty' || value === 'broken') return value;
+  if (value) return 'demo';
+  return window.mfhBridge ? null : 'demo';
 }
 
-const fakeMode = useFake();
-const raw: MfhBridge = fakeMode ? createFakeBridge() : (window.mfhBridge as MfhBridge);
+const fakeVariant = detectFakeVariant();
+const raw: MfhBridge = fakeVariant ? createFakeBridge(fakeVariant) : (window.mfhBridge as MfhBridge);
 
-/** 当前跑在内存假数据上（浏览器预览、截图脚本、`?fake=1`）。 */
+/** 当前跑在内存假数据上（浏览器预览、截图脚本、`?fake=…`）。 */
 export function isFakeBridge(): boolean {
-  return fakeMode;
+  return fakeVariant !== null;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,9 +180,17 @@ export const bridge = {
     optional<InvoiceDetailResult>(raw.invoiceDetail, { filename }),
   dedupe: (payload: DedupePayload): Promise<DedupeResult> => optional<DedupeResult>(raw.dedupe, payload),
 
+  /** 用系统浏览器打开项目地址；地址由主进程按白名单核对。 */
+  openExternal: (url: ExternalUrl): Promise<BaseResult> => optional<BaseResult>(raw.openExternal, { url }),
+  pickDirectory: (payload: PickDirectoryPayload = {}): Promise<PickDirectoryResult> =>
+    optional<PickDirectoryResult>(raw.pickDirectory, payload),
+  exportCsv: (payload: ExportCsvPayload): Promise<ExportCsvResult> =>
+    optional<ExportCsvResult>(raw.exportCsv, payload),
+
   /** 新通道是否可用，用来决定按钮显不显示。 */
-  supports: (name: 'mailDetail' | 'openMail' | 'invoiceDetail' | 'dedupe'): boolean =>
-    typeof raw[name] === 'function',
+  supports: (
+    name: 'mailDetail' | 'openMail' | 'invoiceDetail' | 'dedupe' | 'openExternal' | 'pickDirectory' | 'exportCsv',
+  ): boolean => typeof raw[name] === 'function',
 };
 
 export type Bridge = typeof bridge;

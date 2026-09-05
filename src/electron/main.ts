@@ -14,6 +14,7 @@ import { registerDedupeHandlers } from './ipc/dedupeHandlers.js';
 import { registerOperationHandlers } from './ipc/operationHandlers.js';
 import { registerMailHandlers } from './ipc/mailHandlers.js';
 import { registerResetHandlers } from './ipc/resetHandlers.js';
+import { registerShellHandlers } from './ipc/shellHandlers.js';
 import { installLifecycle } from './lifecycle.js';
 import { createOpenPolicy } from './openPolicy.js';
 import { createOperationSupport } from './operationSupport.js';
@@ -278,6 +279,12 @@ const resetService = createResetService({
   ),
   ensureBaseDirectories,
   appSummary: summaryFacade.appSummary,
+});
+
+registerShellHandlers({
+  handleTrusted: windowSecurity.handleTrusted,
+  getMainWindow: windowSecurity.getMainWindow,
+  assertTrustedSender: windowSecurity.assertTrustedSender,
 });
 
 registerResetHandlers({

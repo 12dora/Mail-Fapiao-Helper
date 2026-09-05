@@ -19,6 +19,12 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   // 按归档文件名读取发票详情：{ filename }
   invoiceDetail: (payload) => ipcRenderer.invoke('mfh:invoice-detail', payload),
   openPath: (payload) => ipcRenderer.invoke('mfh:open-path', payload),
+  // 用系统浏览器打开白名单内的项目地址：{ url }
+  openExternal: (payload) => ipcRenderer.invoke('mfh:open-external', payload),
+  // 选择一个目录，返回原始绝对路径：{ title?, defaultPath? }
+  pickDirectory: (payload) => ipcRenderer.invoke('mfh:pick-directory', payload),
+  // 把渲染层拼好的 CSV 另存为文件：{ filename, csv }
+  exportCsv: (payload) => ipcRenderer.invoke('mfh:export-csv', payload),
   copyText: (payload) => ipcRenderer.invoke('mfh:copy-text', payload),
   testMailConnection: (payload) => ipcRenderer.invoke('mfh:test-connection', payload),
   listMailboxes: (payload) => ipcRenderer.invoke('mfh:list-mailboxes', payload),
