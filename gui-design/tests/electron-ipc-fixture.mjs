@@ -21,7 +21,9 @@ import { join } from 'node:path';
 import { assertFreshBuild, fail, runSuite, useTempDir, withCleanup } from './_shared.mjs';
 import {
   clickChip,
+  closeDrawer,
   cspViolations,
+  descriptionValue,
   dismissToasts,
   firstAppWindow,
   gotoRoute,
@@ -29,12 +31,16 @@ import {
   launchElectronApp,
   openRow,
   pageTitle,
+  probeCspEnforcement,
   readUiProbe,
   resetUiProbe,
   rowCount,
   seedDataDir,
   tableRows,
   tid,
+  waitForModalClosed,
+  waitForProbeToast,
+  waitForRows,
 } from './ui-helpers.mjs';
 
 /* A fixed local instant. Every date the UI derives from "now" is recomputed
@@ -216,9 +222,7 @@ async function checkMutex(page) {
 
 async function checkLibrary(page) {
   await gotoRoute(page, 'library');
-  await page
-    .waitForFunction(() => document.querySelectorAll('[data-testid="table-library"] .ant-table-row').length > 0, undefined, { timeout: 15000 })
-    .catch(() => fail('发票库没有渲染出归档记录'));
+  await waitForRows(page, 'table-library', (count) => count > 0, '发票库');
   checks++;
 
   const rows = (await tableRows(page, 'table-library').allInnerTexts()).join('\n');
@@ -245,10 +249,19 @@ async function checkLibrary(page) {
     check(`发票详情抽屉缺少「${needle}」`, drawer.includes(needle), drawer.slice(0, 200));
   }
   check('发票详情没有带出识别到的销售方', drawer.includes('国家电网有限公司'), drawer.slice(0, 200));
-  check('发票详情没有把识别引擎翻成中文', /本机引擎|文本解析|图像识别|—/.test(drawer), drawer.slice(0, 400));
-  check('发票详情里的文件名不对', drawer.includes('0001.pdf'), drawer.slice(0, 400));
-  await page.locator('.ant-drawer-close').first().click();
-  await page.locator('.ant-drawer-content').first().waitFor({ state: 'hidden', timeout: 8000 });
+  /* 识别引擎那一行必须自己是中文。原来只在整个抽屉的文字里找一个破折号，
+     随便哪个空字段都能让这条断言通过。 */
+  const seller = await descriptionValue(page, 'drawer-invoice', '销售方');
+  check('发票详情缺少销售方那一行', seller === '国家电网有限公司', String(seller));
+  const engine = await descriptionValue(page, 'drawer-invoice', '识别引擎');
+  check(
+    '识别引擎没有翻成中文',
+    engine !== null && /^(本机引擎|腾讯云|模拟引擎|—)$/.test(engine),
+    String(engine),
+  );
+  const filename = await descriptionValue(page, 'drawer-invoice', '文件名');
+  check('发票详情里的文件名不对', filename === '0001.pdf', String(filename));
+  await closeDrawer(page);
 }
 
 async function checkDedupe(page) {
@@ -265,7 +278,7 @@ async function checkDedupe(page) {
 
   await resetUiProbe(page);
   await tid(page, 'action-dedupe-apply').click();
-  await page.locator('.ant-modal-content').first().waitFor({ state: 'hidden', timeout: 30000 });
+  await waitForModalClosed(page, 30000);
   const probe = await readUiProbe(page);
   check('确认清理后没有给出回执', probe.toasts.length > 0, JSON.stringify(probe.toasts));
 
@@ -290,9 +303,7 @@ async function checkDedupe(page) {
 
 async function checkPending(page) {
   await gotoRoute(page, 'pending');
-  await page
-    .waitForFunction(() => document.querySelectorAll('[data-testid="table-pending"] .ant-table-row').length > 0, undefined, { timeout: 15000 })
-    .catch(() => fail('待确认队列没有渲染出行'));
+  await waitForRows(page, 'table-pending', (count) => count > 0, '待确认队列');
   checks++;
   const rows = (await tableRows(page, 'table-pending').allInnerTexts()).join('\n');
   check('待确认队列没有显示那封链接失效的邮件', rows.includes('发票下载链接已过期'), rows.slice(0, 200));
@@ -300,7 +311,7 @@ async function checkPending(page) {
   // 行尾的「打开邮件」：无论落到哪条分支，都必须给用户一个明确回执。
   await resetUiProbe(page);
   await page.getByRole('button', { name: '打开邮件' }).first().click();
-  await page.waitForTimeout(1200);
+  await waitForProbeToast(page);
   const probe = await readUiProbe(page);
   check('「打开邮件」没有给出任何回执', probe.toasts.length > 0, JSON.stringify(probe.toasts));
 
@@ -381,8 +392,7 @@ async function checkInboxDeepLink(page) {
   check('深链打开的抽屉里没有邮件信息', drawer.includes('发件人'), drawer.slice(0, 160));
   check('深链后页面标题应还是邮件记录', (await pageTitle(page)) === '邮件记录');
 
-  await page.locator('.ant-drawer-close').first().click();
-  await page.locator('.ant-drawer-content').first().waitFor({ state: 'hidden', timeout: 8000 });
+  await closeDrawer(page);
   // 关掉抽屉后 hash 要退回列表，否则同一封邮件再也点不开第二次。
   check('关掉深链抽屉后 hash 没有退回列表', page.url().endsWith('#/inbox'), page.url());
 }
@@ -711,6 +721,23 @@ async function main() {
     const violations = await cspViolations(page);
     check('渲染层触发了 CSP 违规', violations.length === 0, violations.join('; '));
     check('渲染层输出了控制台错误', problems.length === 0, problems.join('; '));
+
+    /* 最后再故意去踩策略：上面那两条在 CSP 被整个删掉时同样成立，自己证明不了
+       策略还在。这里塞一段内联脚本和一张外站图片，两样都必须跑不起来。
+       放在最末尾，是因为它会往 problems / __mfhCsp 里写东西。 */
+    const csp = await probeCspEnforcement(page, 'https://example.invalid/pixel.png');
+    check('打包后的窗口没有挡住内联脚本', csp.inlineRan === false);
+    check('打包后的窗口没有挡住外站图片', csp.imageLoaded === false);
+    check(
+      'CSP 没有对内联脚本报违规',
+      csp.violations.some((entry) => entry.startsWith('script-src')),
+      csp.violations.join('; '),
+    );
+    check(
+      'CSP 没有对外站图片报违规',
+      csp.violations.some((entry) => entry.startsWith('img-src')),
+      csp.violations.join('; '),
+    );
 
     console.log(`Electron IPC fixture 断言数：${checks}`);
   });

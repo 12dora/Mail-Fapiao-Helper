@@ -214,11 +214,24 @@ export async function searchTable(page, table, text) {
   return rowCount(page, table);
 }
 
-/** Segmented chips render as antd labels; there is no per-option DOM hook. */
+/**
+ * Segmented chips render as antd labels; there is no per-option DOM hook.
+ * Waits for the chip to actually read as selected rather than for a fixed
+ * delay — the table re-renders on its own schedule.
+ */
 export async function clickChip(page, table, label) {
   const chip = page.locator(`[data-testid="${table}"] .ant-segmented-item-label`, { hasText: label });
   await chip.first().click();
-  await page.waitForTimeout(120);
+  await page
+    .waitForFunction(
+      ({ sel, want }) =>
+        document
+          .querySelector(`[data-testid="${sel}"] .ant-segmented-item-selected .ant-segmented-item-label`)
+          ?.textContent?.trim() === want,
+      { sel: table, want: label },
+      { timeout: 8000 },
+    )
+    .catch(() => fail(`${table} 的「${label}」筛选没有选中`));
 }
 
 export async function chipLabels(page, table) {
@@ -241,7 +254,16 @@ export async function pageSizeOptions(page, table) {
 export async function setPageSize(page, table, size) {
   await openPageSizeMenu(page, table);
   await page.locator('.ant-select-item-option-content', { hasText: `${size} 条/页` }).first().click();
-  await page.waitForTimeout(200);
+  await page
+    .waitForFunction(
+      ({ sel, want }) =>
+        document
+          .querySelector(`[data-testid="${sel}"] .ant-pagination-options .ant-select-selection-item`)
+          ?.textContent?.trim() === want,
+      { sel: table, want: `${size} 条/页` },
+      { timeout: 8000 },
+    )
+    .catch(() => fail(`${table} 没有切到每页 ${size} 条`));
 }
 
 /** antd 分页的页码按钮与当前页；没有 data-testid 可用。 */
@@ -288,6 +310,99 @@ export async function dismissToasts(page) {
     document.querySelectorAll('.ant-notification-notice-close').forEach((btn) => btn.click());
     document.querySelectorAll('.ant-message-notice, .ant-notification-notice').forEach((el) => el.remove());
   });
+}
+
+/** antd Modal body; dedupe is the only modal in the app. */
+export async function waitForModalClosed(page, timeout = 15000) {
+  await page.locator('.ant-modal-content').first().waitFor({ state: 'hidden', timeout });
+}
+
+/** The filled part of an antd Progress; its width is the only readable percent. */
+export async function progressWidth(page) {
+  return page.locator('.ant-progress-bg').first().getAttribute('style');
+}
+
+/**
+ * One row of an antd Descriptions list, by its label.
+ *
+ * Asserting on the whole drawer text lets an unrelated cell satisfy a check for
+ * a specific field — an em dash anywhere would "prove" the engine was
+ * translated. Returns null when the label is not there at all.
+ */
+export async function descriptionValue(page, testid, label) {
+  return page.evaluate(
+    ({ sel, want }) => {
+      const root = document.querySelector(`[data-testid="${sel}"]`);
+      for (const item of root?.querySelectorAll('.ant-descriptions-item') ?? []) {
+        if (item.querySelector('.ant-descriptions-item-label')?.textContent?.trim() === want) {
+          return item.querySelector('.ant-descriptions-item-content')?.textContent?.trim() ?? '';
+        }
+      }
+      return null;
+    },
+    { sel: testid, want: label },
+  );
+}
+
+/** Waits until the UI probe has seen at least one toast (they can auto-dismiss). */
+export async function waitForProbeToast(page, timeout = 15000) {
+  await page
+    .waitForFunction(() => (window.__mfhUi?.toasts?.length ?? 0) > 0, undefined, { timeout })
+    .catch(() => fail('没有等到任何提示'));
+}
+
+/**
+ * The last call the preview bridge recorded for a channel.
+ *
+ * `?fake=…` has no system save dialog, so "did export actually happen?" can
+ * only be answered by what the renderer handed the bridge.
+ */
+export async function waitForPreviewCall(page, name, timeout = 15000) {
+  await page
+    .waitForFunction((key) => Boolean(window.__mfhPreviewCalls?.[key]), name, { timeout })
+    .catch(() => fail(`预览桥接没有收到 ${name} 调用`));
+  return page.evaluate((key) => window.__mfhPreviewCalls[key], name);
+}
+
+export async function forgetPreviewCalls(page) {
+  await page.evaluate(() => {
+    window.__mfhPreviewCalls = {};
+  });
+}
+
+/**
+ * Proves the CSP is doing something: asserting "zero violations" also passes on
+ * a page with no CSP at all. Injects the two things the policy must refuse and
+ * reports what the page observed.
+ */
+export async function probeCspEnforcement(page, remoteUrl) {
+  return page.evaluate(async (url) => {
+    const seen = [];
+    const onViolation = (event) => seen.push(`${event.violatedDirective} <- ${event.blockedURI}`);
+    document.addEventListener('securitypolicyviolation', onViolation);
+    try {
+      window.__mfhInlineScriptRan = false;
+      const script = document.createElement('script');
+      script.textContent = 'window.__mfhInlineScriptRan = true;';
+      document.body.appendChild(script);
+      script.remove();
+
+      const image = document.createElement('img');
+      const loaded = await new Promise((resolve) => {
+        image.addEventListener('load', () => resolve(true));
+        image.addEventListener('error', () => resolve(false));
+        image.src = url;
+        document.body.appendChild(image);
+        setTimeout(() => resolve(false), 3000);
+      });
+      image.remove();
+      // Let the violation events land before reading them back.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return { inlineRan: window.__mfhInlineScriptRan === true, imageLoaded: loaded, violations: seen };
+    } finally {
+      document.removeEventListener('securitypolicyviolation', onViolation);
+    }
+  }, remoteUrl);
 }
 
 export async function elementHeight(page, testid) {

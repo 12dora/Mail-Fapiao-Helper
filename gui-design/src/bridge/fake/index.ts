@@ -53,6 +53,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * 预览模式下把最后一次调用挂到 window 上。
+ *
+ * 浏览器里没有系统保存框，「导出 CSV 究竟做了什么」只能看渲染层交给桥接的东西。
+ * 只在假桥接里存在——真机上跑的是 preload 注入的那一份，不会有这个对象。
+ */
+function recordPreviewCall(name: string, payload: unknown): void {
+  if (typeof window === 'undefined') return;
+  const holder = window as unknown as { __mfhPreviewCalls?: Record<string, unknown> };
+  holder.__mfhPreviewCalls = { ...(holder.__mfhPreviewCalls ?? {}), [name]: payload };
+}
+
 // ---------------------------------------------------------------------------
 // 事件中心
 // ---------------------------------------------------------------------------
@@ -391,8 +403,9 @@ function plainMethods(variant: FakeVariant): PlainMethods {
       await sleep(120);
       return { ok: false, canceled: true, code: 'preview_only', message: '预览模式不会打开选择框。' };
     },
-    async exportCsv(): Promise<ExportCsvResult> {
+    async exportCsv(payload): Promise<ExportCsvResult> {
       await sleep(160);
+      recordPreviewCall('exportCsv', { filename: payload.filename, csv: payload.csv });
       return { ok: false, canceled: true, code: 'preview_only', message: '预览模式不会打开保存框。' };
     },
 

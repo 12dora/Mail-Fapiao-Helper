@@ -27,6 +27,7 @@ import {
   closeServer,
   cspViolations,
   currentPage,
+  forgetPreviewCalls,
   dismissToasts,
   elementHeight,
   expectNoHorizontalOverflow,
@@ -39,6 +40,8 @@ import {
   openRow,
   pageSizeOptions,
   pageTitle,
+  probeCspEnforcement,
+  progressWidth,
   rowCount,
   searchTable,
   setPageSize,
@@ -46,6 +49,8 @@ import {
   tableRows,
   tid,
   uiRoot,
+  waitForModalClosed,
+  waitForPreviewCall,
   waitForToast,
   watchPage,
 } from './ui-helpers.mjs';
@@ -157,7 +162,7 @@ async function checkRunFlow(context, baseUrl) {
   await tid(page, 'op-banner').waitFor({ state: 'hidden', timeout: 30000 });
   checks += 2;
 
-  const percent = await page.locator('.ant-progress-bg').first().getAttribute('style');
+  const percent = await progressWidth(page);
   check('运行结束后进度条不是 100%', /width:\s*100%/.test(percent ?? ''), percent ?? '');
 
   const batch = await rowCount(page, 'table-batch');
@@ -197,7 +202,7 @@ async function checkRunSurvivesNavigation(context, baseUrl) {
   }
   const batch = await rowCount(page, 'table-batch');
   check('切页回来后「本次结果」被清空了', batch > 0, `实际 ${batch} 行`);
-  const percent = await page.locator('.ant-progress-bg').first().getAttribute('style');
+  const percent = await progressWidth(page);
   check('切页回来后进度条归零了', /width:\s*100%/.test(percent ?? ''), percent ?? '');
 
   await dismissToasts(page);
@@ -405,14 +410,30 @@ async function checkLibraryActions(context, baseUrl) {
 
   await tid(page, 'action-dedupe-apply').click();
   await waitForToast(page, '已隔离');
-  await page.locator('.ant-modal-content').first().waitFor({ state: 'hidden', timeout: 15000 });
+  await waitForModalClosed(page);
   checks += 2;
   await dismissToasts(page);
 
-  // 预览模式没有系统保存框：导出 CSV 必须给出回执，不能静默无事发生。
+  /* 预览模式没有系统保存框，所以只能看渲染层交给桥接的是什么：一个空实现
+     也能让「点了按钮」这件事通过。导出的必须正好是当前筛出来的那些行。 */
+  await clickChip(page, 'table-library', '全部');
+  const narrowed = await searchTable(page, 'table-library', '滴滴');
+  const visible = Number((await tid(page, 'table-library').innerText()).match(/共 (\d+) 条/)?.[1] ?? -1);
+  check('拿不到当前筛选出来的总行数', visible > 0 && visible >= narrowed, `共 ${visible} 条 / 本页 ${narrowed} 行`);
+
+  await forgetPreviewCalls(page);
   await tid(page, 'action-export-csv').click();
-  await page.waitForTimeout(800);
-  checks++;
+  const call = await waitForPreviewCall(page, 'exportCsv');
+  const lines = String(call.csv).split('\r\n');
+  check('导出的 CSV 没有表头', lines[0] === '日期,销售方,发票号,金额,类型,状态,文件', lines[0]);
+  check('导出的行数不是当前筛选出来的行数', lines.length === visible + 1, `${lines.length - 1} 行 / 应为 ${visible}`);
+  check(
+    '导出的内容不是当前搜索的结果',
+    lines.slice(1).every((line) => line.includes('滴滴')),
+    lines[1],
+  );
+  check('导出的文件名不是 .csv', /^发票清单-\d{4}-\d{2}-\d{2}\.csv$/.test(String(call.filename)), String(call.filename));
+  await searchTable(page, 'table-library', '');
 
   await assertClean(page, problems, '发票库操作');
   await page.close();
@@ -475,7 +496,39 @@ async function checkBrokenConfig(context, baseUrl) {
 }
 
 /* ---------------------------------------------------------------------------
- * 7. Copy lint on every route
+ * 7. CSP is actually enforced
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 「零违规」这个断言在 CSP 被整个删掉时同样成立，所以它自己证明不了什么。
+ * 这里反过来做：往页面里塞两样策略必须拒绝的东西——一段内联脚本和一张外站
+ * 图片——它们必须都跑不起来，并且各自报出一条违规。
+ */
+async function checkCspBlocks(context, baseUrl) {
+  const { page, problems } = await newPage(context);
+  await openApp(page, baseUrl);
+
+  const outcome = await probeCspEnforcement(page, 'https://example.invalid/pixel.png');
+  check('内联脚本没有被 CSP 挡住', outcome.inlineRan === false);
+  check('外站图片没有被 CSP 挡住', outcome.imageLoaded === false);
+  check(
+    'CSP 没有对内联脚本报违规',
+    outcome.violations.some((entry) => entry.startsWith('script-src')),
+    outcome.violations.join('; '),
+  );
+  check(
+    'CSP 没有对外站图片报违规',
+    outcome.violations.some((entry) => entry.startsWith('img-src')),
+    outcome.violations.join('; '),
+  );
+
+  // 这一页是故意去踩策略的，watchPage 记下的报错不算问题。
+  check('注入探针没有触发别的控制台错误', problems.every((text) => /Content Security Policy/i.test(text)), problems.join('; '));
+  await page.close();
+}
+
+/* ---------------------------------------------------------------------------
+ * 8. Copy lint on every route
  * ------------------------------------------------------------------------ */
 
 async function checkCopy(context, baseUrl) {
@@ -539,6 +592,7 @@ async function main() {
     await checkLibraryActions(context, baseUrl);
     await checkEmptyState(context, baseUrl);
     await checkBrokenConfig(context, baseUrl);
+    await checkCspBlocks(context, baseUrl);
     await checkCopy(context, baseUrl);
     await checkDarkMode(browser, baseUrl);
 
