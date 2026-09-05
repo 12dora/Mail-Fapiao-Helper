@@ -49,12 +49,17 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const { port } = server.address();
 const base = `http://127.0.0.1:${port}/index.html?fake=1`;
 
+/**
+ * 五个路由各一张，外加一张详情抽屉——抽屉是这版界面的主要交互，
+ * 只截列表页会让 README 看不出点开一行会发生什么。
+ */
 const routes = [
   { hash: '#/dashboard', name: '01-dashboard.png', label: '开始处理' },
   { hash: '#/inbox', name: '02-inbox.png', label: '邮件记录' },
   { hash: '#/library', name: '03-library.png', label: '发票库' },
   { hash: '#/pending', name: '04-pending.png', label: '待确认' },
   { hash: '#/settings', name: '05-settings.png', label: '设置' },
+  { hash: '#/library', name: '06-invoice-drawer.png', label: '发票详情', openRow: true },
 ];
 
 const browser = await chromium.launch();
@@ -74,6 +79,11 @@ for (const route of routes) {
   // 等外壳渲染出来再截，避免拍到空白首帧。
   await page.waitForSelector('.mfh-sider', { state: 'visible' });
   await page.waitForTimeout(600);
+  if (route.openRow) {
+    await page.locator('[data-testid="table-library"] .ant-table-tbody > tr.ant-table-row').first().click();
+    await page.waitForSelector('[data-testid="drawer-invoice"]', { state: 'visible' });
+    await page.waitForTimeout(600);
+  }
   const target = path.join(outDir, route.name);
   await page.screenshot({ path: target, fullPage: false });
   console.log(`saved ${route.label} -> ${path.relative(root, target)}`);
