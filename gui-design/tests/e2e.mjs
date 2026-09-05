@@ -26,10 +26,12 @@ import {
   closeDrawer,
   closeServer,
   cspViolations,
+  currentPage,
   dismissToasts,
   elementHeight,
   expectNoHorizontalOverflow,
   expectVisibleText,
+  gotoPage,
   gotoRoute,
   installCspProbe,
   lintVisibleCopy,
@@ -260,6 +262,30 @@ async function checkLibraryTable(page) {
     matched.every((text) => text.includes('滴滴')),
   );
   await searchTable(page, 'table-library', '');
+
+  /* 翻到后面再搜索：antd 自带的分页只在越界时才夹回来，于是「在第 3 页搜索」
+     会落在结果的第 3 页上，用户看到的是一片空白，以为什么都没搜到。 */
+  await setPageSize(page, 'table-library', 20);
+  await gotoPage(page, 'table-library', 3);
+  check('翻页没有生效', (await currentPage(page, 'table-library')) === 3);
+  const fromPage3 = await searchTable(page, 'table-library', '滴滴');
+  check('搜索后没有回到第 1 页', (await currentPage(page, 'table-library')) === 1);
+  check('搜索结果的首页没有行', fromPage3 > 0, `实际 ${fromPage3} 行`);
+  const afterSearch = await tableRows(page, 'table-library').allInnerTexts();
+  check(
+    '回到第 1 页后显示的不是搜索结果',
+    afterSearch.length > 0 && afterSearch.every((text) => text.includes('滴滴')),
+    afterSearch[0]?.slice(0, 60),
+  );
+
+  // 切换筛选项同样回到第 1 页。
+  await searchTable(page, 'table-library', '');
+  await gotoPage(page, 'table-library', 2);
+  await clickChip(page, 'table-library', '仅发票');
+  check('切换筛选项后没有回到第 1 页', (await currentPage(page, 'table-library')) === 1);
+
+  await clickChip(page, 'table-library', '全部');
+  await setPageSize(page, 'table-library', 50);
 }
 
 async function checkInboxTable(page) {

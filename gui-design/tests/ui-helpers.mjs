@@ -244,6 +244,26 @@ export async function setPageSize(page, table, size) {
   await page.waitForTimeout(200);
 }
 
+/** antd 分页的页码按钮与当前页；没有 data-testid 可用。 */
+export async function gotoPage(page, table, index) {
+  await page.locator(`[data-testid="${table}"] .ant-pagination-item-${index}`).first().click();
+  await page
+    .waitForFunction(
+      ({ sel, want }) =>
+        document.querySelector(`[data-testid="${sel}"] .ant-pagination-item-active`)?.textContent?.trim()
+        === String(want),
+      { sel: table, want: index },
+      { timeout: 8000 },
+    )
+    .catch(() => fail(`${table} 没有翻到第 ${index} 页`));
+}
+
+export async function currentPage(page, table) {
+  const active = page.locator(`[data-testid="${table}"] .ant-pagination-item-active`).first();
+  if ((await active.count()) === 0) return 1;
+  return Number((await active.innerText()).trim());
+}
+
 export async function openRow(page, table, index = 0) {
   await tableRows(page, table).nth(index).click();
 }

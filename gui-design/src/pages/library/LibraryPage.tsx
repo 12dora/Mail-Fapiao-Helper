@@ -7,7 +7,7 @@
  */
 import { Button, Card, Empty, Space, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo, useState } from 'react';
+import { useDeferredValue, useMemo, useState } from 'react';
 import { useSummary } from '../../bridge/index.js';
 import type { InvoiceRow } from '../../bridge/index.js';
 import {
@@ -89,11 +89,14 @@ export function LibraryPage(): JSX.Element {
 
   const rows = useMemo(() => summary?.library.rows ?? [], [summary]);
 
-  // 导出 CSV 要的是「用户现在看到的这些行」，所以搜索词和筛选项由页面持有，
-  // 可见行用表格内部同一套算法算出来。
+  /* 导出 CSV 要的是「用户现在看到的这些行」，所以搜索词和筛选项由页面持有，
+     可见行在这里算一次，连同 `preFiltered` 一起交给表格——表格再筛一遍只会得到
+     同一个结果，却要在每次按键上多走一趟十万行。
+     筛选走延后值：输入框保持即时响应，重算让路。 */
+  const deferredQuery = useDeferredValue(query);
   const visible = useMemo(
-    () => filterRows(rows, { query, filterKey: chip, filters: CHIPS, searchKeys: SEARCH_KEYS }),
-    [rows, query, chip],
+    () => filterRows(rows, { query: deferredQuery, filterKey: chip, filters: CHIPS, searchKeys: SEARCH_KEYS }),
+    [rows, deferredQuery, chip],
   );
 
   const counts = useMemo(() => {
@@ -132,7 +135,8 @@ export function LibraryPage(): JSX.Element {
         ) : (
           <Card size="small">
             <DataTable<InvoiceRow>
-              rows={rows}
+              rows={visible}
+              preFiltered
               columns={COLUMNS}
               rowKey={(row) => row.filename}
               loading={loading && !summary}
