@@ -10,6 +10,14 @@ contextBridge.exposeInMainWorld('mfhBridge', {
   runOcr: (payload) => ipcRenderer.invoke('mfh:run-ocr', payload),
   stopOcr: () => ipcRenderer.invoke('mfh:stop-ocr'),
   organize: (payload) => ipcRenderer.invoke('mfh:organize', payload),
+  // 检查或清理重复发票：{ by: 'invoice-no' | 'container', apply: boolean }
+  dedupe: (payload) => ipcRenderer.invoke('mfh:dedupe', payload),
+  // 打开原始邮件或显示其位置：{ hash, reveal?: boolean }
+  openMail: (payload) => ipcRenderer.invoke('mfh:open-mail', payload),
+  // 按邮件标识读取邮件详情：{ hash }
+  mailDetail: (payload) => ipcRenderer.invoke('mfh:mail-detail', payload),
+  // 按归档文件名读取发票详情：{ filename }
+  invoiceDetail: (payload) => ipcRenderer.invoke('mfh:invoice-detail', payload),
   openPath: (payload) => ipcRenderer.invoke('mfh:open-path', payload),
   copyText: (payload) => ipcRenderer.invoke('mfh:copy-text', payload),
   testMailConnection: (payload) => ipcRenderer.invoke('mfh:test-connection', payload),

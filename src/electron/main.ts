@@ -238,6 +238,7 @@ registerMailHandlers({
   ledgerCsvPath,
   ocrPendingCsvPath,
   appSummary: summaryFacade.appSummary,
+  sanitizeAppSummary: summaryFacade.sanitizeAppSummary,
 });
 
 const resetService = createResetService({
