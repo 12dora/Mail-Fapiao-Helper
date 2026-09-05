@@ -14,7 +14,8 @@ state*.json
 samples/
 invoices/
 invoices.csv
-pending/
+# 只忽略仓库根下的运行产物目录（未锚定时会连 gui-design/src/pages/pending 一起藏掉）
+/pending/
 pending.csv
 .mfh-cache/
 

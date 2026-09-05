@@ -31,6 +31,10 @@ const PRESETS: Record<string, Preset> = {
   refresh_link: { tone: 'warning', label: '链接失效' },
   manual_archive: { tone: 'warning', label: '手动归档' },
   ignore: { tone: 'default', label: '可忽略' },
+  // 文件类型（详情里的归档文件表用它标出附属材料）
+  invoice: { tone: 'default', label: '发票' },
+  itinerary: { tone: 'default', label: '行程单' },
+  supporting: { tone: 'default', label: '附属材料' },
 };
 
 export interface StatusTagProps {

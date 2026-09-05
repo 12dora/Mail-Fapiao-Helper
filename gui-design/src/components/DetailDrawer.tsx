@@ -9,6 +9,8 @@ export interface DetailDrawerProps {
   /** 标题下的一行副标题，通常是主键或时间。 */
   subtitle?: ReactNode;
   loading?: boolean;
+  /** 键值区之前的内容：警示条、原因说明这一类必须先看到的东西。 */
+  before?: ReactNode;
   /** 主体的键值区；不需要时留空，直接用 children。 */
   items?: DescriptionsProps['items'];
   /** 键值区之后的自定义内容（子表、重复列表等）。 */
@@ -25,6 +27,7 @@ export function DetailDrawer({
   title,
   subtitle,
   loading,
+  before,
   items,
   children,
   actions,
@@ -51,6 +54,7 @@ export function DetailDrawer({
         </div>
       ) : (
         <>
+          {before}
           {items?.length ? <Descriptions column={1} size="small" colon={false} items={items} /> : null}
           {children}
         </>

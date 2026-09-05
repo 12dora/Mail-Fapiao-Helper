@@ -10,8 +10,7 @@ import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { bridge, primeSummary, reloadSummary } from '../../bridge/index.js';
 import type { DedupeGroup, DedupeReport } from '../../bridge/index.js';
-import { notifyResult, useBusy } from '../../components/index.js';
-import { LibraryTable } from './LibraryTable.js';
+import { DataTable, notifyResult, useBusy } from '../../components/index.js';
 
 export interface DedupeModalProps {
   open: boolean;
@@ -144,10 +143,11 @@ export function DedupeModal({ open, onClose }: DedupeModalProps): JSX.Element {
             />
           )}
           {groups.length > 0 && (
-            <LibraryTable<DedupeGroup>
+            <DataTable<DedupeGroup>
               rows={groups}
               columns={COLUMNS}
               rowKey={(group) => group.invoiceNo}
+              searchKeys={[]}
               pagination={groups.length > 20}
               defaultPageSize={20}
               scrollX={false}

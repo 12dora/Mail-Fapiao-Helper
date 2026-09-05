@@ -1,12 +1,10 @@
 /**
  * 把当前列表拼成 CSV 文本。
  *
- * 桥接层没有「另存为」通道（只有 copyText），所以导出的结果是放进剪贴板，
- * 由用户粘到表格软件里。不加 BOM：粘贴时 BOM 会变成可见的乱码字符。
+ * 不加 BOM：主进程写盘时自己补，粘贴到表格软件时 BOM 会变成可见的乱码字符。
  */
 import type { InvoiceRow } from '../../bridge/index.js';
-import { humanizeDocumentType } from './documentType.js';
-import { statusLabel } from '../../components/index.js';
+import { humanizeDocumentType, statusLabel } from '../../components/index.js';
 
 const HEADERS = ['日期', '销售方', '发票号', '金额', '类型', '状态', '文件'] as const;
 

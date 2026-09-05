@@ -15,6 +15,16 @@ export function opLabel(kind: OpKind | undefined): string {
   return kind ? OP_LABELS[kind] ?? '处理' : '处理';
 }
 
+/**
+ * 运行记录里的 `action` 是自由字符串（历史文件里可能出现已经下线的动作名），
+ * 认得出来就翻成中文，认不出来原样显示，不让「undefined」漏到界面上。
+ */
+export function actionLabel(action: string): string {
+  const key = action.trim();
+  if (!key) return '处理';
+  return OP_LABELS[key as OpKind] ?? key;
+}
+
 function elapsedText(startedAt: number, now: number): string {
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
   const mm = Math.floor(seconds / 60);
