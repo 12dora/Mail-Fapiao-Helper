@@ -113,14 +113,13 @@ export interface TerminateSummary {
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
   if (!isAlive(child)) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    let timer: NodeJS.Timeout | undefined;
     const done = (): void => {
       if (timer) clearTimeout(timer);
       resolve();
     };
     child.once('close', done);
     child.once('exit', done);
-    timer = setTimeout(resolve, timeoutMs);
+    const timer = setTimeout(resolve, timeoutMs);
   });
 }
 
