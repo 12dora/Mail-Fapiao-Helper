@@ -2,9 +2,10 @@
 /**
  * Informational, zero-dependency source inventory; this is not a lint gate.
  * Counts physical lines (including comments/blanks). Function/export discovery
- * is lexical: declarations, block arrows and methods are recognized, while
- * expression arrows, template interpolations and wildcard re-export targets
- * are not expanded. Complex TS return types / JSX can require manual review.
+ * is lexical: declarations, block/parenthesized arrows and methods are recognized.
+ * Unparenthesized expression arrows and template interpolations are omitted;
+ * wildcard targets and destructured export bindings are not expanded. Complex
+ * TS types, JSX text punctuation and semicolon-free exports can need review.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -163,12 +164,14 @@ function ordinaryFunction(tokens, pairs, body) {
 function functionsIn(tokens, pairs, filename) {
   const functions = [];
   for (let body = 0; body < tokens.length; body++) {
-    if (tokens[body].value !== '{' || !pairs.has(body)) continue;
+    const isArrow = tokens[body - 1]?.value === '=>';
+    const isBody = tokens[body].value === '{' || (isArrow && tokens[body].value === '(');
+    if (!isBody || !pairs.has(body)) continue;
     if ([':', '<', '|', '&'].includes(tokens[body - 1]?.value)) {
       body = pairs.get(body);
       continue;
     }
-    const fn = tokens[body - 1]?.value === '=>'
+    const fn = isArrow
       ? arrowFunction(tokens, pairs, body)
       : ordinaryFunction(tokens, pairs, body);
     if (!fn) continue;
@@ -189,12 +192,47 @@ function namedExportCount(tokens, pairs, start) {
   return count;
 }
 
+function genericEnd(tokens, start) {
+  let depth = 1;
+  for (let index = start + 1; index < tokens.length; index++) {
+    const value = tokens[index].value;
+    if ([';', '=', '=>'].includes(value)) return start;
+    if (value === '<') depth++;
+    if (value === '>' && --depth === 0) return index;
+  }
+  return start;
+}
+
+function variableExportCount(tokens, pairs, start) {
+  let count = 1;
+  for (let index = start + 1; index < tokens.length; index++) {
+    const value = tokens[index].value;
+    if ([';', 'export', 'const', 'let', 'var'].includes(value)) break;
+    if (['(', '[', '{'].includes(value) && pairs.has(index)) {
+      index = pairs.get(index);
+      continue;
+    }
+    if (value === '<') {
+      index = genericEnd(tokens, index);
+      continue;
+    }
+    if (value !== ',' || !identifier(tokens[index + 1]?.value)) continue;
+    // A declarator's name is followed by its annotation, initializer or boundary;
+    // commas inside generic arguments such as Map<Key, Value> do not qualify.
+    if ([':', '=', ',', ';'].includes(tokens[index + 2]?.value) || !tokens[index + 2]) count++;
+  }
+  return count;
+}
+
 function exportCount(tokens, pairs) {
   let count = 0;
   for (let index = 0; index < tokens.length; index++) {
     if (tokens[index].value !== 'export') continue;
     const next = tokens[index + 1]?.value === 'type' ? index + 2 : index + 1;
-    count += tokens[next]?.value === '{' ? namedExportCount(tokens, pairs, next) : 1;
+    const kind = tokens[next]?.value;
+    if (kind === '{') count += namedExportCount(tokens, pairs, next);
+    else if (['const', 'let', 'var'].includes(kind)) count += variableExportCount(tokens, pairs, next);
+    else count++;
   }
   return count;
 }
@@ -211,7 +249,7 @@ export function collectReport(root) {
   const results = files.map(filename => analyzeSource(fs.readFileSync(filename, 'utf8'), path.relative(root, filename).split(path.sep).join('/')));
   const descending = (a, b) => b.lines - a.lines || a.file.localeCompare(b.file);
   return {
-    note: 'Informational lexical report; physical lines include comments/blanks. Expression arrows, template interpolations and wildcard targets are not expanded; complex TS/JSX may need review.',
+    note: 'Informational lexical report; physical lines include comments/blanks. Unparenthesized expression arrows/template interpolations are omitted; wildcard targets/destructured bindings are not expanded. Complex TS/JSX and semicolon-free exports may need review.',
     scannedFiles: results.length,
     largestFiles: results.map(({ functions: _functions, ...file }) => file).sort(descending).slice(0, 15),
     longFunctions: results.flatMap(file => file.functions).filter(fn => fn.lines > 80).sort(descending),

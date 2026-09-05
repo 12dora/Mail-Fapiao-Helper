@@ -19,7 +19,7 @@ class Neighbor {
 }`;
   const report = analyzeSource(source, 'factory.ts');
   assert.deepEqual(report.functions.map(fn => [fn.name, fn.startLine, fn.endLine]), [
-    ['createService', 1, 86], ['short', 88, 88],
+    ['createService', 1, 86], ['run', 85, 85], ['short', 88, 88],
   ]);
 });
 
@@ -77,4 +77,33 @@ test('reports both roots, descending top 15, strict thresholds and normalized JS
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('tracks parenthesized TSX expression arrows and nested callback arrows', () => {
+  const jsx = Array.from({ length: 81 }, (_, index) => `  <span>{${index}}</span>`).join('\n');
+  const source = `export const View = (props: Props) => (
+  <section>
+${jsx}
+    {props.items.map(item => (
+      <span>{item.label}</span>
+    ))}
+  </section>
+);
+export const make = async (): Promise<Result> => (
+  { value: 1 }
+);`;
+  const report = analyzeSource(source, 'view.tsx');
+  assert.deepEqual(report.functions.map(fn => [fn.name, fn.startLine, fn.endLine]), [
+    ['View', 1, 88], ['<anonymous>', 84, 86], ['make', 89, 91],
+  ]);
+});
+
+test('counts multiple exported declarators without counting initializer or generic commas', () => {
+  const source = `export const first = { a: 1, b: 2 }, second = call(1, 2), third: Map<Key, Value> = new Map();
+export let left, right;
+export const callback = function named(a, b) { return [a, b]; }, last = true;
+export const generic = call<First, Second, Third>(), final = 1;`;
+  assert.equal(analyzeSource(source, 'exports.ts').exports, 9);
+  const threshold = `export const ${Array.from({ length: 26 }, (_, index) => `value${index} = ${index}`).join(', ')};`;
+  assert.equal(analyzeSource(threshold, 'threshold.ts').exports, 26);
 });
