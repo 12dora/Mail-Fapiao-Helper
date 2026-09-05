@@ -64,7 +64,7 @@ function writeEmlAtomic(path: string, data: Buffer): void {
   secureFileMode(path);
 }
 
-export function monthDir(d: Date): string {
+function monthDir(d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `${y}-${m}`;
