@@ -7,7 +7,7 @@ import type { State } from '../state.js';
 import { resolveMailIdentity } from '../util/hash.js';
 import { testFaultEnabled } from '../util/testFaults.js';
 import type { Ctx } from '../extract/types.js';
-import { supportingOnlyReason, supportingReason } from '../extract/classify.js';
+import { classifyDocument, supportingOnlyReason, supportingReason } from '../extract/classify.js';
 import { stageDocuments } from '../download/downloader.js';
 import {
   ArchiveRecoveryError,
@@ -234,6 +234,17 @@ function archiveExtraction(
   ocrPendingCsvPath: string,
 ): number {
   const { hash, messageId } = context;
+
+  if (!cfg.archive.keepSupporting) {
+    const artifacts = extraction.artifacts.filter((artifact) => {
+      const kind = classifyDocument(artifact, artifact.format ?? 'pdf').documentType;
+      if (artifact.documentType !== 'supporting' && kind !== 'supporting') return true;
+      log.info(`Skipped ${hash}: supporting_skipped (${artifact.suggestedName || artifact.source})`);
+      return false;
+    });
+    extraction = { ...extraction, artifacts };
+    if (artifacts.length === 0) return 0;
+  }
 
   // 0) 崩溃恢复：先把上次强杀留下的半成品事务清掉，再开始本次归档。
   recoverArchiveTransactionsOnce(cfg.paths.invoices, log);
@@ -468,7 +479,7 @@ export async function processMail(
   // 提取器各自都「成功」了，没人会报错，所以这一条只能在汇总之后判。
   const supportingOnly = supportingOnlyReason(extraction.artifacts);
   if (supportingOnly !== null) {
-    log.warn(`Only supporting documents archived for ${hash}: ${supportingOnly}`);
+    log.warn(`Only supporting documents found for ${hash}: ${supportingOnly}`);
   }
   const withCanary = supportingOnly === null
     ? extraction

@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { isSupportingDocument } from '../extract/classify.js';
 import { loadConfig, type Config } from '../config.js';
 import { summarizeOcr, type OcrSummary } from '../ocr/summary.js';
 import { summarizePending, type PendingSummary } from '../pending/summary.js';
 import { loadState } from '../state.js';
 import { readCsvRows } from '../util/csv.js';
-import { indexArtifactResults } from '../util/identity.js';
+import { artifactIdentityForRow, indexArtifactResults, type ArtifactIndex } from '../util/identity.js';
 import { mailHashForRow } from './mailStatus.js';
 
 /**
@@ -109,8 +110,10 @@ export interface LibrarySummary {
   duplicates: { groups: number; rows: number };
   pendingCsv: string;
   resultsCsv: string;
-  /** 切片前的真实总数。 */
+  /** 切片前的可报销票据总数（含行程单，不含支撑材料）。 */
   total: number;
+  /** 含支撑材料的完整行数，用于分页。 */
+  documentTotal: number;
   recognized: number;
   failed: number;
   ignored: number;
@@ -121,7 +124,7 @@ export interface LibrarySummary {
   rows: InvoiceRow[];
   offset: number;
   limit: number;
-  /** 按后端枚举统计的各状态行数（切片前）。 */
+  /** 按后端枚举统计的票据状态行数（切片前，不含支撑材料）。 */
   statusCounts: Record<LibraryStatus, number>;
   ocr: OcrSummary;
 }
@@ -260,18 +263,36 @@ function money(value: string): string {
 
 /** 结果行 → 后端状态枚举（APP-20）。 */
 function libraryStatusOf(row: Record<string, string>): LibraryStatus {
+  if (isSupportingDocument(row)) return LIBRARY_STATUS.ARCHIVED;
   const status = (row.status ?? '').toLowerCase();
   if (status === 'error') return LIBRARY_STATUS.FAILED;
   if (status === 'partial') return LIBRARY_STATUS.PENDING;
   return (row.invoiceNo || row.seller || row.amount) ? LIBRARY_STATUS.COMPLETE : LIBRARY_STATUS.PENDING;
 }
 
+function pendingLibraryStatus(row: Record<string, string>): LibraryStatus {
+  return isSupportingDocument(row) || row.status === 'ignored' ? LIBRARY_STATUS.ARCHIVED : LIBRARY_STATUS.PENDING;
+}
+
+function withSupportingEvidence(row: Record<string, string>, indexes: ArtifactIndex<Record<string, string>>[]): Record<string, string> {
+  const identity = artifactIdentityForRow(row);
+  const supporting = isSupportingDocument(row) || indexes.some((index) => {
+    const evidence = index.get(identity);
+    return evidence !== undefined && isSupportingDocument(evidence);
+  });
+  return supporting ? { ...row, documentType: 'supporting' } : row;
+}
+
 export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): LibrarySummary {
   const ocr = summarizeOcr(cfg, cwd);
-  const resultRows = indexArtifactResults(readCsvRows(ocr.resultsCsv)).values();
+  const ledgerRows = readCsvRows(resolveIn(cwd, cfg.output.csv));
+  const queuedRows = readCsvRows(ocr.pendingCsv);
+  const evidence = [indexArtifactResults(ledgerRows), indexArtifactResults(queuedRows)];
+  const pendingDocuments = queuedRows.map((row) => withSupportingEvidence(row, evidence));
+  const resultRows = indexArtifactResults(readCsvRows(ocr.resultsCsv)).values().map((row) => withSupportingEvidence(row, evidence));
   const ledgerByArtifact = new Map<string, Record<string, string>>();
   const ledgerByFilename = new Map<string, Record<string, string>>();
-  for (const row of readCsvRows(resolveIn(cwd, cfg.output.csv))) {
+  for (const row of ledgerRows) {
     ledgerByArtifact.set(`${row.filename || ''}\0${row.contentHash || ''}`, row);
     ledgerByFilename.set(row.filename || '', row);
   }
@@ -307,11 +328,11 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
         filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
         // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
         status: libraryStatusOf(row),
-        documentType: row.documentType || '',
+        documentType: isSupportingDocument(row) ? 'supporting' : row.documentType || '',
         invoiceType: row.invoiceType || '',
         error: row.error || '',
       };
-      if (invoice.invoiceNo) {
+      if (invoice.invoiceNo && invoice.documentType !== 'supporting') {
         const group = duplicateGroups.get(invoice.invoiceNo) ?? [];
         group.push(invoice);
         duplicateGroups.set(invoice.invoiceNo, group);
@@ -320,21 +341,21 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
     })
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   const seenFiles = new Set(rows.map((row) => row.filename).filter(Boolean));
-  for (const row of readCsvRows(ocr.pendingCsv)) {
+  for (const row of pendingDocuments) {
     const filename = row.filename || '';
     if (!filename || seenFiles.has(filename)) continue;
     seenFiles.add(filename);
     rows.push({
       ...metadata(row),
       date: row.date || '',
-      seller: row.documentType === 'supporting' ? '支撑材料' : '待识别',
+      seller: isSupportingDocument(row) ? '支撑材料' : '待识别',
       invoiceNo: '',
       amount: '',
       source: '',
       filename,
       filePath: resolveIn(cwd, path.join(cfg.paths.invoices, filename)),
-      status: row.status === 'ignored' ? LIBRARY_STATUS.ARCHIVED : LIBRARY_STATUS.PENDING,
-      documentType: row.documentType || '',
+      status: pendingLibraryStatus(row),
+      documentType: isSupportingDocument(row) ? 'supporting' : row.documentType || '',
       invoiceType: '',
       error: row.reason || '',
     });
@@ -351,8 +372,8 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
         source: '',
         filename: entry.name,
         filePath: resolveIn(cwd, path.join(cfg.paths.invoices, entry.name)),
-        status: LIBRARY_STATUS.PENDING,
-        documentType: '',
+        status: isSupportingDocument(withSupportingEvidence({ filename: entry.name }, evidence)) ? LIBRARY_STATUS.ARCHIVED : LIBRARY_STATUS.PENDING,
+        documentType: isSupportingDocument(withSupportingEvidence({ filename: entry.name }, evidence)) ? 'supporting' : '',
         invoiceType: '',
         error: '',
       });
@@ -373,30 +394,31 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
     }
   }
 
-  const itinerary = ocr.byDocumentType.find((group) => group.key === 'itinerary')?.count ?? 0;
-  const supporting = ocr.ignored;
-  const invoiceLike = Math.max(0, ocr.recognized - itinerary);
-  const archivedTotal = rows.filter((row) => isArchivedDocument(row.filename)).length;
+  const invoiceRows = rows.filter((row) => row.documentType !== 'supporting');
+  const itinerary = invoiceRows.filter((row) => row.documentType === 'itinerary').length;
+  const supporting = rows.length - invoiceRows.length;
+  const invoiceLike = invoiceRows.length - itinerary;
   const statusCounts = {
     [LIBRARY_STATUS.COMPLETE]: 0,
     [LIBRARY_STATUS.PENDING]: 0,
     [LIBRARY_STATUS.ARCHIVED]: 0,
     [LIBRARY_STATUS.FAILED]: 0,
   } as Record<LibraryStatus, number>;
-  for (const row of rows) statusCounts[row.status]++;
+  for (const row of invoiceRows) statusCounts[row.status]++;
   const pendingRows = statusCounts[LIBRARY_STATUS.PENDING];
   const page = pageOf(rows, opts);
   return {
     duplicates,
     pendingCsv: ocr.pendingCsv,
     resultsCsv: ocr.resultsCsv,
-    // total 是切片前的真实总数，renderer 据此判断是否还有下一页。
-    total: Math.max(ocr.total, archivedTotal, rows.length),
-    recognized: ocr.recognized,
+    // total 只统计可报销票据（含行程单）；rows 同时保留支撑材料供筛选。
+    total: invoiceRows.length,
+    documentTotal: rows.length,
+    recognized: statusCounts[LIBRARY_STATUS.COMPLETE],
     // COPY-03：failed 只含真正识别失败；partial 计入 pending 侧，与列表「信息不完整」一致。
-    failed: ocr.failed,
-    ignored: ocr.ignored,
-    pending: Math.max(ocr.pending + ocr.partial, pendingRows),
+    failed: statusCounts[LIBRARY_STATUS.FAILED],
+    ignored: supporting,
+    pending: pendingRows,
     invoiceLike,
     itinerary,
     supporting,

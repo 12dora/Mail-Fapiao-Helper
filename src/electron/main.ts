@@ -10,6 +10,7 @@ import {
   saveConfig,
 } from './configService.js';
 import { electron } from './electronApi.js';
+import { registerDedupeHandlers } from './ipc/dedupeHandlers.js';
 import { registerOperationHandlers } from './ipc/operationHandlers.js';
 import { registerMailHandlers } from './ipc/mailHandlers.js';
 import { registerResetHandlers } from './ipc/resetHandlers.js';
@@ -206,6 +207,19 @@ const operationHandlers = registerOperationHandlers({
   openPathAllowedRoots: pathPolicy.openPathAllowedRoots,
   resolveSymbolicLocation: pathPolicy.resolveSymbolicLocation,
   openOrRevealByPolicy: openPolicy.openOrRevealByPolicy,
+}, { includeDedupe: false });
+
+registerDedupeHandlers({
+  handleTrusted: windowSecurity.handleTrusted,
+  acquireOperation: operationSupport.acquireOperation,
+  ensureArchiveRecoveryReady: archiveRecovery.ensureArchiveRecoveryReady,
+  dataDir,
+  configPath,
+  runCli,
+  recordHistory,
+  reportFor,
+  tryAppSummary,
+  appSummary,
 });
 
 registerMailHandlers({

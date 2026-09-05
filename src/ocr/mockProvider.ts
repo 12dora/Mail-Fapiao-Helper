@@ -7,11 +7,18 @@
  * 合法消费者只有 `gui-design/tests/*.mjs`。
  */
 import fs from 'node:fs';
+import { okResult } from './efapiao/result.js';
 import os from 'node:os';
 import path from 'node:path';
 import type { OcrProvider } from './types.js';
 
 function mockResult(meta: Parameters<OcrProvider['parse']>[1]) {
+  if (meta.filename.includes('mock-supporting')) {
+    return okResult({
+      status: 'ok', document_type: `${meta.format}-supporting`, invoice_type: 'toll_summary',
+      data: { extra: { title: '收费公路通行费电子票据汇总单', related_invoice_numbers: ['1234567890'] } },
+    }, meta.documentType, 'http');
+  }
   return {
     status: 'success' as const,
     fields: {

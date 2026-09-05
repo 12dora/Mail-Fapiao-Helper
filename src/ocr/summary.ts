@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isSupportingDocument } from '../extract/classify.js';
 import type { Config } from '../config.js';
 import { readCsvRows } from '../util/csv.js';
 import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
@@ -95,10 +96,30 @@ function indexResultRows(rows: Record<string, string>[]): ArtifactIndex<Record<s
   return index;
 }
 
+function effectiveDocument(row: Record<string, string>, result?: Record<string, string>) {
+  if (isSupportingDocument(row) || (result !== undefined && isSupportingDocument(result))) {
+    return { status: 'ignored', documentType: 'supporting', reason: row.reason || result?.invoiceType || 'supporting_document' };
+  }
+  let status = (row.status ?? '').toLowerCase();
+  let reason = row.reason ?? '';
+  const resultStatus = (result?.status ?? '').toLowerCase();
+  if (status !== 'ignored') {
+    if (resultStatus === 'success') {
+      status = 'recognized';
+      reason = '';
+    } else if (resultStatus === 'partial' || resultStatus === 'error') {
+      status = resultStatus === 'partial' ? 'partial' : 'failed';
+      reason = result?.error || reason || resultStatus;
+    }
+  }
+  return { status, reason, documentType: result?.documentType || row.documentType || '' };
+}
+
 export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
   const pendingCsv = path.join(path.resolve(cwd, cfg.paths.invoices), 'ocr', 'ocr-pending.csv');
   const resultsCsv = path.resolve(cwd, cfg.ocr.resultsCsv);
   const pendingRows = readCsvRows(pendingCsv);
+  const supportingPending = indexResultRows(pendingRows.filter(isSupportingDocument));
   const currentResults = indexResultRows(readCsvRows(resultsCsv));
   const resultRows = currentResults.values();
   const byDocumentType = new Map<string, OcrSummaryGroup>();
@@ -113,25 +134,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
 
   for (const row of pendingRows) {
     const result = currentResults.get(rowIdentity(row));
-    const resultStatus = (result?.status ?? '').toLowerCase();
-    // APP-14C：结果 CSV 是权威来源。success/error 分别映射为 recognized/failed，
-    // partial 独立计数（COPY-03），不再并进 failed。
-    let status = (row.status ?? '').toLowerCase();
-    let reason = row.reason ?? '';
-    // 主动忽略的支撑材料保持 ignored，不被历史结果行改写。
-    if (status !== 'ignored') {
-      if (resultStatus === 'success') {
-        status = 'recognized';
-        reason = '';
-      } else if (resultStatus === 'partial') {
-        status = 'partial';
-        reason = result?.error || reason || 'partial';
-      } else if (resultStatus === 'error') {
-        status = 'failed';
-        reason = result?.error || reason || 'error';
-      }
-    }
-    const documentType = result?.documentType || row.documentType || '';
+    const { status, reason, documentType } = effectiveDocument(row, result);
     const example = exampleFromRow({ ...row, documentType, status }, reason);
     bump(byDocumentType, documentType || 'unknown', example);
 
@@ -154,7 +157,7 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
   if (failed === 0 && partial === 0 && resultRows.length > 0) {
     for (const row of resultRows) {
       const rowStatus = (row.status ?? '').toLowerCase();
-      if (rowStatus !== 'error' && rowStatus !== 'partial') continue;
+      if (isSupportingDocument(row) || supportingPending.get(rowIdentity(row)) || (rowStatus !== 'error' && rowStatus !== 'partial')) continue;
       bump(byFailureReason, compactReason(row.error ?? '') || 'error', exampleFromRow(row, row.error ?? ''));
     }
   }
@@ -162,10 +165,14 @@ export function summarizeOcr(cfg: Config, cwd = process.cwd()): OcrSummary {
   if (pendingRows.length === 0 && resultRows.length > 0) {
     for (const row of resultRows) {
       const status = (row.status ?? '').toLowerCase();
-      const documentType = row.documentType || 'invoice';
+      const supporting = isSupportingDocument(row);
+      const documentType = supporting ? 'supporting' : row.documentType || 'invoice';
       const example = exampleFromRow(row, row.error ?? '');
       bump(byDocumentType, documentType, example);
-      if (status === 'error') {
+      if (supporting) {
+        ignored++;
+        bump(bySupportingReason, row.invoiceType || 'supporting_document', example);
+      } else if (status === 'error') {
         failed++;
         bump(byFailureReason, compactReason(row.error ?? '') || 'error', example);
       } else if (status === 'partial') {

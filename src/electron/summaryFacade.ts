@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createOpenableHandles } from './openableHandles.js';
 import path from 'node:path';
 import {
   loadAppSummary,
@@ -27,11 +27,43 @@ export interface SummaryFacadeDeps {
   isInsideOpenPathAllowedRoots: (candidate: string) => boolean;
 }
 
-/** 主进程签发的外部文件 opaque 句柄（renderer 不可伪造路径）。 */
-const externalFileHandles = new Map<string, string>();
-const handlesByPath = new Map<string, string>();
+const sanitizeOcrSummary = (ocr: AppSummary['library']['ocr']): AppSummary['library']['ocr'] => ({
+  ...ocr,
+  pendingCsv: ocr.pendingCsv ? redactPath(ocr.pendingCsv) : '',
+  resultsCsv: ocr.resultsCsv ? redactPath(ocr.resultsCsv) : '',
+  byDocumentType: (ocr.byDocumentType ?? []).map((g) => ({
+    ...g,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      from: ex.from ? sanitizeText(ex.from, { maxLength: 80 }) : ex.from,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+  bySupportingReason: (ocr.bySupportingReason ?? []).map((g) => ({
+    ...g,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+  byFailureReason: (ocr.byFailureReason ?? []).map((g) => ({
+    ...g,
+    key: g.key ? sanitizeText(g.key, { maxLength: 80 }) : g.key,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+});
 
 export function createSummaryFacade(deps: SummaryFacadeDeps) {
+  const { registerExternalFileHandle, resolveExternalFileHandle } = createOpenableHandles(deps);
   function asSummaryOptions(value: unknown): SummaryPageOptions | undefined {
     const raw = deps.asObject(value);
     const num = (v: unknown): number | undefined => {
@@ -68,86 +100,11 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
     return registerExternalFileHandle(canon);
   }
 
-  function registerExternalFileHandle(canonicalPath: string): string {
-    // 签发时也必须在当前允许根内，否则拒绝铸造
-    if (!deps.isInsideOpenPathAllowedRoots(canonicalPath)) return '';
-    const existing = handlesByPath.get(canonicalPath);
-    if (existing) {
-      // 刷新顺序，避免本次响应刚复用的旧句柄被后续签发驱逐。
-      externalFileHandles.delete(existing);
-      externalFileHandles.set(existing, canonicalPath);
-      return existing;
-    }
-    const id = `ext:${randomBytes(12).toString('hex')}`;
-    externalFileHandles.set(id, canonicalPath);
-    handlesByPath.set(canonicalPath, id);
-    // 覆盖单次最多 100000 行的响应，同时保持注册表有界。
-    if (externalFileHandles.size > 200000) {
-      const keys = externalFileHandles.keys();
-      for (let i = 0; i < 50000; i++) {
-        const oldest = keys.next().value!;
-        handlesByPath.delete(externalFileHandles.get(oldest)!);
-        externalFileHandles.delete(oldest);
-      }
-    }
-    return id;
-  }
-
-  function resolveExternalFileHandle(id: string): string | undefined {
-    if (typeof id !== 'string' || !id.startsWith('ext:')) return undefined;
-    const registered = externalFileHandles.get(id);
-    if (!registered) return undefined;
-    const canon = deps.resolveCanonicalPath(registered);
-    if (!canon) return undefined;
-    // 赎回时按当前允许根重验；配置改掉后旧句柄失效
-    if (!deps.isInsideOpenPathAllowedRoots(canon)) {
-      externalFileHandles.delete(id);
-      handlesByPath.delete(registered);
-      return undefined;
-    }
-    return canon;
-  }
-
   /**
    * ELEC-07：摘要进 renderer 前脱敏内部 CSV 路径与原始错误；
    * filePath 改为可打开的安全形态；nested library.ocr 也必须脱敏。
    */
   function sanitizeAppSummary(summary: AppSummary): AppSummary {
-    const sanitizeOcrSummary = (ocr: AppSummary['library']['ocr']): AppSummary['library']['ocr'] => ({
-      ...ocr,
-      pendingCsv: ocr.pendingCsv ? redactPath(ocr.pendingCsv) : '',
-      resultsCsv: ocr.resultsCsv ? redactPath(ocr.resultsCsv) : '',
-      byDocumentType: (ocr.byDocumentType ?? []).map((g) => ({
-        ...g,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          from: ex.from ? sanitizeText(ex.from, { maxLength: 80 }) : ex.from,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-      bySupportingReason: (ocr.bySupportingReason ?? []).map((g) => ({
-        ...g,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-      byFailureReason: (ocr.byFailureReason ?? []).map((g) => ({
-        ...g,
-        key: g.key ? sanitizeText(g.key, { maxLength: 80 }) : g.key,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-    });
-
     return {
       ...summary,
       configPath: redactPath(summary.configPath),
