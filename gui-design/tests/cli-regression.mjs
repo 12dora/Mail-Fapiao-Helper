@@ -2154,6 +2154,28 @@ async function testDedupeKeeperVerificationAndRecovery() {
     assert.deepEqual(await readFile(join(cfg.paths.invoices, removed.filename)), removedBytes);
     assert.equal(runDedupe(cfg, { by: 'container', apply: false }, tmp).recovered, 1);
 
+    // An inaccessible CSV is not empty: retain the plan and every pending file move.
+    await writeFile(join(cfg.paths.invoices, removed.filename), removedBytes);
+    rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+    rewriteCsvRows(pendingCsv, OCR_CSV_HEADER, rows);
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, rows);
+    const originalExists = fs.existsSync;
+    const originalRead = fs.readFileSync;
+    fs.existsSync = (file) => file === cfg.output.csv ? false : originalExists(file);
+    fs.readFileSync = (file, ...args) => {
+      if (file === cfg.output.csv) throw Object.assign(new Error('simulated inaccessible ledger'), { code: 'EACCES' });
+      return originalRead(file, ...args);
+    };
+    try {
+      assert.throws(() => runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp), /simulated inaccessible ledger/);
+    } finally {
+      fs.existsSync = originalExists;
+      fs.readFileSync = originalRead;
+    }
+    assert.deepEqual(await readFile(join(cfg.paths.invoices, removed.filename)), removedBytes);
+    assert.equal(readCsvRows(cfg.output.csv).length, rows.length);
+    assert.equal(runDedupe(cfg, { by: 'container', apply: false }, tmp).recovered, 1);
+
     // Simulate every interruption boundary by hand, then recover in either mode, including dry-run.
     for (const [by, phase] of [
       ['container', 'planned'], ['invoice-no', 'ledger-pruned'],

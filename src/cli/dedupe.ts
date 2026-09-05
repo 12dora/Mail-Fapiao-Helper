@@ -303,7 +303,7 @@ function printReport(report: DedupeReport): void {
   if (report.mode === 'invoice-no') {
     process.stdout.write(`Invoice-number groups: ${report.groups.length}; ${report.applied ? 'removed' : 'would remove'}: ${report.applied ? report.quarantined : report.redundant}; conflicts: ${report.conflicts}; skipped: ${report.skipped.length}.\n`);
     if (report.quarantineDir) process.stdout.write(`Quarantine: ${report.quarantineDir}\n`);
-    if (!report.applied) process.stdout.write('Dry run — nothing changed. Re-run with --apply to perform the cleanup.\n');
+    if (!report.applied) process.stdout.write('Dry run — no new cleanup applied. Re-run with --apply to perform the cleanup.\n');
     return;
   }
   if (report.redundant === 0 && report.skipped.length === 0) {
@@ -318,7 +318,7 @@ function printReport(report: DedupeReport): void {
     process.stdout.write(`  OCR rows removed   : ${report.ocrRowsRemoved}\n`);
     process.stdout.write('Nothing was deleted. Delete the quarantine folder yourself once you are happy.\n');
   } else {
-    process.stdout.write('Dry run — nothing changed. Re-run with --apply to perform the cleanup.\n');
+    process.stdout.write('Dry run — no new cleanup applied. Re-run with --apply to perform the cleanup.\n');
   }
   if (report.skipped.length > 0) {
     process.stdout.write(`Skipped ${report.skipped.length} row(s) whose ledger entry does not match the file on disk:\n`);

@@ -76,7 +76,7 @@ function matchesFile(file: string, contentHash: string): boolean {
 }
 
 function pruneCsv(file: string, keys: Map<string, Set<string>>): number {
-  const rows = readCsvRows(file);
+  const rows = readCsvRows(file, { strict: true });
   const kept = rows.filter((row) => {
     const hashes = keys.get(row.filename ?? '');
     const hash = (row.contentHash ?? '').trim().toLowerCase();
