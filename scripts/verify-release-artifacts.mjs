@@ -303,7 +303,7 @@ function checkChannelConsistency(info) {
   }
 }
 
-function checkMacSignature(root, info) {
+function checkMacSignature(root, _info) {
   if (process.platform !== 'darwin') {
     errors.push('macOS signature verification requires a macOS runner (codesign/spctl/stapler are unavailable here)');
     return;
@@ -397,7 +397,7 @@ function checkMacSignature(root, info) {
   }
 }
 
-function checkWindowsSignature(root, info) {
+function checkWindowsSignature(root, _info) {
   if (process.platform !== 'win32') {
     errors.push('Windows Authenticode verification requires a Windows runner (powershell/Get-AuthenticodeSignature are unavailable here)');
     return;
