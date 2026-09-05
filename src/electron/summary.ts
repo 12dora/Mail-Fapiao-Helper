@@ -5,7 +5,8 @@ import { summarizeOcr, type OcrSummary } from '../ocr/summary.js';
 import { summarizePending, type PendingSummary } from '../pending/summary.js';
 import { loadState } from '../state.js';
 import { readCsvRows } from '../util/csv.js';
-import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
+import { indexArtifactResults } from '../util/identity.js';
+import { mailHashForRow } from './mailStatus.js';
 
 /**
  * 票据库行状态的后端枚举（APP-20）。renderer 必须复用这些常量，
@@ -191,7 +192,7 @@ export function summarizeInbox(cfg: Config, cwd = process.cwd(), opts?: SummaryP
   const documentCounts = new Map<string, number>();
   const legacyDocumentCounts = new Map<string, number>();
   for (const row of readCsvRows(resolveIn(cwd, cfg.output.csv))) {
-    const hash = (row.mailHash ?? '').trim();
+    const hash = row.mailHash ? mailHashForRow(row) : '';
     const key = hash || row.messageId || '';
     if (!key) continue;
     const counts = hash ? documentCounts : legacyDocumentCounts;
@@ -200,7 +201,7 @@ export function summarizeInbox(cfg: Config, cwd = process.cwd(), opts?: SummaryP
   const pendingHashes = new Set<string>();
   const pendingMessageIds = new Set<string>();
   for (const row of readCsvRows(resolveIn(cwd, path.join(cfg.paths.pending, 'pending.csv')))) {
-    const hash = (row.mailHash || row.hash || '').trim();
+    const hash = row.mailHash || row.hash ? mailHashForRow(row) : '';
     if (hash) pendingHashes.add(hash);
     else if (row.messageId) pendingMessageIds.add(row.messageId);
   }
@@ -216,7 +217,7 @@ export function summarizeInbox(cfg: Config, cwd = process.cwd(), opts?: SummaryP
     }
   }
   const rows = rawRows.map((row): InboxRow => {
-    const mailHash = row.mailHash || row.hash || '';
+    const mailHash = mailHashForRow(row);
     const messageId = row.messageId || '';
     const documentCount = (documentCounts.get(mailHash) ?? 0) + (legacyDocumentCounts.get(messageId) ?? 0);
     const pending = pendingHashes.has(mailHash) || pendingMessageIds.has(messageId);
@@ -257,28 +258,6 @@ function money(value: string): string {
   return `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-/** 统一的票据身份（APP-06A）：hash + filename + contentHash，source 仅作回退。 */
-function rowIdentity(row: Record<string, string>): ArtifactIdentity {
-  return {
-    hash: row.hash ?? '',
-    filename: row.filename ?? '',
-    source: row.source ?? '',
-    contentHash: row.contentHash ?? '',
-  };
-}
-
-function currentResultRows(rows: Record<string, string>[]): Record<string, string>[] {
-  const index = new ArtifactIndex<Record<string, string>>();
-  for (const row of rows) {
-    index.set(rowIdentity(row), row, (existing, next) => {
-      const existingStatus = (existing.status ?? '').toLowerCase();
-      const nextStatus = (next.status ?? '').toLowerCase();
-      return !(existingStatus === 'success' && nextStatus !== 'success');
-    });
-  }
-  return index.values();
-}
-
 /** 结果行 → 后端状态枚举（APP-20）。 */
 function libraryStatusOf(row: Record<string, string>): LibraryStatus {
   const status = (row.status ?? '').toLowerCase();
@@ -289,7 +268,7 @@ function libraryStatusOf(row: Record<string, string>): LibraryStatus {
 
 export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): LibrarySummary {
   const ocr = summarizeOcr(cfg, cwd);
-  const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
+  const resultRows = indexArtifactResults(readCsvRows(ocr.resultsCsv)).values();
   const ledgerByArtifact = new Map<string, Record<string, string>>();
   const ledgerByFilename = new Map<string, Record<string, string>>();
   for (const row of readCsvRows(resolveIn(cwd, cfg.output.csv))) {
@@ -332,7 +311,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
         invoiceType: row.invoiceType || '',
         error: row.error || '',
       };
-      if ((row.status || '').toLowerCase() === 'success' && /^\d{20}$/.test(invoice.invoiceNo)) {
+      if (invoice.invoiceNo) {
         const group = duplicateGroups.get(invoice.invoiceNo) ?? [];
         group.push(invoice);
         duplicateGroups.set(invoice.invoiceNo, group);
