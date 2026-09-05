@@ -22,7 +22,7 @@
     "pretest:cli": "node scripts/check-test-prereqs.mjs cli",
     "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs",
     "pretest:electron": "node scripts/check-test-prereqs.mjs electron",
-    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs",
+    "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs && node gui-design/tests/dedupe-ipc-unit.mjs && node gui-design/tests/detail-unit.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",
     "test:browser": "node gui-design/tests/e2e-fixes.mjs && node gui-design/tests/e2e.mjs",
     "test:core": "npm run build && npm run typecheck && npm run test:cli && npm run test:electron",

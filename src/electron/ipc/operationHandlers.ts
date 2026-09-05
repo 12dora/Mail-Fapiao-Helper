@@ -184,6 +184,62 @@ type PrepareOcrResult =
   | { ok: true; operation: PreparedOcrOperation }
   | { ok: false; response: Record<string, unknown> };
 
+export interface DedupeReport {
+  mode: 'container' | 'invoice-no';
+  applied: boolean;
+  quarantineDir: string | null;
+  pairs: number;
+  redundant: number;
+  quarantined: number;
+  ledgerRowsRemoved: number;
+  ocrRowsRemoved: number;
+  groups: {
+    invoiceNo: string;
+    kept: { filename: string; date: string; seller: string; amount: string; format: string };
+    removed: { filename: string; date: string; seller: string; amount: string; format: string; reason: string }[];
+    conflict: boolean;
+    conflictReason: string;
+  }[];
+  conflicts: number;
+  skipped: { filename: string; reason: string }[];
+}
+
+/** CLI 日志前后可有普通文本；只接受最后一份完整 JSON 对象报告。 */
+export function parseDedupeReport(stdout: string): DedupeReport | null {
+  let last: unknown;
+  for (let start = 0; start < stdout.length; start++) {
+    if (stdout[start] !== '{') continue;
+    let depth = 0;
+    let quoted = false;
+    let escaped = false;
+    for (let end = start; end < stdout.length; end++) {
+      const char = stdout[end];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') quoted = false;
+        continue;
+      }
+      if (char === '"') quoted = true;
+      else if (char === '{') depth++;
+      else if (char === '}' && --depth === 0) {
+        try {
+          last = JSON.parse(stdout.slice(start, end + 1));
+          start = end;
+        } catch { /* 普通日志中的花括号不是报告。 */ }
+        break;
+      }
+    }
+  }
+  const row = asObject(last);
+  const counters = ['pairs', 'redundant', 'quarantined', 'ledgerRowsRemoved', 'ocrRowsRemoved', 'conflicts'];
+  if ((row.mode !== 'container' && row.mode !== 'invoice-no') || typeof row.applied !== 'boolean'
+    || (row.quarantineDir !== null && typeof row.quarantineDir !== 'string')
+    || !counters.every((key) => typeof row[key] === 'number' && Number.isSafeInteger(row[key]) && Number(row[key]) >= 0)
+    || !Array.isArray(row.groups) || !Array.isArray(row.skipped)) return null;
+  return row as unknown as DedupeReport;
+}
+
 export function registerOperationHandlers(deps: OperationHandlerDependencies): {
   resolveOpenTarget(target: string): { ok: true; path: string } | { ok: false; code: string; message: string };
 } {
@@ -1008,6 +1064,53 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
             },
           }
           : {}),
+        ...(warning ? { warning } : {}),
+        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
+        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
+      };
+    } finally {
+      gate.lease.release();
+    }
+  });
+
+  handleTrusted('mfh:dedupe', async (_event, payload: unknown) => {
+    const raw = asObject(payload);
+    if ((raw.by !== 'invoice-no' && raw.by !== 'container') || typeof raw.apply !== 'boolean') {
+      return { ok: false, status: 'failed', started: false, jobId: '', code: 'invalid_dedupe_options',
+        message: '清理选项无效，请重新选择。', report: null };
+    }
+    const gate = acquireOperation('pipeline');
+    if (!gate.ok) return { ...gate.response, status: 'failed', started: false, jobId: '', report: null };
+    const jobId = gate.lease.jobId;
+    const startedAt = Date.now();
+    try {
+      const recoveryError = ensureArchiveRecoveryReady();
+      if (recoveryError) {
+        return { ok: false, ...recoveryError, status: 'failed', started: false, jobId, report: null };
+      }
+      const result = await runCli('dedupe', [
+        '--config', configPath, '--by', raw.by, ...(raw.apply ? ['--apply'] : []), '--json',
+      ], { jobId });
+      const report = parseDedupeReport(result.stdout);
+      const status = deriveRunStatus({
+        code: result.code,
+        started: result.started,
+        succeeded: report ? (raw.apply ? report.quarantined : report.redundant) : 0,
+        failed: !report || result.code !== 0 ? 1 : 0,
+        partial: report ? report.conflicts + report.skipped.length : 0,
+      });
+      const message = status === 'success'
+        ? (raw.apply ? '重复发票清理完成。' : '重复发票检查完成。')
+        : status === 'partial'
+          ? '部分发票未能清理，请查看清理结果。'
+          : '重复发票清理未完成，请查看诊断信息。';
+      const historyWarning = recordHistory('dedupe', '清理重复发票', startedAt, result, status, message);
+      const cliReport = reportFor('dedupe', jobId, result,
+        { ok: 'dedupe_done', failed: 'dedupe_failed', partial: 'dedupe_partial' }, status);
+      const summaryPart = tryAppSummary(appSummary);
+      const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
+      return {
+        ok: status === 'success', status, started: result.started, ...cliReport, jobId, message, report,
         ...(warning ? { warning } : {}),
         ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
         ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
