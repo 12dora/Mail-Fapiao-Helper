@@ -169,6 +169,40 @@ async function checkRunFlow(context, baseUrl) {
   await page.close();
 }
 
+/**
+ * 运行期间切页再回来，看到的必须还是同一次运行。
+ *
+ * 首页组件会随路由卸载。运行状态如果挂在组件里，切走的那一刻 `start()` 后面的
+ * setState 就落到了一个不存在的组件上，回来是空日志、空批次、归零的进度条，
+ * 而任务其实一直在跑。
+ */
+async function checkRunSurvivesNavigation(context, baseUrl) {
+  const { page, problems } = await newPage(context);
+  await openApp(page, baseUrl);
+
+  await tid(page, 'action-run-start').click();
+  await tid(page, 'op-banner').waitFor({ state: 'visible', timeout: 10000 });
+
+  // 运行中切走，并在别的页面上等它跑完。
+  await gotoRoute(page, 'library');
+  check('运行提示条应跨路由保留', await tid(page, 'op-banner').isVisible());
+  await tid(page, 'op-banner').waitFor({ state: 'hidden', timeout: 60000 });
+
+  await gotoRoute(page, 'dashboard');
+  const log = await tid(page, 'log-console').innerText();
+  for (const line of ['正在连接邮箱', '已完成，新增 18 封邮件', '已完成，新增 12 份发票']) {
+    check(`切页回来后运行日志缺少「${line}」`, log.includes(line), log.slice(0, 200));
+  }
+  const batch = await rowCount(page, 'table-batch');
+  check('切页回来后「本次结果」被清空了', batch > 0, `实际 ${batch} 行`);
+  const percent = await page.locator('.ant-progress-bg').first().getAttribute('style');
+  check('切页回来后进度条归零了', /width:\s*100%/.test(percent ?? ''), percent ?? '');
+
+  await dismissToasts(page);
+  await assertClean(page, problems, '运行中切页');
+  await page.close();
+}
+
 /* ---------------------------------------------------------------------------
  * 3. Tables: search, chips, pagination
  * ------------------------------------------------------------------------ */
@@ -473,6 +507,7 @@ async function main() {
 
     await checkShell(context, baseUrl);
     await checkRunFlow(context, baseUrl);
+    await checkRunSurvivesNavigation(context, baseUrl);
     await checkTables(context, baseUrl);
     await checkDrawers(context, baseUrl);
     await checkLibraryActions(context, baseUrl);

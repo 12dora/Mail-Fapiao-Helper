@@ -1,30 +1,19 @@
 /**
  * 「开始处理」这一次运行的全部状态：时间范围、匹配开关、三段任务的进度与日志。
  *
- * 抽成 hook 是为了让页面组件只负责排版；这里不产生任何 JSX。
+ * 状态本身在 store/run.ts 与 bridge 的通道 store 里（都是模块级），这个 hook 只
+ * 负责把它们读出来拼成页面用的形状：运行是一串 await，用户中途切页再回来，看到
+ * 的必须还是同一次运行的日志和结果。这里不产生任何 JSX。
  */
-import dayjs, { type Dayjs } from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { type Dayjs } from 'dayjs';
+import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { bridge, primeSummary, reloadSummary, useProgress } from '../../bridge/index.js';
-import type { BatchRow, LogLine, OpKind, RunningOp } from '../../bridge/index.js';
+import type { BatchRow, LogLine, RunningOp } from '../../bridge/index.js';
 import { notify, notifyResult, useBusy } from '../../components/index.js';
+import { appendRunNote, getRunState, patchRun, subscribeRun, type RangePreset } from '../../store/run.js';
 
-export type RangePreset = '7d' | '30d' | 'month' | 'custom';
-
-export const RANGE_OPTIONS = [
-  { label: '近 7 天', value: '7d' },
-  { label: '近 30 天', value: '30d' },
-  { label: '本月', value: 'month' },
-  { label: '自定义', value: 'custom' },
-];
-
-export function rangeFor(preset: RangePreset, current: [Dayjs, Dayjs]): [Dayjs, Dayjs] {
-  const today = dayjs();
-  if (preset === '7d') return [today.subtract(6, 'day'), today];
-  if (preset === '30d') return [today.subtract(29, 'day'), today];
-  if (preset === 'month') return [today.startOf('month'), today];
-  return current;
-}
+export { RANGE_OPTIONS, rangeFor } from '../../store/run.js';
+export type { RangePreset } from '../../store/run.js';
 
 /** 进度事件的 phase 只在日志里有意义，进度条旁边显示一句人话。 */
 const PHASE_TEXT: Record<string, string> = {
@@ -59,11 +48,61 @@ export interface RunController {
   stop(): Promise<void>;
 }
 
-function timeNow(): string {
-  const now = new Date();
-  return [now.getHours(), now.getMinutes(), now.getSeconds()]
-    .map((n) => String(n).padStart(2, '0'))
-    .join(':');
+/**
+ * 一次运行的三段任务。定义在组件外：它只读写 store，不碰任何组件状态，
+ * 所以页面卸载不影响它跑完，也不会把结果写到一个已经不存在的组件上。
+ */
+async function runOnce(): Promise<void> {
+  const { range, matchSubject, matchBody, dryRun } = getRunState();
+  appendRunNote(dryRun ? '开始试运行' : '开始处理');
+  const fetched = await bridge.startFetch({
+    from: range[0].format('YYYY-MM-DD'),
+    to: range[1].format('YYYY-MM-DD'),
+    matchSubject,
+    matchBody,
+    dryRun,
+  });
+  patchRun({ batch: fetched.batch?.rows ?? [] });
+  primeSummary(fetched.summary);
+  if (!fetched.ok) {
+    notifyResult(fetched, { success: '已完成', failure: '获取邮件未完成' });
+    return;
+  }
+  if (dryRun) {
+    notify.success('试运行完成', fetched.message ?? '未下载任何邮件。');
+    return;
+  }
+
+  const files = await bridge.runPipeline({});
+  primeSummary(files.summary);
+  if (!files.ok) {
+    notifyResult(files, { success: '已完成', failure: '获取发票文件未完成' });
+    return;
+  }
+
+  const ocr = await bridge.runOcr({});
+  primeSummary(ocr.summary);
+  if (ocr.code === 'ocr_no_work') appendRunNote('没有待识别的文件');
+  notifyResult(ocr.ok ? files : ocr, { success: '处理完成', failure: '识别未完成' });
+}
+
+async function start(): Promise<void> {
+  const { matchSubject, matchBody } = getRunState();
+  if (!matchSubject && !matchBody) {
+    notify.warning('至少选择一个匹配范围', '主题和正文需要勾选其中一项。');
+    return;
+  }
+  try {
+    await runOnce();
+  } finally {
+    // 每条退出路径（含失败与试运行）都补一次：终态带回的 summary 是截断过的。
+    await reloadSummary();
+  }
+}
+
+async function stop(): Promise<void> {
+  const result = await bridge.stopOcr();
+  notifyResult(result, { success: '正在停止', failure: '停止失败' });
 }
 
 export function useRunController(): RunController {
@@ -71,103 +110,37 @@ export function useRunController(): RunController {
   const fetchProgress = useProgress('fetch');
   const fileProgress = useProgress('files');
   const ocrProgress = useProgress('ocr');
-
-  const [preset, setPreset] = useState<RangePreset>('30d');
-  const [range, setRange] = useState<[Dayjs, Dayjs]>(() => rangeFor('30d', [dayjs(), dayjs()]));
-  const [matchSubject, setMatchSubject] = useState(true);
-  const [matchBody, setMatchBody] = useState(true);
-  const [dryRun, setDryRun] = useState(false);
-  const [batch, setBatch] = useState<BatchRow[]>([]);
-  const [notes, setNotes] = useState<LogLine[]>([]);
-
-  function note(text: string, kind: LogLine['kind'] = 'info'): void {
-    setNotes((prev) => [...prev, { id: prev.length + 1, time: timeNow(), text, kind }]);
-  }
+  const run = useSyncExternalStore(subscribeRun, getRunState, getRunState);
 
   /** 三路进度事件加本地提示，按时间戳合并成一条日志流。 */
   const logLines = useMemo(() => {
-    const merged = [...notes, ...fetchProgress.lines, ...fileProgress.lines, ...ocrProgress.lines];
+    const merged = [...run.notes, ...fetchProgress.lines, ...fileProgress.lines, ...ocrProgress.lines];
     return merged.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-  }, [notes, fetchProgress.lines, fileProgress.lines, ocrProgress.lines]);
+  }, [run.notes, fetchProgress.lines, fileProgress.lines, ocrProgress.lines]);
 
   // 任务结束后 running 变回 null，但进度条与说明要停在最后跑过的那一步上。
-  const [lastKind, setLastKind] = useState<OpKind>('fetch');
   useEffect(() => {
-    if (running) setLastKind(running.kind);
+    if (running) patchRun({ lastKind: running.kind });
   }, [running]);
 
-  const shownKind = running?.kind ?? lastKind;
+  const shownKind = running?.kind ?? run.lastKind;
   const active = shownKind === 'ocr' ? ocrProgress : shownKind === 'pipeline' ? fileProgress : fetchProgress;
   const phase = PHASE_TEXT[active.phase] ?? '';
 
-  /**
-   * 走完一次运行。每条退出路径（含失败与试运行）都由 `start()` 兜一次
-   * `reloadSummary()`：终态里带回的 summary 是截断过的，留着它会让发票库少行。
-   */
-  async function runOnce(): Promise<void> {
-    note(dryRun ? '开始试运行' : '开始处理');
-    const fetched = await bridge.startFetch({
-      from: range[0].format('YYYY-MM-DD'),
-      to: range[1].format('YYYY-MM-DD'),
-      matchSubject,
-      matchBody,
-      dryRun,
-    });
-    setBatch(fetched.batch?.rows ?? []);
-    primeSummary(fetched.summary);
-    if (!fetched.ok) {
-      notifyResult(fetched, { success: '已完成', failure: '获取邮件未完成' });
-      return;
-    }
-    if (dryRun) {
-      notify.success('试运行完成', fetched.message ?? '未下载任何邮件。');
-      return;
-    }
-
-    const files = await bridge.runPipeline({});
-    primeSummary(files.summary);
-    if (!files.ok) {
-      notifyResult(files, { success: '已完成', failure: '获取发票文件未完成' });
-      return;
-    }
-
-    const ocr = await bridge.runOcr({});
-    primeSummary(ocr.summary);
-    if (ocr.code === 'ocr_no_work') note('没有待识别的文件');
-    notifyResult(ocr.ok ? files : ocr, { success: '处理完成', failure: '识别未完成' });
-  }
-
-  async function start(): Promise<void> {
-    if (!matchSubject && !matchBody) {
-      notify.warning('至少选择一个匹配范围', '主题和正文需要勾选其中一项。');
-      return;
-    }
-    try {
-      await runOnce();
-    } finally {
-      await reloadSummary();
-    }
-  }
-
-  async function stop(): Promise<void> {
-    const result = await bridge.stopOcr();
-    notifyResult(result, { success: '正在停止', failure: '停止失败' });
-  }
-
   return {
-    preset,
-    setPreset,
-    range,
-    setRange,
-    matchSubject,
-    setMatchSubject,
-    matchBody,
-    setMatchBody,
-    dryRun,
-    setDryRun,
+    preset: run.preset,
+    setPreset: (preset) => patchRun({ preset }),
+    range: run.range,
+    setRange: (range) => patchRun({ range }),
+    matchSubject: run.matchSubject,
+    setMatchSubject: (matchSubject) => patchRun({ matchSubject }),
+    matchBody: run.matchBody,
+    setMatchBody: (matchBody) => patchRun({ matchBody }),
+    dryRun: run.dryRun,
+    setDryRun: (dryRun) => patchRun({ dryRun }),
     busy,
     running,
-    batch,
+    batch: run.batch,
     logLines,
     percent: active.percent,
     statusText: busy ? `${phase || '处理中'}…` : active.latest?.message || '尚未运行',
