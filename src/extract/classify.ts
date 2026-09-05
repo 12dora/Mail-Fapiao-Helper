@@ -18,6 +18,7 @@ export function looksLikeOfdItineraryText(value: string | undefined): boolean {
 }
 
 function supportingTypeForPdf(text: string): string {
+  if (/结算单|结算明细|settlement/i.test(text)) return 'settlement';
   if (/通行费电子票据汇总单/.test(text)) return 'toll_summary';
   if (/订单明细|运单明细/.test(text)) return 'order_detail';
   if (/结账单|账单_?\d*/.test(text)) return 'statement';
@@ -28,6 +29,16 @@ function supportingTypeForPdf(text: string): string {
 
 export function classifyDocument(artifact: PdfArtifact, format: DocumentFormat): Classification {
   const text = textFor(artifact);
+  if (artifact.documentType === 'supporting') {
+    return { documentType: 'supporting', supportType: supportingTypeForPdf(text) || 'other' };
+  }
+  if (!/航空运输电子客票/.test(text)) {
+    const supportType = supportingTypeForPdf(text);
+    // Generic itineraries retain their existing OFD/image classification.
+    if (supportType && (format === 'pdf' || supportType !== 'travel_detail')) {
+      return { documentType: 'supporting', supportType };
+    }
+  }
   if (format === 'ofd') {
     return looksLikeOfdItineraryText(text)
       ? { documentType: 'itinerary' }
@@ -98,4 +109,20 @@ export function supportingOnlyReason(artifacts: readonly PdfArtifact[]): string 
     types.add(classification.supportType || 'other');
   }
   return `only_supporting_documents:${[...types].sort().join('+')}`;
+}
+
+/** Historical CSV rows may predate documentType; either signal is sufficient. */
+export function isSupportingDocument(row: {
+  documentType?: string;
+  filename?: string;
+  suggestedName?: string;
+  source?: string;
+  format?: string;
+}): boolean {
+  if (row.documentType === 'supporting') return true;
+  const name = row.suggestedName || row.filename || '';
+  const format = row.format || (/\.ofd$/i.test(name) ? 'ofd' : /\.(png|jpe?g|webp)$/i.test(name) ? 'image' : 'pdf');
+  return classifyDocument({
+    data: Buffer.alloc(0), suggestedName: name, source: row.source || '',
+  }, format === 'ofd' || format === 'image' ? format : 'pdf').documentType === 'supporting';
 }

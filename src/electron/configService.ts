@@ -35,6 +35,9 @@ export interface SaveConfigPayload {
   output?: {
     csv?: string;
   };
+  archive?: {
+    keepSupporting?: boolean;
+  };
   rename?: {
     avoidConflictBeforeOcr?: boolean;
     rule?: string;
@@ -157,6 +160,7 @@ export function normalizeSavePayload(value: unknown): Record<string, unknown> {
     filter: payload.filter,
     paths: payload.paths,
     output: payload.output,
+    archive: payload.archive,
     rename: payload.rename,
     ocr: {
       ...payload.ocr,

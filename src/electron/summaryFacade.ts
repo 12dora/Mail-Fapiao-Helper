@@ -31,6 +31,41 @@ export interface SummaryFacadeDeps {
 const externalFileHandles = new Map<string, string>();
 const handlesByPath = new Map<string, string>();
 
+const sanitizeOcrSummary = (ocr: AppSummary['library']['ocr']): AppSummary['library']['ocr'] => ({
+  ...ocr,
+  pendingCsv: ocr.pendingCsv ? redactPath(ocr.pendingCsv) : '',
+  resultsCsv: ocr.resultsCsv ? redactPath(ocr.resultsCsv) : '',
+  byDocumentType: (ocr.byDocumentType ?? []).map((g) => ({
+    ...g,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      from: ex.from ? sanitizeText(ex.from, { maxLength: 80 }) : ex.from,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+  bySupportingReason: (ocr.bySupportingReason ?? []).map((g) => ({
+    ...g,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+  byFailureReason: (ocr.byFailureReason ?? []).map((g) => ({
+    ...g,
+    key: g.key ? sanitizeText(g.key, { maxLength: 80 }) : g.key,
+    examples: (g.examples ?? []).map((ex) => ({
+      ...ex,
+      hash: ex.hash ? shortId(ex.hash) : ex.hash,
+      subject: ex.subject ? '<主题已隐藏>' : ex.subject,
+      reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
+    })),
+  })),
+});
+
 export function createSummaryFacade(deps: SummaryFacadeDeps) {
   function asSummaryOptions(value: unknown): SummaryPageOptions | undefined {
     const raw = deps.asObject(value);
@@ -113,41 +148,6 @@ export function createSummaryFacade(deps: SummaryFacadeDeps) {
    * filePath 改为可打开的安全形态；nested library.ocr 也必须脱敏。
    */
   function sanitizeAppSummary(summary: AppSummary): AppSummary {
-    const sanitizeOcrSummary = (ocr: AppSummary['library']['ocr']): AppSummary['library']['ocr'] => ({
-      ...ocr,
-      pendingCsv: ocr.pendingCsv ? redactPath(ocr.pendingCsv) : '',
-      resultsCsv: ocr.resultsCsv ? redactPath(ocr.resultsCsv) : '',
-      byDocumentType: (ocr.byDocumentType ?? []).map((g) => ({
-        ...g,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          from: ex.from ? sanitizeText(ex.from, { maxLength: 80 }) : ex.from,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-      bySupportingReason: (ocr.bySupportingReason ?? []).map((g) => ({
-        ...g,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-      byFailureReason: (ocr.byFailureReason ?? []).map((g) => ({
-        ...g,
-        key: g.key ? sanitizeText(g.key, { maxLength: 80 }) : g.key,
-        examples: (g.examples ?? []).map((ex) => ({
-          ...ex,
-          hash: ex.hash ? shortId(ex.hash) : ex.hash,
-          subject: ex.subject ? '<主题已隐藏>' : ex.subject,
-          reason: ex.reason ? sanitizeText(ex.reason, { maxLength: 120 }) : ex.reason,
-        })),
-      })),
-    });
-
     return {
       ...summary,
       configPath: redactPath(summary.configPath),

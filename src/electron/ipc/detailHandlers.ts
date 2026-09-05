@@ -1,3 +1,4 @@
+import { isSupportingDocument } from '../../extract/classify.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../../config.js';
@@ -118,6 +119,7 @@ function pick<K extends string>(row: CsvRow, fields: readonly K[]): Record<K, st
 
 function rowStatus(ocr?: CsvRow): LibraryStatus {
   if (!ocr) return LIBRARY_STATUS.PENDING;
+  if (isSupportingDocument(ocr)) return LIBRARY_STATUS.ARCHIVED;
   const status = (ocr.status || '').toLowerCase();
   if (status === 'error') return LIBRARY_STATUS.FAILED;
   if (status === 'partial') return LIBRARY_STATUS.PENDING;
@@ -166,14 +168,17 @@ function snapshot(deps: RegisterMailHandlersDeps) {
       resultsByFilename.set(filename, row);
     }
     const number = (row.invoiceNo || '').trim();
-    if (number) appendRow(resultsByInvoiceNo, number, row);
+    if (number && !isSupportingDocument(row) && !isSupportingDocument(ledgerByArtifact.get(artifactIdentityForRow(row)) || {})) {
+      appendRow(resultsByInvoiceNo, number, row);
+    }
   }
   const resultFor = (row: CsvRow) => results.get(artifactIdentityForRow(row));
   const duplicateRows = (number: string) => resultsByInvoiceNo.get(number.trim()) || [];
   const asRow = (row: CsvRow, ocr = resultFor(row)): DetailInvoiceRow => {
     const filename = row.filename || '';
     const handle = issueInvoiceHandle(deps, filename);
-    const number = (ocr?.invoiceNo || '').trim();
+    const supporting = isSupportingDocument(row) || isSupportingDocument(ocr || {});
+    const number = supporting ? '' : (ocr?.invoiceNo || '').trim();
     const duplicateCount = duplicateRows(number).length;
     return {
       filename,
@@ -184,8 +189,8 @@ function snapshot(deps: RegisterMailHandlersDeps) {
       amount: displayAmount(ocr?.amount || ''),
       invoiceNo: number,
       source: detailSource(row.source || ''),
-      status: rowStatus(ocr),
-      documentType: ocr?.documentType || '',
+      status: supporting ? LIBRARY_STATUS.ARCHIVED : rowStatus(ocr),
+      documentType: supporting ? 'supporting' : ocr?.documentType || '',
       invoiceType: ocr?.invoiceType || '',
       error: sanitizeText(ocr?.error || '', { maxLength: 200 }),
       mailHash: mailHashForRow({ ...ocr, ...row, mailHash: row.mailHash || ocr?.hash || '' }),
@@ -205,6 +210,7 @@ function snapshot(deps: RegisterMailHandlersDeps) {
     return [...rows].map(row => asRow({ ...row, mailHash: row.mailHash || hash }));
   }
   function duplicatesFor(ocr: CsvRow | undefined, filename: string): DetailInvoiceRow[] {
+    if (isSupportingDocument(ocr || {}) || isSupportingDocument(ledgerByFilename.get(filename) || {})) return [];
     return duplicateRows(ocr?.invoiceNo || '')
       .filter(other => other.filename !== filename)
       .map(other => asRow(ledgerByArtifact.get(artifactIdentityForRow(other)) || other, other));

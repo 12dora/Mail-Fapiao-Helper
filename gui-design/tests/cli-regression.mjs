@@ -15,6 +15,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { assertFreshBuild, fail, killProcessTree, repoRoot, runSuite, withTempDir } from './_shared.mjs';
+import { testSupportingArchiveRetention } from './supporting-archive-regression.mjs';
 
 /* Helper scripts written to a temp dir import compiled modules by absolute path.
    A bare Windows path (`D:\...`) is not a legal ESM specifier — Node's loader
@@ -2478,6 +2479,61 @@ async function testSupportingOnlyArchiveIsNotSilentSuccess() {
   });
 }
 
+async function testSupportingOrganizeAndDedupe() {
+  const { default: assert } = await import('node:assert/strict');
+  const { contentHash } = await import('../../dist/util/hash.js');
+  const { rewriteCsvRows, readCsvRows } = await import('../../dist/util/csv.js');
+  const { INVOICE_CSV_HEADER, OCR_CSV_HEADER } = await import('../../dist/pipeline/csvDurability.js');
+  await withTempDir('mfh-cli-supporting-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    const resultHeader = 'hash,messageId,date,from,subject,filename,source,format,documentType,invoiceType,seller,amount,dateValue,invoiceNo,transport,extractedBy,parserVersion,ocrVendor,status,error,contentHash\n';
+    const rows = [];
+    for (const [filename, documentType, status] of [
+      ['invoice.pdf', 'invoice', 'success'],
+      ['opaque.pdf', 'supporting', 'success'],
+      ['收费公路通行费电子票据汇总单.pdf', 'invoice', 'success'],
+      ['preclassified.pdf', 'supporting', 'ignored'],
+      ['订单明细.pdf', 'supporting', 'ignored'],
+    ]) {
+      const payload = Buffer.from(`archived ${filename}`);
+      await writeFile(join(cfg.paths.invoices, filename), payload);
+      rows.push({ hash: 'supportingmail', mailHash: 'supportingmail', filename, source: filename,
+        documentType, status, contentHash: contentHash(payload), format: 'pdf',
+        invoiceNo: '12345678901234567890', seller: 'company', amount: '100' });
+    }
+    rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+    rewriteCsvRows(join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv'), OCR_CSV_HEADER, rows);
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, [...rows.slice(0, 3),
+      { ...rows[3], documentType: 'invoice', status: 'success' }]);
+
+    await runMfh(['organize', '--config', configPath]);
+    assert.deepEqual((await readdir(cfg.rename.organizedDir)).sort(), ['invoice.pdf', 'organize-results.csv']);
+    assert.deepEqual(readCsvRows(join(cfg.rename.organizedDir, 'organize-results.csv'))
+      .filter((row) => row.status === 'skipped').map((row) => [row.filename, row.reason]),
+    [['opaque.pdf', 'supporting_document'], ['收费公路通行费电子票据汇总单.pdf', 'supporting_document'],
+      ['preclassified.pdf', 'supporting_document']]);
+
+    const inclusiveDir = join(tmp, 'inclusive');
+    await runMfh(['organize', '--config', configPath, '--out', inclusiveDir, '--include-supporting']);
+    assert.deepEqual((await readdir(inclusiveDir)).sort(), [...rows.map((row) => row.filename), 'organize-results.csv'].sort());
+    const customDir = join(tmp, 'custom-organized');
+    await runMfh(['organize', '--config', configPath, '--out', customDir,
+      '--include-supporting', '--results-csv', cfg.ocr.resultsCsv]);
+    assert.deepEqual((await readdir(customDir)).sort(), [...rows.slice(0, 4).map((row) => row.filename), 'organize-results.csv'].sort());
+
+    const before = await readFile(cfg.ocr.resultsCsv, 'utf8');
+    const report = JSON.parse((await runMfh(['dedupe', '--config', configPath,
+      '--by', 'invoice-no', '--apply', '--json'])).stdout);
+    assert.deepEqual(report.groups, [], 'related invoice numbers must not create invoice duplicate groups');
+    assert.equal(report.quarantined, 0);
+    assert.equal(await readFile(cfg.ocr.resultsCsv, 'utf8'), before);
+    assert.deepEqual((await readdir(cfg.paths.invoices)).filter((name) => name.endsWith('.pdf')).sort(),
+      rows.map((row) => row.filename).sort());
+  });
+}
+
 await runSuite('CLI regression tests', async () => {
   await assertFreshBuild();
   await testOutputCsvAndPendingRaw();
@@ -2520,5 +2576,7 @@ await runSuite('CLI regression tests', async () => {
   await testInlineBodyImagesAreNotArchivedAsInvoices();
   await testSameDeliveryPdfOfdSiblingsArchiveOnce();
   await testSupportingOnlyArchiveIsNotSilentSuccess();
+  await testSupportingArchiveRetention({ writeConfig, runMfh });
+  await testSupportingOrganizeAndDedupe();
 }, { timeoutMs: 8 * 60 * 1000 });
 

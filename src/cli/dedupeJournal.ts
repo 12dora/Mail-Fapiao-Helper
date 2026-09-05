@@ -147,6 +147,24 @@ export function applyDedupePlan(
   return finishPlan(planFile, plan);
 }
 
+function validateRecoveryMoves(plan: DedupePlan, planDir: string, invoicesDir: string): void {
+  const realPlanDir = fs.realpathSync(planDir);
+  const realInvoicesDir = fs.realpathSync(invoicesDir);
+  for (const move of plan.moves) {
+    if (typeof move.filename !== 'string' || !validArchivedFilename(move.filename)
+      || typeof move.contentHash !== 'string' || !move.contentHash
+      || move.source !== path.join(invoicesDir, move.filename)
+      || typeof move.target !== 'string' || path.resolve(move.target) !== move.target
+      || !inside(planDir, move.target)
+      || path.basename(move.target) !== move.filename
+      || move.csvKeys?.filename !== move.filename || move.csvKeys.contentHash !== move.contentHash
+      || !inside(realInvoicesDir, realPlanDir)
+      || !(existingParent(move.target) === realPlanDir || inside(realPlanDir, existingParent(move.target)))) {
+      throw new Error('Invalid dedupe recovery move');
+    }
+  }
+}
+
 /** Called before either mode, while cmdDedupe holds the pipeline command lock. */
 export function recoverDedupePlans(cfg: Config, cwd: string): number {
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
@@ -164,21 +182,7 @@ export function recoverDedupePlans(cfg: Config, cwd: string): number {
       || Object.entries(expectedPaths).some(([key, file]) => plan.csvPaths?.[key as keyof typeof expectedPaths] !== file)) {
       throw new Error('Invalid dedupe recovery plan');
     }
-    const realPlanDir = fs.realpathSync(planDir);
-    const realInvoicesDir = fs.realpathSync(invoicesDir);
-    for (const move of plan.moves) {
-      if (typeof move.filename !== 'string' || !validArchivedFilename(move.filename)
-        || typeof move.contentHash !== 'string' || !move.contentHash
-        || move.source !== path.join(invoicesDir, move.filename)
-        || typeof move.target !== 'string' || path.resolve(move.target) !== move.target
-        || !inside(planDir, move.target)
-        || path.basename(move.target) !== move.filename
-        || move.csvKeys?.filename !== move.filename || move.csvKeys.contentHash !== move.contentHash
-        || !inside(realInvoicesDir, realPlanDir)
-        || !(existingParent(move.target) === realPlanDir || inside(realPlanDir, existingParent(move.target)))) {
-        throw new Error('Invalid dedupe recovery move');
-      }
-    }
+    validateRecoveryMoves(plan, planDir, invoicesDir);
     finishPlan(planFile, plan);
     recovered += plan.moves.length;
   }

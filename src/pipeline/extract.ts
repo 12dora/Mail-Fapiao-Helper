@@ -4,7 +4,7 @@ import { contentHash as contentHashOf } from '../util/hash.js';
 import { extractors } from '../extract/registry.js';
 import type { Ctx, ExtractIssue, PdfArtifact } from '../extract/types.js';
 import { invoiceNoKey, looksLikeOfdItinerary } from '../extract/documentIdentity.js';
-import { looksLikeOfdItineraryText } from '../extract/classify.js';
+import { isSupportingDocument, looksLikeOfdItineraryText } from '../extract/classify.js';
 import { redactErrorDetail, sanitizePendingReason } from './retryFetch.js';
 
 // ---------------------------------------------------------------------------
@@ -37,12 +37,12 @@ function preferPdfOverStrongIdentityOfd(
   log: Logger,
   subject?: string,
 ): PdfArtifact[] {
-  const pdfs = artifacts.filter((item) => (item.format ?? 'pdf') === 'pdf');
+  const pdfs = artifacts.filter((item) => (item.format ?? 'pdf') === 'pdf' && !isSupportingDocument(item));
   const subjectIsItinerary = looksLikeOfdItineraryText(subject);
   const out: PdfArtifact[] = [];
 
   for (const artifact of artifacts) {
-    if (artifact.format !== 'ofd') {
+    if (artifact.format !== 'ofd' || isSupportingDocument(artifact)) {
       out.push(artifact);
       continue;
     }
