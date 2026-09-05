@@ -25,17 +25,23 @@ export interface AsyncState<T> {
   data: T | null;
   loading: boolean;
   error: string;
+  /**
+   * 当前这份数据不是自己按完整查询取回来的，而是别人塞进来的（长任务终态里
+   * 捎带的那一份），可能已经被后端的默认行数截断。只能拿来点计数，
+   * 搜索、导出这类要「全部行」的用途必须等一次 `reload()`。
+   */
+  partial: boolean;
 }
 
 interface Store<T> {
   get(): AsyncState<T>;
   subscribe(cb: () => void): () => void;
   load(force?: boolean): Promise<void>;
-  set(data: T): void;
+  set(data: T, partial?: boolean): void;
 }
 
 function createStore<T>(fetcher: () => Promise<T>): Store<T> {
-  let state: AsyncState<T> = { data: null, loading: false, error: '' };
+  let state: AsyncState<T> = { data: null, loading: false, error: '', partial: false };
   const subscribers = new Set<() => void>();
   let inflight: Promise<void> | null = null;
 
@@ -48,10 +54,11 @@ function createStore<T>(fetcher: () => Promise<T>): Store<T> {
     if (inflight && !force) return inflight;
     set({ ...state, loading: true, error: '' });
     const run = fetcher()
-      .then((data) => set({ data, loading: false, error: '' }))
+      // 自己取回来的一定是完整的那份，顺手把 partial 摘掉。
+      .then((data) => set({ data, loading: false, error: '', partial: false }))
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        set({ data: state.data, loading: false, error: message });
+        set({ data: state.data, loading: false, error: message, partial: state.partial });
       })
       .finally(() => {
         inflight = null;
@@ -69,8 +76,8 @@ function createStore<T>(fetcher: () => Promise<T>): Store<T> {
       };
     },
     load,
-    set(data) {
-      set({ data, loading: false, error: '' });
+    set(data, partial = false) {
+      set({ data, loading: false, error: '', partial });
     },
   };
 }
@@ -85,7 +92,11 @@ const appInfoStore = createStore<AppInfo>(() => bridge.getAppInfo());
 function useStore<T>(store: Store<T>): AsyncState<T> & { reload: () => Promise<void> } {
   const state = useSyncExternalStore(store.subscribe, store.get, store.get);
   useEffect(() => {
-    if (!state.data && !state.loading && !state.error) void store.load();
+    // 手里只有截断过的那一份时也要补一次完整查询：操作结束后的那次 reload
+    // 可能失败过，否则这一页会一直按不完整的数据搜索和导出。
+    if (state.loading) return;
+    if (state.partial) void store.load(true);
+    else if (!state.data && !state.error) void store.load();
     // 只在挂载时触发首次加载。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -117,10 +128,16 @@ export function reloadConfig(): Promise<void> {
   return configStore.load(true);
 }
 
-/** 主进程在长任务终态里直接带回新的 summary，省掉一次往返。 */
+/**
+ * 主进程在长任务终态里直接带回的那份 summary，只用来让计数立刻跟上。
+ *
+ * 它走的是后端的默认行数（500 行），不是 `SUMMARY_QUERY` 的十万行，所以标成
+ * partial：调用方必须紧跟一次 `reloadSummary()`，否则发票库的搜索、导出和按行
+ * 算出来的计数都会少记录。
+ */
 export function primeSummary(next: AppSummary | undefined): void {
   if (!next) return;
-  summaryStore.set(next);
+  summaryStore.set(next, true);
 }
 
 // ---------------------------------------------------------------------------

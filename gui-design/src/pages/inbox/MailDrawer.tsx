@@ -143,8 +143,10 @@ function DrawerActions({
     setWorking(true);
     try {
       const result = await bridge.runPipeline({ onlyMail: row.mailHash });
+      // 终态里带回的 summary 只够让计数立刻跟上，它是截断过的；
+      // 无论有没有带回来都要按完整查询重新拉一次。
       primeSummary(result.summary);
-      if (!result.summary) await reloadSummary();
+      await reloadSummary();
       notifyResult(result, { success: '已重新处理', failure: '重新处理未完成' });
       onDone();
     } finally {

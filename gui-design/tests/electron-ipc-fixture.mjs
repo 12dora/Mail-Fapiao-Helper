@@ -87,13 +87,34 @@ async function waitForIdle(page, timeout = 60000) {
  * 1. Dashboard: dry run, real run, progress, mutex
  * ------------------------------------------------------------------------ */
 
+/** 长任务终态带回的 summary 走后端默认行数；界面必须再按完整查询拉一次。 */
+async function expectFullSummaryReload(page, where) {
+  await page
+    .waitForFunction(
+      () => window.__mfhLastSummaryQuery?.inboxLimit === 100000 && window.__mfhLastSummaryQuery?.libraryLimit === 100000,
+      undefined,
+      { timeout: 20000 },
+    )
+    .catch(() => fail(`${where}之后没有按完整查询重新拉取汇总`));
+  checks++;
+}
+
+function forgetSummaryQuery(page) {
+  return page.evaluate(() => {
+    window.__mfhLastSummaryQuery = null;
+  });
+}
+
 async function checkDryRun(page, config) {
   await tid(page, 'toggle-dry-run').click();
   check('试运行开关没有打开', (await tid(page, 'toggle-dry-run').getAttribute('aria-checked')) === 'true');
   await resetUiProbe(page);
+  await forgetSummaryQuery(page);
   await tid(page, 'action-run-start').click();
   await waitForLog(page, '预览完成');
   await waitForIdle(page);
+  // 试运行以前是直接 return 的，截断过的那份 summary 会一直留在 store 里。
+  await expectFullSummaryReload(page, '试运行');
 
   const args = await page.evaluate(() => window.__mfhLastFetchArgs || []);
   check('勾选试运行后应传 --dry-run', args.includes('--dry-run'), JSON.stringify(args));
@@ -112,6 +133,7 @@ async function checkDryRun(page, config) {
 
 async function checkRealRun(page, config) {
   await resetUiProbe(page);
+  await forgetSummaryQuery(page);
   await tid(page, 'action-run-start').click();
 
   // 三段任务的进度事件都要落进同一个日志面板。
@@ -150,6 +172,7 @@ async function checkRealRun(page, config) {
   const archived = await readdir(config.paths.invoices);
   check('归档目录里没有按顺序命名的发票', archived.includes('0001.pdf') && archived.includes('0002.pdf'), JSON.stringify(archived));
 
+  await expectFullSummaryReload(page, '一次完整运行');
   await dismissToasts(page);
 }
 
@@ -304,6 +327,34 @@ async function checkPending(page) {
     window.mfhBridge.runPipeline({ pendingRetry: true, onlyMail: 'a'.repeat(32) }),
   );
   expectShape('pendingRetry + onlyMail 必须被拒绝', conflicting, (r) => r?.ok === false && r?.code === 'invalid_pending_retry');
+
+  /* 行尾的单封重试必须真的把这封邮件送进管线。之前它同时传 pendingRetry，
+     每次点击都只换回一条 invalid_pending_retry，而上面那条契约断言看不出来。 */
+  await page.evaluate(() => {
+    window.__mfhLastPipelineArgs = null;
+  });
+  await forgetSummaryQuery(page);
+  await resetUiProbe(page);
+  await page.getByRole('button', { name: '重试', exact: true }).first().click();
+  await page
+    .waitForFunction(() => Array.isArray(window.__mfhLastPipelineArgs), undefined, { timeout: 30000 })
+    .catch(() => fail('点击单封重试后管线没有启动'));
+  checks++;
+  const retryArgs = await page.evaluate(() => window.__mfhLastPipelineArgs);
+  check('单封重试没有走 run，而是当成了「全部重试」', retryArgs[0] === 'run' && !retryArgs.includes('retry'), JSON.stringify(retryArgs));
+  check(
+    '单封重试没有把这封邮件的标识传给后端',
+    retryArgs[retryArgs.indexOf('--only-mail') + 1] === hash,
+    JSON.stringify(retryArgs),
+  );
+  await expectFullSummaryReload(page, '单封重试');
+  const retryProbe = await readUiProbe(page);
+  check('单封重试没有给出回执', retryProbe.toasts.length > 0, JSON.stringify(retryProbe.toasts));
+  check(
+    '单封重试撞上了互斥输入的拒绝',
+    !retryProbe.toasts.some((text) => text.includes('不能和单封重试一起使用')),
+    JSON.stringify(retryProbe.toasts),
+  );
 
   const retryAll = tid(page, 'action-pending-retry-all');
   check('待确认页缺少「全部重试」入口', (await retryAll.count()) === 1);

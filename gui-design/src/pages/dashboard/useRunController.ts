@@ -100,11 +100,11 @@ export function useRunController(): RunController {
   const active = shownKind === 'ocr' ? ocrProgress : shownKind === 'pipeline' ? fileProgress : fetchProgress;
   const phase = PHASE_TEXT[active.phase] ?? '';
 
-  async function start(): Promise<void> {
-    if (!matchSubject && !matchBody) {
-      notify.warning('至少选择一个匹配范围', '主题和正文需要勾选其中一项。');
-      return;
-    }
+  /**
+   * 走完一次运行。每条退出路径（含失败与试运行）都由 `start()` 兜一次
+   * `reloadSummary()`：终态里带回的 summary 是截断过的，留着它会让发票库少行。
+   */
+  async function runOnce(): Promise<void> {
     note(dryRun ? '开始试运行' : '开始处理');
     const fetched = await bridge.startFetch({
       from: range[0].format('YYYY-MM-DD'),
@@ -128,7 +128,6 @@ export function useRunController(): RunController {
     primeSummary(files.summary);
     if (!files.ok) {
       notifyResult(files, { success: '已完成', failure: '获取发票文件未完成' });
-      await reloadSummary();
       return;
     }
 
@@ -136,7 +135,18 @@ export function useRunController(): RunController {
     primeSummary(ocr.summary);
     if (ocr.code === 'ocr_no_work') note('没有待识别的文件');
     notifyResult(ocr.ok ? files : ocr, { success: '处理完成', failure: '识别未完成' });
-    await reloadSummary();
+  }
+
+  async function start(): Promise<void> {
+    if (!matchSubject && !matchBody) {
+      notify.warning('至少选择一个匹配范围', '主题和正文需要勾选其中一项。');
+      return;
+    }
+    try {
+      await runOnce();
+    } finally {
+      await reloadSummary();
+    }
   }
 
   async function stop(): Promise<void> {
