@@ -471,7 +471,7 @@ docker compose --profile cli run --rm mfh run   --config /data/config.json
 
 - 邮件、附件、`state.json`、`config.json` 全部落在挂载的 `/data` 卷里，**镜像本身不含任何用户数据**；容器以非 root 的 `node` 用户运行。
 - 镜像内已装好 Playwright + Chromium，第三方开票平台的站点脚本可以正常跑。
-- **OCR 在容器里默认不可用**：`vendor/efapiao/` 只内置了 `darwin-arm64` 与 `windows-x86_64` 两个平台的引擎，上游未发布 Linux 包。如果你自行构建了 Linux 引擎，把它放到 `vendor/efapiao/0.1.3/linux-x86_64/efapiao` 再重新 `docker build` 即可；否则请在配置里把 `ocr.enabled` 设为 `false`，或改用腾讯 OCR。
+- **OCR 在容器里默认不可用**：`vendor/efapiao/` 只内置了 `darwin-arm64` 与 `windows-x86_64` 两个平台的引擎，macOS arm64 使用 v0.1.4 lite，Windows x64 暂留 v0.1.3 lite，容器不含 Linux 引擎。如果你自行构建了 v0.1.4 Linux 引擎，把它放到 `vendor/efapiao/0.1.4/linux-x86_64/efapiao` 再重新 `docker build` 即可；否则请在配置里把 `ocr.enabled` 设为 `false`，或改用腾讯 OCR。
 - 容器不监听任何端口，只需要出站网络访问你的 IMAP 服务器与开票平台。
 
 ### 其他文档

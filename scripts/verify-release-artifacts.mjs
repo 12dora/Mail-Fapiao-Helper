@@ -30,6 +30,7 @@ import { openSync, readSync, closeSync, readdirSync, statSync, existsSync, readF
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { EFAPIAO_VENDOR_VERSIONS } from './efapiao-vendor.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const releaseDir = path.join(repoRoot, 'release');
@@ -199,8 +200,11 @@ function checkVendorLayout(root) {
     errors.push(`resources/vendor/efapiao is missing from ${path.relative(releaseDir, root.appRoot)} — the bundled OCR engine would not be found at runtime`);
     return;
   }
-  for (const versionEntry of readdirSync(vendorRoot, { withFileTypes: true })) {
-    if (!versionEntry.isDirectory()) continue;
+  const versions = readdirSync(vendorRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  if (versions.length !== 1 || versions[0]?.name !== EFAPIAO_VENDOR_VERSIONS[platform]) {
+    errors.push(`expected exactly vendor/efapiao/${EFAPIAO_VENDOR_VERSIONS[platform]} for ${platform}; found ${versions.map((entry) => entry.name).join(', ') || 'none'}`);
+  }
+  for (const versionEntry of versions) {
     const versionDir = path.join(vendorRoot, versionEntry.name);
     const archDirs = readdirSync(versionDir, { withFileTypes: true })
       .filter((it) => it.isDirectory())
@@ -363,7 +367,7 @@ function checkMacSignature(root, _info) {
 
     // 5. The nested OCR binary is separately signed; Gatekeeper checks it when
     //    the app spawns it, so an unsigned one breaks OCR at runtime.
-    const ocr = path.join(root.resources, 'vendor', 'efapiao', '0.1.3', 'darwin-arm64', 'efapiao');
+    const ocr = path.join(root.resources, 'vendor', 'efapiao', EFAPIAO_VENDOR_VERSIONS.mac, 'darwin-arm64', 'efapiao');
     if (existsSync(ocr)) {
       const ocrDisplay = run('codesign', ['-dv', '--verbose=4', ocr]);
       if (!run('codesign', ['--verify', '--strict', ocr]).ok) {

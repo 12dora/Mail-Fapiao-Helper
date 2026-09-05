@@ -53,8 +53,9 @@ RUN npm ci --omit=dev --no-audit --no-fund \
 
 COPY --from=builder /app/dist ./dist
 COPY config.example.json ./config.example.json
-# OCR 引擎：仓库只内置 darwin-arm64 与 windows-x86_64，上游没发 Linux 包。
-# 你若自行构建了 Linux 引擎，放到 vendor/efapiao/<版本>/linux-x86_64/efapiao
+# OCR 引擎：仓库只内置 darwin-arm64 与 windows-x86_64，容器默认不含 Linux 引擎。
+# 桌面包：macOS arm64 v0.1.4 lite，Windows x64 暂留 v0.1.3 lite。
+# 你若自行构建了 v0.1.4 Linux 引擎，放到 vendor/efapiao/0.1.4/linux-x86_64/efapiao
 # 再重新 build 就会被打进来；否则容器内 OCR 会退化到 PATH 上的 `efapiao`
 # （默认不存在），请把 ocr.enabled 设为 false 或改用腾讯 OCR。详见 README。
 COPY vendor ./vendor
