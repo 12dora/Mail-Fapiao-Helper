@@ -3,7 +3,7 @@ import type { Config } from '../config.js';
 import { readCsvRows } from '../util/csv.js';
 import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
-export interface OcrSummaryExample {
+interface OcrSummaryExample {
   hash: string;
   date: string;
   from: string;
@@ -15,7 +15,7 @@ export interface OcrSummaryExample {
   reason: string;
 }
 
-export interface OcrSummaryGroup {
+interface OcrSummaryGroup {
   key: string;
   count: number;
   examples: OcrSummaryExample[];

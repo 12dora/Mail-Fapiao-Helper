@@ -19,7 +19,7 @@ type MailIdentity = ReturnType<typeof resolveMailIdentity>;
 type ParsedMail = Awaited<ReturnType<typeof parseMailWithGuards>>;
 type RunTerminalOutcome = 'ok' | 'failed' | 'mail_not_found' | 'fatal';
 
-export class RunAccumulator {
+class RunAccumulator {
   // 簇 C 终态计数：与 ProcessMailOutcome 一一对应（structured terminal event）。
   archived = 0;
   pending = 0;
@@ -82,7 +82,7 @@ export class RunAccumulator {
   }
 }
 
-export interface RunContext {
+interface RunContext {
   opts: RunOpts;
   cfg: Config;
   store: StateStore;
@@ -146,7 +146,7 @@ function markOnlyMailIfMatch(context: RunContext, identity: MailIdentity, fileHa
   return false;
 }
 
-export function resolveCachedMailIdentity(mail: ParsedMail, raw: Buffer, fileHash: string): MailIdentity {
+function resolveCachedMailIdentity(mail: ParsedMail, raw: Buffer, fileHash: string): MailIdentity {
   return resolveMailIdentity({
     messageId: mail.messageId ?? undefined,
     from: mail.from?.text ?? '',
@@ -157,7 +157,7 @@ export function resolveCachedMailIdentity(mail: ParsedMail, raw: Buffer, fileHas
   });
 }
 
-export function queueOversizedMail(context: RunContext, emlPath: string, raw: Buffer, fileHash: string, msg: string): void {
+function queueOversizedMail(context: RunContext, emlPath: string, raw: Buffer, fileHash: string, msg: string): void {
   // CORE-03e：沿用 .eml 文件名上的 fetch 身份，禁止 content-only 重算分叉。
   const identity = resolveMailIdentity({
     from: '', date: '', subject: '',
@@ -194,7 +194,7 @@ export function queueOversizedMail(context: RunContext, emlPath: string, raw: Bu
   }
 }
 
-export function shouldSkipMail(context: RunContext, mail: ParsedMail, identity: MailIdentity, fileHash: string): boolean {
+function shouldSkipMail(context: RunContext, mail: ParsedMail, identity: MailIdentity, fileHash: string): boolean {
   const hash = identity.primary;
   // CORE-03f / CORE-09：--only-mail 接受 12/32 位，匹配任意别名；未命中则跳过。
   if (!markOnlyMailIfMatch(context, identity, fileHash)) return true;
@@ -220,7 +220,7 @@ export function shouldSkipMail(context: RunContext, mail: ParsedMail, identity: 
   return context.fatalAbort.signal.aborted;
 }
 
-export async function processOneMail(context: RunContext, mail: ParsedMail, identity: MailIdentity, raw: Buffer, fileHash: string): Promise<void> {
+async function processOneMail(context: RunContext, mail: ParsedMail, identity: MailIdentity, raw: Buffer, fileHash: string): Promise<void> {
   const hash = identity.primary;
   context.inFlight.add(hash);
   for (const a of identity.evidence) context.inFlight.add(a);

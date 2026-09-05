@@ -31,7 +31,7 @@ export function csvCell(v: string): string {
   return s;
 }
 
-export function parseCsvLine(line: string): string[] {
+function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = '';
   let quoted = false;
@@ -144,7 +144,7 @@ function hardenCsvMode(file: string): void {
  * 原子写入 CSV 内容（BOM + 全文），fsync 文件与父目录，POSIX 下 mode 0600。
  * 供 schema 创建、legacy 升级与行级修复共用，保证 OCR-03 的 durability。
  */
-export function writeCsvAtomic(csvPath: string, body: string): void {
+function writeCsvAtomic(csvPath: string, body: string): void {
   const dir = path.dirname(csvPath);
   fs.mkdirSync(dir, { recursive: true, mode: isWindows ? undefined : 0o700 });
   const tmp = `${csvPath}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -178,7 +178,7 @@ export function rewriteCsvRows(
   writeCsvAtomic(csvPath, `\uFEFF${lines.join('\n')}\n`);
 }
 
-export interface EnsureCsvSchemaOptions {
+interface EnsureCsvSchemaOptions {
   /**
    * 已知可升级的旧表头（不含 BOM、可带或不带尾部换行）。
    * 命中时按列名映射重写为 expectedHeader，缺失列填空；幂等且崩溃安全（原子替换）。

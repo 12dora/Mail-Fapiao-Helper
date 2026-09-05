@@ -98,16 +98,6 @@ export function isDevelopmentRuntime(): boolean {
 }
 
 /**
- * 是否应按「生产边界」处理测试钩子 / mock OCR。
- *
- * 历史名保留给 registry 等调用方：语义为 **非开发树**（含 asar、release CLI、
- * 抽出的出货树）。不得仅靠 asar 路径判断——独立 `mfh` bin 与抽出树路径不含 asar。
- */
-export function isPackagedRuntime(): boolean {
-  return !isDevelopmentRuntime();
-}
-
-/**
  * Sentinel 锚定在**本包安装根**（dist/util → ../..），绝不使用 process.cwd()。
  * Electron 把 CLI 的 cwd 设为 dataDir，用户可在 dataDir 下伪造
  * `gui-design/tests/.fault-injection-enabled`；打包产物又排除了 `gui-design/tests/**`，

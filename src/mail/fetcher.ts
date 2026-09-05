@@ -16,7 +16,7 @@ const RAW_MAIL_PARSE_LIMIT = 32 * 1024 * 1024;
 const HTML_PARSE_LIMIT = 8 * 1024 * 1024;
 const PARSE_TIMEOUT_MS = 20_000;
 
-export const MAIL_PARSE_OPTIONS = {
+const MAIL_PARSE_OPTIONS = {
   skipTextLinks: true,
   maxHtmlLengthToParse: HTML_PARSE_LIMIT,
 } as const;
@@ -81,7 +81,7 @@ export function resolveDateWindow(cfg: Config, now: Date = new Date()): DateWind
  * 所有邮件都必须过这一关，不论日期来自 Date header 还是 INTERNALDATE：服务端
  * SEARCH 只有日粒度、而且我们有意不发 `before`，客户端过滤是唯一的精确边界（APP-07）。
  */
-export function withinWindow(date: Date, win: DateWindow): boolean {
+function withinWindow(date: Date, win: DateWindow): boolean {
   if (date.getTime() < win.since.getTime()) return false;
   if (win.before && date.getTime() >= win.before.getTime()) return false;
   return true;

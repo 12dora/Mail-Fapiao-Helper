@@ -47,7 +47,7 @@ function nameOf(id: ArtifactIdentity): string {
 }
 
 /** 票据的精确身份键：hash + filename(或 source) + contentHash。 */
-export function artifactKey(id: ArtifactIdentity): string {
+function artifactKey(id: ArtifactIdentity): string {
   return [norm(id.hash) || EMPTY, nameOf(id) || EMPTY, norm(id.contentHash) || EMPTY].join(SEP);
 }
 

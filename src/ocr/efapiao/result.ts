@@ -23,7 +23,7 @@ export interface EfapiaoBatchPayload {
   detail?: unknown;
 }
 
-export function stringValue(v: unknown): string {
+function stringValue(v: unknown): string {
   return typeof v === 'string' ? v : '';
 }
 

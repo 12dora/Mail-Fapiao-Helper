@@ -185,7 +185,7 @@ export interface DateWindow {
   before: Date | undefined;
 }
 
-export interface DateWindowInput {
+interface DateWindowInput {
   /** `YYYY-MM-DD` 或完整 ISO timestamp；缺省时回退到 sinceDays 滚动窗口。 */
   since: string | undefined;
   /** `YYYY-MM-DD` 或完整 ISO timestamp；缺省表示无上界。 */
