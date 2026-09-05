@@ -346,7 +346,7 @@ function validateStagedBuffer(
   if (buffer.length === 0) {
     return {
       kind: 'error',
-      result: { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` },
+      result: { ...empty, code: 'manual_archive_empty_file', message: '所选文件为空，无法归档。', detail: sanitizeText(path.basename(source)) },
     };
   }
   if (buffer.length > MAX_FILE_BYTES) {
@@ -355,7 +355,7 @@ function validateStagedBuffer(
       result: {
         ...empty,
         code: 'manual_archive_too_large',
-        message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
+        message: '所选文件超过 64 MB，无法归档。', detail: sanitizeText(path.basename(source)),
       },
     };
   }
@@ -366,7 +366,8 @@ function validateStagedBuffer(
       result: {
         ...empty,
         code: 'manual_archive_is_zip',
-        message: `「${path.basename(source)}」是一个压缩包，不是发票文件。请先解压，再选择里面的 PDF 或 OFD 文件。`,
+        message: '请先解压所选压缩包，再选择其中的 PDF 或 OFD 文件归档。',
+        detail: sanitizeText(path.basename(source)),
       },
     };
   }
@@ -376,7 +377,7 @@ function validateStagedBuffer(
       result: {
         ...empty,
         code: 'manual_archive_unsupported_format',
-        message: `「${path.basename(source)}」不是支持的发票文件（仅支持 PDF、OFD 和常见图片）。`,
+        message: '文件格式不受支持，请选择 PDF、OFD 或常见图片。', detail: sanitizeText(path.basename(source)),
       },
     };
   }
@@ -401,13 +402,13 @@ function stageSource(
     if (!stat.isFile()) {
       return {
         kind: 'error',
-        result: { ...empty, code: 'manual_archive_not_a_file', message: `「${path.basename(source)}」不是一个文件。` },
+        result: { ...empty, code: 'manual_archive_not_a_file', message: '所选项目不是文件，无法归档。', detail: sanitizeText(path.basename(source)) },
       };
     }
     if (stat.size === 0) {
       return {
         kind: 'error',
-        result: { ...empty, code: 'manual_archive_empty_file', message: `「${path.basename(source)}」是空文件，无法归档。` },
+        result: { ...empty, code: 'manual_archive_empty_file', message: '所选文件为空，无法归档。', detail: sanitizeText(path.basename(source)) },
       };
     }
     if (stat.size > MAX_FILE_BYTES) {
@@ -416,7 +417,7 @@ function stageSource(
         result: {
           ...empty,
           code: 'manual_archive_too_large',
-          message: `「${path.basename(source)}」超过 64 MB，无法归档。`,
+          message: '所选文件超过 64 MB，无法归档。', detail: sanitizeText(path.basename(source)),
         },
       };
     }
@@ -447,8 +448,8 @@ function stageSource(
       result: {
         ...empty,
         code: 'manual_archive_unreadable',
-        message: `无法读取「${path.basename(source)}」，请确认文件仍然存在且可访问。`,
-        detail: sanitizeText(err instanceof Error ? err.message : String(err)),
+        message: '无法读取所选文件，请确认文件仍存在且可访问。',
+        detail: sanitizeText(`${path.basename(source)}：${err instanceof Error ? err.message : String(err)}`),
       },
     };
   } finally {
@@ -549,7 +550,7 @@ function readArchiveIndexes(input: ManualArchiveInput): {
 function dedupeAndReconcile(
   input: ManualArchiveInput,
   staged: StagedSource[],
-  empty: ManualArchiveResult,
+  _empty: ManualArchiveResult,
 ): DedupeAndReconcileResult {
   const { uniqueStaged, batchDuplicates } = dedupeStagedBatch(input, staged);
 
@@ -591,7 +592,7 @@ function dedupeAndReconcile(
       result: {
         ok: false,
         code: 'manual_archive_all_duplicates',
-        message: '选择的文件都已经归档过了，没有新增内容。',
+        message: '所选文件均已归档，无需重复添加。',
         files: [],
         duplicates,
         pendingRemoved: 0,

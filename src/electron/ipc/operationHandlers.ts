@@ -364,7 +364,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       try {
         batch = batchFromHashes(result.mails.saved);
       } catch {
-        enrichWarning = '邮件已保存，但本次列表明细暂时无法展示。请到「邮件记录」查看。';
+        enrichWarning = '邮件已保存，请到「邮件记录」查看明细。';
       }
     }
     const report = reportFor(
@@ -453,7 +453,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     try {
       batch = batchFromHashes([...result.mails.processed, ...result.mails.manual]);
     } catch {
-      enrichWarning = '邮件已处理，但本次列表明细暂时无法展示。请刷新列表。';
+      enrichWarning = '邮件已处理，请刷新列表查看明细。';
     }
     const report = reportFor(
       'pipeline',
@@ -536,7 +536,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       } catch (restoreErr) {
         const error: UiError = {
           code: 'ocr_rerun_restore_failed',
-          message: '无法开始识别，且原有识别结果未能自动恢复。请重新打开应用后再试。',
+          message: '无法恢复原有识别结果，请重新打开应用后再试。',
           detail: sanitizeText(restoreErr instanceof Error ? restoreErr.message : String(restoreErr)),
         };
         sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
@@ -545,7 +545,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       const error: UiError = {
         code: 'ocr_config_write_failed',
         // COPY-10：配置写失败不一定是磁盘问题。
-        message: '无法开始识别。请稍后重试；若仍失败，请到「设置」检查识别选项。',
+        message: '无法开始识别，请稍后重试或在「设置」中检查识别选项。',
         detail: sanitizeText(err instanceof Error ? err.message : String(err)),
       };
       sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...error, kind: 'err', done: true });
@@ -575,7 +575,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       skipped: 0,
       failed: 0,
       code: 'ocr_start',
-      message: `发现 ${pendingTotal} 个待识别文件，正在启动识别。当前并行数：${concurrency}。`,
+      message: `正在启动识别，共 ${pendingTotal} 个文件，并行数为 ${concurrency}。`,
     });
 
     const result = await runCli('ocr', args, { operation: 'ocr', initialTotal: pendingTotal, jobId });
@@ -598,7 +598,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     } catch (txErr) {
       const error: UiError = {
         code: 'ocr_rerun_restore_failed',
-        message: '识别结束后无法可靠处理备份。请重新打开应用；若识别结果异常，请勿继续操作。',
+        message: '识别备份处理失败，请重新打开应用并确认结果后再继续操作。',
         detail: sanitizeText(txErr instanceof Error ? txErr.message : String(txErr)),
       };
       return { ok: false, ...error, jobId, summary: appSummary() };
@@ -661,7 +661,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     const ok = statusWithParseFails === 'success';
     const message = statusWithParseFails === 'success' || statusWithParseFails === 'partial'
       ? ocrRunMessage(result)
-      : '无法完成识别。请稍后重试；若仍失败，请到「设置」检查识别选项并查看技术详情。';
+      : '无法完成识别，请重试或在「设置」中检查识别选项。';
     const summaryPart = tryAppSummary(appSummary);
     const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
     return {
@@ -762,7 +762,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     if (looksLikeRedactedPathDisplay(target) || target.includes('<') || target.startsWith('…')) {
       const mapped = resolveDisplayOrRelativeToKnownRoot(target);
       if (mapped) return { ok: true, path: mapped };
-      return { ok: false, code: 'path_invalid', message: '路径无效。请使用位置标识打开目录。' };
+      return { ok: false, code: 'path_invalid', message: '无法打开该位置，请重新选择目录。' };
     }
 
     // 相对路径锚定到 dataDir（若 dataDir 规范化失败则用模块级 dataDir 词法路径）
@@ -899,7 +899,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'invalid_only_mail',
-          message: '单封邮件标识无效，请从待确认列表重新选择。',
+          message: '无法确认这封邮件，请从「待确认」列表重新选择。',
           normalizedFilter: normalizedFilterFrom(),
           summary: appSummary(),
         };
@@ -909,7 +909,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'invalid_only_mail',
-          message: '单封邮件标识无效，请从待确认列表重新选择。',
+          message: '无法确认这封邮件，请从「待确认」列表重新选择。',
           normalizedFilter: normalizedFilterFrom(),
           summary: appSummary(),
         };
@@ -956,7 +956,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         skipped: 0,
         failed: 0,
         code: 'ocr_no_work',
-        message: '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。',
+        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
         kind: 'warn',
         done: true,
       });
@@ -964,7 +964,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         ok: false,
         code: 'ocr_no_work',
         exitCode: 0,
-        message: '没有等待识别的文件。请到「开始处理」，先完成「获取邮件」和「获取发票文件」，再开始识别。',
+        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
         summary,
       };
     }
@@ -1033,7 +1033,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         : status !== 'success'
           ? `${baseLabel}没有完成，请查看诊断信息了解详情。`
           : scanned === 0
-            ? '目前没有可整理的识别结果。请先抓取邮件并完成识别后再试。'
+            ? '没有可整理的识别结果，请先获取邮件并完成识别。'
             : typeof scanned === 'number'
               ? `${baseLabel}完成，处理 ${scanned} 条识别结果。`
               : `${baseLabel}完成。`;
@@ -1135,7 +1135,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       return {
         ok: true,
         code: 'ocr_stopping_partial',
-        message: '正在停止识别。本机识别服务可能需要多等几秒才会完全退出。',
+        message: '正在停止识别，本机识别服务可能需要几秒才能退出。',
         detail: sanitizeText(details.join('；'), { maxLength: 200 }),
       };
     }
@@ -1154,8 +1154,8 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
         return {
           ok: false,
           code: 'path_location_unknown',
-          error: '未知的位置标识。',
-          message: '未知的位置标识。',
+          error: '无法识别该位置，请重新选择。',
+          message: '无法识别该位置，请重新选择。',
         };
       }
       const canon = resolveCanonicalPath(mapped);
@@ -1193,8 +1193,8 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       return {
         ok: false,
         code: 'path_invalid',
-        error: '请提供 location、handle 或 path。',
-        message: '请提供 location、handle 或 path。',
+        error: '请选择要打开的文件或文件夹。',
+        message: '请选择要打开的文件或文件夹。',
       };
     }
     const resolved = resolveOpenTarget(target);

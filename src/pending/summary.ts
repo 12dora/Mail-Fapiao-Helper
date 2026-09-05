@@ -129,14 +129,14 @@ function classifyPending(row: PendingRow, rawReason: string): PendingGroupInfo {
     if (from.includes('alitrip') || subject.includes('飞猪')) {
       return group('expired_fliggy_link', '飞猪/接送机历史链接过期', 'refresh_link', {
         category: '链接已过期',
-        userMessage: '邮件里的发票下载链接已失效，无法自动获取发票。',
-        nextStep: '请到飞猪或对应出行平台重新下载发票，再用「选择文件归档」上传。',
+        userMessage: '发票下载链接已失效，无法自动获取。',
+        nextStep: '请从出行平台重新下载发票，再通过「选择文件归档」添加。',
       });
     }
     return group('expired_or_failed_download', '下载失败或链接过期', 'refresh_link', {
       category: '下载失败',
-      userMessage: '发票下载入口还在，但这次没能取回文件。',
-      nextStep: '可以稍后重试；如果仍然失败，请到开票平台下载后手动上传。',
+      userMessage: '未能下载发票文件。',
+      nextStep: '请稍后重试，或从开票平台下载后手动归档。',
     });
   }
 
@@ -144,30 +144,30 @@ function classifyPending(row: PendingRow, rawReason: string): PendingGroupInfo {
     return group('expired_huawei_travel', '慧通差旅链接过期', 'refresh_link', {
       category: '链接已过期',
       userMessage: '慧通差旅的发票链接已超过有效期。',
-      nextStep: '请重新登录慧通差旅获取发票，再用「选择文件归档」上传。',
+      nextStep: '请从慧通差旅重新下载发票，再通过「选择文件归档」添加。',
     });
   }
 
   if (reason.includes('no_pdf_links')) {
     return group('no_pdf_links', '邮件里没有可直接下载的发票', 'manual_archive', {
       category: '邮件内无发票文件',
-      userMessage: '这封邮件只有开票入口、二维码或网页链接，没有可以直接下载的发票文件。',
-      nextStep: '请打开邮件按提示自行开票或下载，再用「选择文件归档」上传。',
+      userMessage: '邮件中没有可直接下载的发票文件。',
+      nextStep: '请按邮件提示开票或下载，再通过「选择文件归档」添加。',
     });
   }
 
   if (reason.includes('no_supported_documents_in_attachments')) {
     return group('no_supported_documents', '附件不是发票文件', 'ignore', {
       category: '附件不是发票文件',
-      userMessage: '附件不是可识别的发票格式（PDF、OFD，或包含它们的压缩包）。',
-      nextStep: '确认这封邮件不含发票后可以忽略；如果确实有发票，请手动上传。',
+      userMessage: '附件中没有支持的发票文件。',
+      nextStep: '请手动归档发票，或在确认邮件不含发票后忽略。',
     });
   }
 
   if (reason.includes('network_retry_failed')) {
     return group('network_retry_failed', '网络连接失败', 'retry', {
       category: '网络问题',
-      userMessage: '多次尝试后仍然连不上开票网站。',
+      userMessage: '多次重试后仍无法连接开票网站。',
       nextStep: '请检查网络或稍后重新处理这封邮件。',
     });
   }
@@ -175,7 +175,7 @@ function classifyPending(row: PendingRow, rawReason: string): PendingGroupInfo {
   return group('manual', '需要人工确认', 'manual_archive', {
     category: '需要人工确认',
     userMessage: '这封邮件暂时无法自动处理。',
-    nextStep: '请打开原始邮件确认发票获取方式，必要时手动上传发票文件。',
+    nextStep: '请查看原始邮件，确认获取方式后手动归档发票。',
   });
 }
 

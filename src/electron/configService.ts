@@ -217,7 +217,7 @@ export function saveConfig(
     return {
       ok: false,
       configPath: redactPath(configPath),
-      configError: { message: `配置文件已损坏，无法保存：${current.message}` },
+      configError: { message: '配置文件已损坏，请修复后再保存。', detail: current.message },
     };
   } else {
     // 显式修复：先把损坏文件隔离备份，再以内置示例为基线重建。
@@ -274,7 +274,7 @@ export function saveConfig(
       configPath: redactPath(configPath),
       configError: {
         // COPY-10：配置写失败不等于「数据目录」问题；指向可见的设置操作。
-        message: '无法保存设置。请确认应用有写入权限后重试；若仍失败，请在「邮箱与保存」中检查保存位置。',
+        message: '无法保存设置，请在「邮箱与保存」中检查保存位置及写入权限。',
         detail: sanitizeText(err instanceof Error ? err.message : String(err), { maxLength: 200 }),
         backupCreated,
         ...(backupPath ? { backupPath } : {}),
