@@ -1,6 +1,6 @@
 import { Empty, Input, Segmented, Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 export const ALL_FILTER_KEY = 'all';
 
@@ -36,6 +36,12 @@ export interface DataTableProps<T> {
   toolbarExtra?: ReactNode;
   emptyText?: ReactNode;
   defaultPageSize?: number;
+  /**
+   * `rows` 已经由调用方用 `filterRows()` 按同一套参数筛过（发票库要把这份结果
+   * 直接拿去导出 CSV）。传 true 时表格不再筛第二遍：同一次按键筛两遍，
+   * 十万行要多花几十毫秒，而两遍算出来的必然是同一个结果。
+   */
+  preFiltered?: boolean;
   /** 关掉分页（例如只展示最近几条的小表）。 */
   pagination?: boolean;
   /** 表格最小宽度：数字表示窄于它才横向滚动，false 表示永不滚（抽屉、弹窗里用）。 */
@@ -61,16 +67,43 @@ export interface FilterRowsOptions<T> {
 }
 
 /**
+ * 每一行的可搜索文本（小写、按字段拼起来）只算一次。
+ *
+ * 行对象来自 summary store，是不可变快照，所以可以按对象缓存：连续敲键时十万行
+ * 的 toLowerCase 只在第一次发生。WeakMap 让行被丢弃时缓存跟着走。
+ */
+const SEARCH_TEXT = new WeakMap<object, Map<string, string>>();
+
+function searchTextOf<T>(row: T, keys: (keyof T)[], cacheKey: string): string {
+  // 字段之间垫一个不会出现在搜索框里的分隔符，跨字段拼不出误命中。
+  const build = (): string => keys.map((key) => String(row[key] ?? '')).join('\u0000').toLowerCase();
+  if (typeof row !== 'object' || row === null) return build();
+  let byKeys = SEARCH_TEXT.get(row);
+  if (!byKeys) {
+    byKeys = new Map();
+    SEARCH_TEXT.set(row, byKeys);
+  }
+  let text = byKeys.get(cacheKey);
+  if (text === undefined) {
+    text = build();
+    byKeys.set(cacheKey, text);
+  }
+  return text;
+}
+
+/**
  * 表格可见行的唯一算法。组件内部用它，页面要「当前看到的这些行」（发票库导出
  * CSV）时也用它，两边不会走岔。
  */
 export function filterRows<T>(rows: T[], options: FilterRowsOptions<T>): T[] {
   const needle = options.query.trim().toLowerCase();
   const active = options.filters?.find((item) => item.key === options.filterKey);
+  if (!active && !needle) return rows;
+  const cacheKey = options.searchKeys.join('\u0000');
   return rows.filter((row) => {
     if (active && !active.test(row)) return false;
     if (!needle) return true;
-    return options.searchKeys.some((key) => String(row[key] ?? '').toLowerCase().includes(needle));
+    return searchTextOf(row, options.searchKeys, cacheKey).includes(needle);
   });
 }
 
@@ -172,6 +205,7 @@ export function DataTable<T extends object>({
   toolbarExtra,
   emptyText = '暂无记录',
   defaultPageSize = 50,
+  preFiltered = false,
   pagination = true,
   scrollX = 'max-content',
   testId,
@@ -179,15 +213,27 @@ export function DataTable<T extends object>({
   const [query, setQuery] = useControlled(queryProp, '', onQueryChange);
   const [requestedKey, setFilterKey] = useControlled(filterKeyProp, defaultFilterKey, onFilterChange);
   const [pageSize, setPageSize] = useState<number>(defaultPageSize);
+  const [page, setPage] = useState(1);
   const wrapper = useRef<HTMLDivElement>(null);
 
   const keys = useMemo(() => searchKeys ?? columnKeys(columns), [searchKeys, columns]);
   const filterKey = resolveFilterKey(requestedKey, filters);
 
+  // 输入框拿到的是即时值，筛选走延后值：敲键时先把光标喂饱，大表的重算让路。
+  const deferredQuery = useDeferredValue(query);
   const visible = useMemo(
-    () => filterRows(rows, { query, filterKey, filters, searchKeys: keys }),
-    [rows, query, filterKey, filters, keys],
+    () => (preFiltered ? rows : filterRows(rows, { query: deferredQuery, filterKey, filters, searchKeys: keys })),
+    [preFiltered, rows, deferredQuery, filterKey, filters, keys],
   );
+
+  /* 分页受控。antd 自己那份 current 只在越界时才夹回来，于是「在第 5 页搜索」
+     会落在结果的第 5 页上——用户以为没搜到。查询或筛选一变就回到第 1 页；
+     普通的数据刷新（行变多变少）只夹到最后一页，不打断当前浏览位置。 */
+  useEffect(() => {
+    setPage(1);
+  }, [query, filterKey]);
+  const lastPage = Math.max(1, Math.ceil(visible.length / pageSize));
+  const current = Math.min(page, lastPage);
 
   return (
     <div ref={wrapper} data-testid={testId}>
@@ -223,10 +269,14 @@ export function DataTable<T extends object>({
           pagination
             ? {
                 size: 'small',
+                current,
                 pageSize,
                 pageSizeOptions: [20, 50, 100],
                 showSizeChanger: true,
-                onShowSizeChange: (_current, size) => setPageSize(size),
+                onChange: (nextPage, nextSize) => {
+                  setPage(nextPage);
+                  setPageSize(nextSize);
+                },
                 showTotal: (total) => `共 ${total} 条`,
                 hideOnSinglePage: false,
               }
