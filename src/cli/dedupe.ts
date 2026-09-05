@@ -6,6 +6,7 @@ import { log } from '../log.js';
 import { assertArchiveTransactionsRecovered } from '../download/archiveJournal.js';
 import { readCsvRows } from '../util/csv.js';
 import { containerStemKey } from '../extract/documentIdentity.js';
+import { isSupportingDocument } from '../extract/classify.js';
 import { ArtifactIndex } from '../util/identity.js';
 import { contentHash as hashOf } from '../util/hash.js';
 import { parseDedupeArgs, type DedupeOpts } from './args.js';
@@ -143,6 +144,15 @@ export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['
   return report;
 }
 
+function supportingFilenames(cfg: Config, cwd: string): Set<string> {
+  const rows = [
+    ...readCsvRows(path.resolve(cwd, cfg.ocr.resultsCsv)),
+    ...readCsvRows(path.resolve(cwd, cfg.paths.invoices, 'ocr', 'ocr-pending.csv')),
+    ...readCsvRows(path.resolve(cwd, cfg.output.csv)),
+  ];
+  return new Set(rows.filter(isSupportingDocument).map((row) => row.filename ?? ''));
+}
+
 function runContainerDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport {
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
   const ledgerCsv = path.resolve(cwd, cfg.output.csv);
@@ -166,7 +176,8 @@ function runContainerDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
 
   const rawRows = readCsvRows(ledgerCsv);
   if (rawRows.length === 0) return report;
-  const rows = rawRows.map(toLedgerRow);
+  const supporting = supportingFilenames(cfg, cwd);
+  const rows = rawRows.map(toLedgerRow).filter((item) => !supporting.has(item.filename));
   const redundant = redundantOfdRows(rows);
   report.pairs = redundant.length;
   report.redundant = redundant.length;
@@ -230,7 +241,9 @@ function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
       !((existing.status ?? '').toLowerCase() === 'success' && (next.status ?? '').toLowerCase() !== 'success'));
   }
   const groups = new Map<string, Record<string, string>[]>();
+  const supporting = supportingFilenames(cfg, cwd);
   for (const row of index.values()) {
+    if (supporting.has(row.filename ?? '')) continue;
     const invoiceNo = (row.invoiceNo ?? '').trim();
     if ((row.status ?? '').toLowerCase() !== 'success' || !/^\d{20}$/.test(invoiceNo)) continue;
     const members = groups.get(invoiceNo) ?? [];

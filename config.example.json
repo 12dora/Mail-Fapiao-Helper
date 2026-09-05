@@ -25,6 +25,9 @@
   "output": {
     "csv": "./invoices.csv"
   },
+  "archive": {
+    "keepSupporting": true
+  },
   "rename": {
     "avoidConflictBeforeOcr": true,
     "rule": "{seller}-{amount}.pdf",

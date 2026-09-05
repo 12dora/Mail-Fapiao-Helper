@@ -112,5 +112,16 @@ try {
   assert.equal(oldMailDetail.ok, true);
   assert.equal(oldMailDetail.mail.mailHash, legacyHash);
 
+  fs.appendFileSync(path.join(cwd, 'invoices.csv'), `\n${archived},<a>,订单明细.pdf,support-content,订单明细.pdf\n`);
+  fs.appendFileSync(path.join(cwd, 'ocr.csv'), `\n${archived},订单明细.pdf,support-content,success,short-number\n`);
+  const supportingDetail = await handlers.get('mfh:invoice-detail')({}, { filename: '订单明细.pdf' });
+  assert.equal(supportingDetail.ok, true);
+  assert.equal(supportingDetail.invoice.row.documentType, 'supporting');
+  assert.equal(supportingDetail.invoice.row.duplicateCount, 0);
+  assert.deepEqual(supportingDetail.invoice.duplicates, []);
+  const invoiceAfter = await handlers.get('mfh:invoice-detail')({}, { filename: 'legacy.pdf' });
+  assert.equal(invoiceAfter.invoice.row.duplicateCount, 2);
+  assert.equal(invoiceAfter.invoice.duplicates.length, 1);
+
   console.log('detail-unit: passed');
 } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
