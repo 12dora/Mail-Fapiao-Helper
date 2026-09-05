@@ -1991,7 +1991,10 @@ async function testDedupeByInvoiceNumber() {
     const csvPaths = [cfg.output.csv, pendingCsv, cfg.ocr.resultsCsv];
     const before = await Promise.all(csvPaths.map((file) => readFile(file, 'utf8')));
     const args = ['dedupe', '--config', configPath, '--by', 'invoice-no', '--json'];
-    const dry = JSON.parse((await runMfh(args)).stdout);
+    const dryOutput = (await runMfh(args)).stdout;
+    assert.equal(dryOutput.trim().split('\n').length, 1, '--json emits one compact line');
+    const dry = JSON.parse(dryOutput);
+    assert.deepEqual(JSON.parse(await readFile(join(tmp, '.mfh-cache', 'dedupe-report.json'), 'utf8')), dry);
     assert.equal(dry.mode, 'invoice-no');
     assert.equal(dry.groups.length, 2);
     assert.equal(dry.conflicts, 1);
@@ -2055,6 +2058,159 @@ async function testDedupeByInvoiceNumber() {
     assert.equal(sellerConflict.conflicts, 1);
     assert.match(sellerConflict.groups[0].conflictReason, /seller/);
     assert.equal(sellerConflict.quarantined, 0);
+  });
+}
+
+async function testDedupeKeeperVerificationAndRecovery() {
+  const { default: assert } = await import('node:assert/strict');
+  const { contentHash } = await import('../../dist/util/hash.js');
+  const { rewriteCsvRows, readCsvRows } = await import('../../dist/util/csv.js');
+  const { INVOICE_CSV_HEADER, OCR_CSV_HEADER } = await import('../../dist/pipeline/csvDurability.js');
+  const { runDedupe } = await import('../../dist/cli/dedupe.js');
+  await withTempDir('mfh-cli-dedupe-recovery-', async (tmp) => {
+    const { cfg, path: configPath } = await writeConfig(tmp);
+    const pendingCsv = join(cfg.paths.invoices, 'ocr', 'ocr-pending.csv');
+    await mkdir(join(cfg.paths.invoices, 'ocr'), { recursive: true });
+    await mkdir(join(tmp, 'custom'), { recursive: true });
+    const resultHeader = 'hash,filename,source,contentHash,status,invoiceNo,seller,amount\n';
+    const keeperBytes = Buffer.from('keeper bytes');
+    const removedBytes = Buffer.from('duplicate bytes');
+    const keeper = { hash: 'mailhash01', filename: 'keeper.pdf', source: 'invoice.zip/a.pdf',
+      contentHash: contentHash(keeperBytes), status: 'success', invoiceNo: '12345678901234567890',
+      seller: '商家', amount: '10' };
+    const removed = { ...keeper, filename: 'removed.ofd', source: 'invoice.zip/a.ofd',
+      contentHash: contentHash(removedBytes) };
+    await writeFile(join(cfg.paths.invoices, removed.filename), removedBytes);
+    for (const [filename, hash, bytes] of [
+      ['keeper.pdf', keeper.contentHash, null],
+      ['keeper.pdf', keeper.contentHash, Buffer.from('changed keeper')],
+      ['keeper.pdf', '', keeperBytes],
+      ['../outside.pdf', keeper.contentHash, null],
+      ['C:/outside.pdf', keeper.contentHash, null],
+    ]) {
+      await rm(join(cfg.paths.invoices, keeper.filename), { force: true });
+      if (bytes) await writeFile(join(cfg.paths.invoices, keeper.filename), bytes);
+      const rows = [{ ...keeper, filename, contentHash: hash }, removed];
+      rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+      rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, rows);
+      const before = await readFile(cfg.output.csv, 'utf8');
+      const report = runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp);
+      assert.equal(report.redundant, 0, `unverified keeper ${filename} must protect its group`);
+      assert.deepEqual(report.skipped, [{ filename, reason: 'keeper_unverified' }]);
+      assert.deepEqual(report.groups[0].removed, []);
+      assert.equal(await readFile(cfg.output.csv, 'utf8'), before);
+      assert.deepEqual(await readFile(join(cfg.paths.invoices, removed.filename)), removedBytes);
+    }
+    // Reject a symlink even when its outside bytes match the keeper hash.
+    await writeFile(join(tmp, 'outside.pdf'), keeperBytes);
+    await fs.promises.symlink(join(tmp, 'outside.pdf'), join(cfg.paths.invoices, keeper.filename));
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, [keeper, removed]);
+    assert.equal(runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp).skipped[0].reason, 'keeper_unverified');
+    await rm(join(cfg.paths.invoices, keeper.filename));
+    await writeFile(join(cfg.paths.invoices, keeper.filename), keeperBytes);
+
+    // Exact and blank hashes are pruned; a different nonblank historical identity survives.
+    const historical = { ...removed, contentHash: 'ffffffffffff', status: 'error', invoiceNo: '' };
+    const rows = [keeper, { ...removed, contentHash: '' }, removed, historical];
+    rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+    rewriteCsvRows(pendingCsv, OCR_CSV_HEADER, rows);
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, rows);
+    const report = runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp);
+    assert.equal(report.ledgerRowsRemoved, 2);
+    assert.equal(report.ocrRowsRemoved, 4);
+    for (const csv of [cfg.output.csv, pendingCsv, cfg.ocr.resultsCsv]) {
+      assert.deepEqual(readCsvRows(csv).map((row) => [row.filename, row.contentHash]),
+        [[keeper.filename, keeper.contentHash], [historical.filename, historical.contentHash]]);
+    }
+
+    // A real failed move must observe all CSVs already pruned and leave a replayable plan.
+    await writeFile(join(cfg.paths.invoices, removed.filename), removedBytes);
+    rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+    rewriteCsvRows(pendingCsv, OCR_CSV_HEADER, rows);
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, rows);
+    const renameSync = fs.renameSync;
+    let failedMoveObserved = false;
+    fs.renameSync = (source, target) => {
+      if (source === join(cfg.paths.invoices, removed.filename)) {
+        failedMoveObserved = true;
+        for (const csv of [cfg.output.csv, pendingCsv, cfg.ocr.resultsCsv]) {
+          assert.deepEqual(readCsvRows(csv).map((row) => row.contentHash),
+            [keeper.contentHash, historical.contentHash], 'all CSVs pruned before moving');
+        }
+        const planFile = join(target, '..', '..', 'plan.json');
+        const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
+        assert.deepEqual(plan.moves, [{ source, target, filename: removed.filename,
+          contentHash: removed.contentHash, csvKeys: { filename: removed.filename, contentHash: removed.contentHash } }]);
+        throw Object.assign(new Error('simulated interrupted move'), { code: 'EIO' });
+      }
+      return renameSync(source, target);
+    };
+    try {
+      assert.throws(() => runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp), /simulated interrupted move/);
+    } finally {
+      fs.renameSync = renameSync;
+    }
+    assert.equal(failedMoveObserved, true);
+    assert.deepEqual(await readFile(join(cfg.paths.invoices, removed.filename)), removedBytes);
+    assert.equal(runDedupe(cfg, { by: 'container', apply: false }, tmp).recovered, 1);
+
+    // An inaccessible CSV is not empty: retain the plan and every pending file move.
+    await writeFile(join(cfg.paths.invoices, removed.filename), removedBytes);
+    rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, rows);
+    rewriteCsvRows(pendingCsv, OCR_CSV_HEADER, rows);
+    rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, rows);
+    const originalExists = fs.existsSync;
+    const originalRead = fs.readFileSync;
+    fs.existsSync = (file) => file === cfg.output.csv ? false : originalExists(file);
+    fs.readFileSync = (file, ...args) => {
+      if (file === cfg.output.csv) throw Object.assign(new Error('simulated inaccessible ledger'), { code: 'EACCES' });
+      return originalRead(file, ...args);
+    };
+    try {
+      assert.throws(() => runDedupe(cfg, { by: 'invoice-no', apply: true }, tmp), /simulated inaccessible ledger/);
+    } finally {
+      fs.existsSync = originalExists;
+      fs.readFileSync = originalRead;
+    }
+    assert.deepEqual(await readFile(join(cfg.paths.invoices, removed.filename)), removedBytes);
+    assert.equal(readCsvRows(cfg.output.csv).length, rows.length);
+    assert.equal(runDedupe(cfg, { by: 'container', apply: false }, tmp).recovered, 1);
+
+    // Simulate every interruption boundary by hand, then recover in either mode, including dry-run.
+    for (const [by, phase] of [
+      ['container', 'planned'], ['invoice-no', 'ledger-pruned'],
+      ['container', 'all-pruned'], ['invoice-no', 'moved'], ['container', 'copied'],
+    ]) {
+      const planDir = join(cfg.paths.invoices, '.dedupe-quarantine', `recovery-${phase}`);
+      const targetDir = join(planDir, 'by-invoice-no');
+      await mkdir(targetDir, { recursive: true });
+      const source = join(cfg.paths.invoices, removed.filename);
+      const target = join(targetDir, removed.filename);
+      await writeFile(source, removedBytes);
+      rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, phase === 'planned' ? rows : [keeper, historical]);
+      rewriteCsvRows(pendingCsv, OCR_CSV_HEADER, ['planned', 'ledger-pruned'].includes(phase) ? rows : [keeper, historical]);
+      rewriteCsvRows(cfg.ocr.resultsCsv, resultHeader, ['planned', 'ledger-pruned'].includes(phase) ? rows : [keeper, historical]);
+      if (phase === 'moved') await fs.promises.rename(source, target);
+      if (phase === 'copied') await writeFile(target, removedBytes);
+      await writeFile(join(planDir, 'plan.json'), JSON.stringify({
+        version: 1,
+        csvPaths: { ledger: cfg.output.csv, pending: pendingCsv, results: cfg.ocr.resultsCsv },
+        moves: [{ source, target, filename: removed.filename, contentHash: removed.contentHash,
+          csvKeys: { filename: removed.filename, contentHash: removed.contentHash } }],
+      }));
+      const recovered = JSON.parse((await runMfh(['dedupe', '--config', configPath, '--by', by, '--json'])).stdout);
+      assert.equal(recovered.recovered, 1, `${by}/${phase} recovers before dry-run`);
+      assert.equal(recovered.quarantined, 0, 'recovery counts are separate from the new run');
+      assert.deepEqual(await readFile(target), removedBytes);
+      assert.deepEqual((await readdir(planDir)).sort(), ['by-invoice-no']);
+      assert.deepEqual((await readdir(cfg.paths.invoices)).filter((name) => /\.(pdf|ofd)$/.test(name)), ['keeper.pdf']);
+      for (const csv of [cfg.output.csv, pendingCsv, cfg.ocr.resultsCsv]) {
+        assert.deepEqual(readCsvRows(csv).map((row) => [row.filename, row.contentHash]),
+          [[keeper.filename, keeper.contentHash], [historical.filename, historical.contentHash]]);
+      }
+      const second = JSON.parse((await runMfh(['dedupe', '--config', configPath, '--by', by, '--json'])).stdout);
+      assert.equal(second.recovered, 0, 'completed journals are not replayed');
+    }
   });
 }
 
@@ -2359,6 +2515,7 @@ await runSuite('CLI regression tests', async () => {
   await testZipWithNoArchivableEntryIsReported();
   await testDedupeRemovesOnlySameContainerPdfOfdPairs();
   await testDedupeByInvoiceNumber();
+  await testDedupeKeeperVerificationAndRecovery();
   await testPlatformChromeIsNotTreatedAsInvoice();
   await testInlineBodyImagesAreNotArchivedAsInvoices();
   await testSameDeliveryPdfOfdSiblingsArchiveOnce();

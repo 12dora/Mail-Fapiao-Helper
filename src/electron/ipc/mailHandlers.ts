@@ -92,6 +92,7 @@ export interface RegisterMailHandlersDeps {
   ocrPendingCsvPath(): string;
   appSummary(): unknown;
   sanitizeAppSummary(summary: AppSummary): AppSummary;
+  issueOpenableHandle(target: string): string;
 }
 
 /** 连接测试/文件夹列举共用的 IMAP 参数解析（保存失败时回退到用户刚输入的值）。 */

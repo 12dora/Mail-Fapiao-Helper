@@ -163,3 +163,23 @@ export class ArtifactIndex<T> {
     return this.rows.size;
   }
 }
+
+/** CSV identity shared by library and detail joins; missing hashes stay eligible for legacy fallback. */
+export function artifactIdentityForRow(row: Record<string, string>): ArtifactIdentity {
+  return {
+    hash: row.hash || row.mailHash || '',
+    filename: row.filename || '',
+    source: row.source || '',
+    contentHash: row.contentHash || '',
+  };
+}
+
+/** Preserve successful results while still registering upgraded legacy identities. */
+export function indexArtifactResults(rows: Record<string, string>[]): ArtifactIndex<Record<string, string>> {
+  const index = new ArtifactIndex<Record<string, string>>();
+  for (const row of rows) {
+    index.set(artifactIdentityForRow(row), row, (existing, next) =>
+      existing.status?.toLowerCase() !== 'success' || next.status?.toLowerCase() === 'success');
+  }
+  return index;
+}

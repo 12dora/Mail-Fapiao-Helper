@@ -256,15 +256,26 @@ export function ensureCsvSchema(
   );
 }
 
-export function readCsvRows(csvPath: string): Record<string, string>[] {
-  if (!fs.existsSync(csvPath)) return [];
-  // 空文件没有合法表头：当作尚无数据，避免把第一行数据当 header（CORE-05）。
-  try {
-    if (fs.statSync(csvPath).size === 0) return [];
-  } catch {
-    return [];
+export function readCsvRows(csvPath: string, opts: { strict?: boolean } = {}): Record<string, string>[] {
+  let text: string;
+  if (opts.strict) {
+    // Destructive callers must distinguish an absent CSV from an inaccessible one.
+    try {
+      text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+  } else {
+    if (!fs.existsSync(csvPath)) return [];
+    // 空文件没有合法表头：当作尚无数据，避免把第一行数据当 header（CORE-05）。
+    try {
+      if (fs.statSync(csvPath).size === 0) return [];
+    } catch {
+      return [];
+    }
+    text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   }
-  const text = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(text);
   if (records.length === 0) return [];
   const header = records[0] ?? [];

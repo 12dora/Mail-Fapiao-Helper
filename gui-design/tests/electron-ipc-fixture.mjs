@@ -136,6 +136,7 @@ async function verifyDetailIpc(page, config) {
   const subject = 'Invoice detail fixture';
   const pdf = '%PDF-1.4\n% detail fixture\n';
   const invoiceUrl = 'https://invoice.example.com/download/invoice.pdf?token=short-token';
+  const sourceUrl = `https://fixture-user:fixture-secret@invoice.example.com/invoice.pdf?token=${'s'.repeat(80)}&id=visible`;
   const csv = (header, rows) => `${[header, ...rows].map((row) => row.map((cell) => JSON.stringify(String(cell))).join(',')).join('\n')}\n`;
   await mkdir(config.paths.samples, { recursive: true });
   await mkdir(config.paths.pending, { recursive: true });
@@ -161,14 +162,14 @@ async function verifyDetailIpc(page, config) {
   ));
   await writeFile(config.output.csv, csv(
     ['messageId', 'date', 'from', 'subject', 'filename', 'source', 'contentHash', 'mailHash'],
-    [[messageId, date, from, subject, filename, 'attachment', contentHash, hash],
+    [[messageId, date, from, subject, filename, sourceUrl, contentHash, hash],
       ['<other@example.com>', date, from, 'Other mail', duplicateFilename, 'attachment', 'abcdef123456', 'e'.repeat(32)],
       [messageId, date, from, subject, '../manual-rollback-source.pdf', 'attachment', '', hash]],
   ));
   const ocrHeader = ['hash', 'messageId', 'date', 'from', 'subject', 'filename', 'source', 'format',
     'documentType', 'invoiceType', 'seller', 'amount', 'dateValue', 'invoiceNo', 'transport',
     'extractedBy', 'parserVersion', 'ocrVendor', 'status', 'error', 'contentHash'];
-  const recognized = [hash, messageId, date, from, subject, filename, 'attachment', 'pdf',
+  const recognized = [hash, messageId, date, from, subject, filename, sourceUrl, 'pdf',
     'invoice', '电子发票', 'Detail Seller', '123.45', '2026-05-21', invoiceNo, 'local',
     'pdf-text', 'fixture-v1', '', 'success', '', contentHash];
   const laterFailure = [...recognized];
@@ -225,6 +226,12 @@ async function verifyDetailIpc(page, config) {
     || invoice?.file?.format !== 'pdf' || invoice?.file?.handle !== invoice?.row?.fileHandle
     || invoice?.duplicates?.length !== 1 || invoice.duplicates[0]?.filename !== duplicateFilename) {
     fail(`invoice detail join/success-wins/file/duplicates incorrect: ${JSON.stringify(invoiceResult)}`);
+  }
+  for (const source of [document.source, invoice.row.source, invoice.ledger.source]) {
+    const url = new URL(source);
+    if (url.username || url.password || source.includes('s'.repeat(80)) || url.searchParams.get('id') !== 'visible') {
+      fail(`detail source must strip userinfo and redact long query values: ${source}`);
+    }
   }
   for (const candidate of ['missing.pdf', '../manual-rollback-source.pdf', join(config.paths.pending, `${hash}.eml`)]) {
     const result = await page.evaluate((filename_) => window.mfhBridge.invoiceDetail({ filename: filename_ }), candidate);
