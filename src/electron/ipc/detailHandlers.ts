@@ -106,7 +106,7 @@ export function registerDetailHandlers(deps: RegisterMailHandlersDeps): void {
       const filename = row.filename || '';
       const target = invoicePath(deps.invoicesDirPath(), filename);
       // The public facade invokes its private rendererOpenablePath; keep all redaction there.
-      const handle = target ? deps.sanitizeAppSummary({ ...summary, library: { ...summary.library, rows: [{ filename, filePath: target, date: '', seller: '', invoiceNo: '', amount: '', source: '', status: LIBRARY_STATUS.PENDING, documentType: '', invoiceType: '', error: '' }] } }).library.rows[0]?.filePath || '' : '';
+      const handle = target ? deps.sanitizeAppSummary({ ...summary, library: { ...summary.library, rows: [{ filename, filePath: target, fileHandle: target, mailHash: '', messageId: '', from: '', subject: '', contentHash: '', duplicateGroup: '', duplicateCount: 0, date: '', seller: '', invoiceNo: '', amount: '', source: '', status: LIBRARY_STATUS.PENDING, documentType: '', invoiceType: '', error: '' }] } }).library.rows[0]?.filePath || '' : '';
       const number = ocr?.invoiceNo || '';
       const duplicateCount = /^\d{20}$/.test(number) && ocr?.status?.toLowerCase() === 'success'
         ? results.filter(r => r.status?.toLowerCase() === 'success' && r.invoiceNo === number).length : 0;
@@ -176,7 +176,7 @@ export function registerDetailHandlers(deps: RegisterMailHandlersDeps): void {
         mailHash: normalized, messageId, date: metadata?.date || parsed?.date?.toISOString() || '',
         from: metadata?.from || parsed?.from?.text || '', subject: metadata?.subject || parsed?.subject || '',
         mailbox: indexed?.mailbox || '', hasAttachment: parsed ? parsed.attachments.length > 0 : indexed?.hasAttachment === '1',
-        bodyLinkCount: parsed ? urls.length : Number(indexed?.bodyLinkCount || 0), status: mailStatusFor(index, normalized).status,
+        bodyLinkCount: parsed ? urls.length : Number(indexed?.bodyLinkCount || 0), ...mailStatusFor(index, normalized),
         emlExists: emlLocation !== null, emlLocation,
         attachments: (parsed?.attachments || []).slice(0, 50).map(a => ({ filename: a.filename || '', size: a.size, contentType: a.contentType })),
         links: urls.slice(0, 50).map(url => ({ url: detailLinkUrl(url), label: '' })),
