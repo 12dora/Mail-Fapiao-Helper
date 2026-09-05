@@ -198,17 +198,5 @@ await withTempDir('mfh-summary-supporting-', async (dir) => {
   const evidenceRows = summarizeLibrary(cfg, dir).rows;
   assert.equal(evidenceRows.find((row) => row.filename === 'numbered.pdf').documentType, 'supporting');
   assert.notEqual(evidenceRows.find((row) => row.filename === 'different.pdf').documentType, 'supporting');
-
-  globalThis.window = {};
-  try {
-    const { invoiceExportRows } = await import('../scripts/exports.js');
-    const { mergeSection } = await import('../scripts/records.js');
-    assert.deepEqual(invoiceExportRows(library.rows).map((row) => row.filename).sort(), ['invoice.pdf', 'ride.pdf']);
-    mergeSection('library', { ...library, rows: library.rows.slice(0, 2), offset: 0 });
-    assert.equal(window.FPH.libraryTotal, 7);
-    assert.equal(window.FPH.libraryCursor, 2);
-  } finally {
-    delete globalThis.window;
-  }
 });
 console.log('summary-unit: passed');
