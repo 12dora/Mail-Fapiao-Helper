@@ -137,6 +137,7 @@ export function PendingDetailDrawer({ row, onClose, actions }: PendingDetailDraw
     <DetailDrawer
       open
       onClose={onClose}
+      testId="drawer-pending"
       loading={loading}
       title={row.subject || '无主题'}
       subtitle={`${row.date} · ${row.from}`}

@@ -135,6 +135,7 @@ function Duplicates({ rows }: { rows: InvoiceRow[] }): JSX.Element | null {
         pagination={false}
         scrollX={false}
         emptyText="没有同号发票"
+        testId="table-duplicates"
       />
     </div>
   );
@@ -216,6 +217,7 @@ export function InvoiceDrawer({ row, onClose }: InvoiceDrawerProps): JSX.Element
     <DetailDrawer
       open
       onClose={onClose}
+      testId="drawer-invoice"
       width={600}
       loading={loading && !detail}
       title={dash(shown.seller)}

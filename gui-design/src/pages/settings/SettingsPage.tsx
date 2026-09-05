@@ -70,7 +70,13 @@ function ActionBar({ state }: { state: SettingsFormState }): JSX.Element {
         <Button disabled={!dirty || saving} onClick={discard}>
           放弃更改
         </Button>
-        <Button type="primary" loading={saving} disabled={!dirty || busy} onClick={() => void save()}>
+        <Button
+          type="primary"
+          data-testid="action-settings-save"
+          loading={saving}
+          disabled={!dirty || busy}
+          onClick={() => void save()}
+        >
           保存
         </Button>
       </Space>
@@ -95,6 +101,7 @@ export function SettingsPage(): JSX.Element {
           <Alert
             type="error"
             showIcon
+            data-testid="config-error"
             message="配置文件无法读取"
             description={configError}
             action={

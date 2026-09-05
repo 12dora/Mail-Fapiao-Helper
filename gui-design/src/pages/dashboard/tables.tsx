@@ -53,6 +53,7 @@ export function BatchCard({ rows }: { rows: BatchRow[] }): JSX.Element {
         searchPlaceholder="搜索发件人或主题"
         defaultPageSize={20}
         emptyText="本次运行还没有新邮件"
+        testId="table-batch"
       />
     </Card>
   );
@@ -70,6 +71,7 @@ export function HistoryCard({ summary, loading }: { summary: AppSummary | null; 
         defaultPageSize={20}
         loading={loading}
         emptyText="还没有运行记录"
+        testId="table-history"
       />
     </Card>
   );

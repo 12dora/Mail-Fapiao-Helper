@@ -151,6 +151,7 @@ export function InboxPage(): JSX.Element {
             searchPlaceholder="搜索发件人或主题"
             filters={STATUS_FILTERS}
             emptyText="没有符合条件的邮件"
+            testId="table-inbox"
             onOpen={(item) => {
               setRow(item);
               setOpen(true);

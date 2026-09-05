@@ -147,6 +147,7 @@ export function LibraryPage(): JSX.Element {
               onOpen={setActive}
               scrollX={940}
               emptyText="没有符合条件的发票"
+              testId="table-library"
             />
           </Card>
         )}

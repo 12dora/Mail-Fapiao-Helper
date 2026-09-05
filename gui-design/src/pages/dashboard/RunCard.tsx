@@ -47,7 +47,13 @@ function MatchFields({ run }: { run: RunController }): JSX.Element {
         匹配正文
       </Checkbox>
       <Space size={8}>
-        <Switch size="small" checked={run.dryRun} disabled={run.busy} onChange={run.setDryRun} />
+        <Switch
+          size="small"
+          data-testid="toggle-dry-run"
+          checked={run.dryRun}
+          disabled={run.busy}
+          onChange={run.setDryRun}
+        />
         <span>试运行（不下载）</span>
       </Space>
     </Space>
@@ -63,11 +69,17 @@ export function RunCard({ run }: { run: RunController }): JSX.Element {
         <MatchFields run={run} />
 
         <Space>
-          <Button type="primary" loading={run.busy} disabled={run.busy} onClick={() => void run.start()}>
+          <Button
+            type="primary"
+            data-testid="action-run-start"
+            loading={run.busy}
+            disabled={run.busy}
+            onClick={() => void run.start()}
+          >
             {run.dryRun ? '开始试运行' : '开始处理'}
           </Button>
           <Tooltip title={run.running && !stoppable ? '这一步不能中途停止' : ''}>
-            <Button disabled={!stoppable} onClick={() => void run.stop()}>
+            <Button data-testid="action-run-stop" disabled={!stoppable} onClick={() => void run.stop()}>
               停止
             </Button>
           </Tooltip>

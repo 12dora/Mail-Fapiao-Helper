@@ -206,6 +206,7 @@ export function MailDrawer({ row, open, onClose }: MailDrawerProps): JSX.Element
     <DetailDrawer
       open={open}
       onClose={onClose}
+      testId="drawer-mail"
       loading={loading}
       title={row.subject || '无主题'}
       subtitle={detail?.date || row.date}

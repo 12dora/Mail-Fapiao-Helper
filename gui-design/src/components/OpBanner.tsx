@@ -66,6 +66,7 @@ export function OpBanner(): JSX.Element | null {
   return (
     <Alert
       banner
+      data-testid="op-banner"
       type="info"
       icon={<LoadingOutlined />}
       showIcon
