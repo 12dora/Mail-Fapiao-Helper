@@ -3,6 +3,7 @@ import path from 'node:path';
 import { loadConfig, type Config } from '../config.js';
 import { summarizeOcr, type OcrSummary } from '../ocr/summary.js';
 import { summarizePending, type PendingSummary } from '../pending/summary.js';
+import { loadState } from '../state.js';
 import { readCsvRows } from '../util/csv.js';
 import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
@@ -45,12 +46,16 @@ const DEFAULT_PAGE_LIMIT = 500;
 function pageOf<T>(rows: T[], opts: SummaryPageOptions | undefined): { rows: T[]; offset: number; limit: number } {
   const rawLimit = Number(opts?.limit);
   const rawOffset = Number(opts?.offset);
-  const limit = Number.isFinite(rawLimit) && rawLimit >= 0 ? Math.floor(rawLimit) : DEFAULT_PAGE_LIMIT;
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 0 ? Math.min(100000, Math.floor(rawLimit)) : DEFAULT_PAGE_LIMIT;
   const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.min(Math.floor(rawOffset), rows.length) : 0;
   return { rows: rows.slice(offset, offset + limit), offset, limit };
 }
 
 export interface InboxRow {
+  mailHash: string;
+  status: 'archived' | 'pending' | 'unprocessed' | 'ignored';
+  documentCount: number;
+  mailOpenable: boolean;
   messageId: string;
   date: string;
   from: string;
@@ -74,6 +79,14 @@ export interface InboxSummary {
 }
 
 export interface InvoiceRow {
+  mailHash: string;
+  messageId: string;
+  from: string;
+  subject: string;
+  contentHash: string;
+  fileHandle: string;
+  duplicateGroup: string;
+  duplicateCount: number;
   date: string;
   seller: string;
   invoiceNo: string;
@@ -92,6 +105,7 @@ function isArchivedDocument(name: string): boolean {
 }
 
 export interface LibrarySummary {
+  duplicates: { groups: number; rows: number };
   pendingCsv: string;
   resultsCsv: string;
   /** 切片前的真实总数。 */
@@ -174,15 +188,52 @@ function resolveIn(cwd: string, value: string): string {
 export function summarizeInbox(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): InboxSummary {
   const indexCsv = resolveIn(cwd, path.join(cfg.paths.samples, 'INDEX.csv'));
   const rawRows = readCsvRows(indexCsv);
-  const rows = rawRows.map((row): InboxRow => ({
-    messageId: row.messageId ?? '',
-    date: row.date ?? '',
-    from: row.from ?? '',
-    subject: row.subject ?? '',
-    mailbox: row.mailbox ?? '',
-    hasAttachment: (row.hasAttachment ?? '') === '1',
-    bodyLinkCount: Number(row.bodyLinkCount ?? 0) || 0,
-  })).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+  const documentCounts = new Map<string, number>();
+  const legacyDocumentCounts = new Map<string, number>();
+  for (const row of readCsvRows(resolveIn(cwd, cfg.output.csv))) {
+    const hash = (row.mailHash ?? '').trim();
+    const key = hash || row.messageId || '';
+    if (!key) continue;
+    const counts = hash ? documentCounts : legacyDocumentCounts;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const pendingHashes = new Set<string>();
+  const pendingMessageIds = new Set<string>();
+  for (const row of readCsvRows(resolveIn(cwd, path.join(cfg.paths.pending, 'pending.csv')))) {
+    const hash = (row.mailHash || row.hash || '').trim();
+    if (hash) pendingHashes.add(hash);
+    else if (row.messageId) pendingMessageIds.add(row.messageId);
+  }
+  const processedHashes = new Set(loadState(resolveIn(cwd, 'state.json')).processedHashes);
+  const mailFiles = new Set<string>();
+  for (const dir of [cfg.paths.samples, cfg.paths.pending]) {
+    try {
+      for (const entry of fs.readdirSync(resolveIn(cwd, dir), { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith('.eml')) mailFiles.add(entry.name.slice(0, -4));
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  const rows = rawRows.map((row): InboxRow => {
+    const mailHash = row.mailHash || row.hash || '';
+    const messageId = row.messageId || '';
+    const documentCount = (documentCounts.get(mailHash) ?? 0) + (legacyDocumentCounts.get(messageId) ?? 0);
+    const pending = pendingHashes.has(mailHash) || pendingMessageIds.has(messageId);
+    return {
+      mailHash,
+      messageId,
+      status: documentCount > 0 ? 'archived' : pending ? 'pending' : processedHashes.has(mailHash) ? 'ignored' : 'unprocessed',
+      documentCount,
+      mailOpenable: mailFiles.has(mailHash),
+      date: row.date ?? '',
+      from: row.from ?? '',
+      subject: row.subject ?? '',
+      mailbox: row.mailbox ?? '',
+      hasAttachment: (row.hasAttachment ?? '') === '1',
+      bodyLinkCount: Number(row.bodyLinkCount ?? 0) || 0,
+    };
+  }).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
   const months = rows.map((row) => monthFromIso(row.date)).filter(Boolean).sort();
   const page = pageOf(rows, opts);
@@ -239,23 +290,55 @@ function libraryStatusOf(row: Record<string, string>): LibraryStatus {
 export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: SummaryPageOptions): LibrarySummary {
   const ocr = summarizeOcr(cfg, cwd);
   const resultRows = currentResultRows(readCsvRows(ocr.resultsCsv));
+  const ledgerByArtifact = new Map<string, Record<string, string>>();
+  const ledgerByFilename = new Map<string, Record<string, string>>();
+  for (const row of readCsvRows(resolveIn(cwd, cfg.output.csv))) {
+    ledgerByArtifact.set(`${row.filename || ''}\0${row.contentHash || ''}`, row);
+    ledgerByFilename.set(row.filename || '', row);
+  }
+  function metadata(row: Record<string, string>) {
+    const filename = row.filename || '';
+    const ledger = row.contentHash
+      ? ledgerByArtifact.get(`${filename}\0${row.contentHash}`)
+      : ledgerByFilename.get(filename);
+    return {
+      mailHash: row.hash || row.mailHash || ledger?.mailHash || '',
+      messageId: row.messageId || ledger?.messageId || '',
+      from: row.from || ledger?.from || '',
+      subject: row.subject || ledger?.subject || '',
+      contentHash: row.contentHash || ledger?.contentHash || '',
+      fileHandle: filename ? resolveIn(cwd, path.join(cfg.paths.invoices, filename)) : '',
+      duplicateGroup: '',
+      duplicateCount: 0,
+    };
+  }
+  const duplicateGroups = new Map<string, InvoiceRow[]>();
   const rows = resultRows
-    .map((row): InvoiceRow => ({
-      date: row.dateValue || row.date || '',
-      seller: row.seller || '未识别销售方',
-      invoiceNo: row.invoiceNo || '',
-      amount: money(row.amount || ''),
-      // COPY-17：OCR transport（http/cli）不是发票来源；在有真实邮件/站点溯源前
-      // 普通列表不展示来源字段（空串），避免「归档文件」这种误导性占位。
-      source: '',
-      filename: row.filename || '',
-      filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
-      // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
-      status: libraryStatusOf(row),
-      documentType: row.documentType || '',
-      invoiceType: row.invoiceType || '',
-      error: row.error || '',
-    }))
+    .map((row): InvoiceRow => {
+      const invoice: InvoiceRow = {
+        ...metadata(row),
+        date: row.dateValue || row.date || '',
+        seller: row.seller || '未识别销售方',
+        invoiceNo: (row.invoiceNo || '').trim(),
+        amount: money(row.amount || ''),
+        // COPY-17：OCR transport（http/cli）不是发票来源；在有真实邮件/站点溯源前
+        // 普通列表不展示来源字段（空串），避免「归档文件」这种误导性占位。
+        source: '',
+        filename: row.filename || '',
+        filePath: row.filename ? resolveIn(cwd, path.join(cfg.paths.invoices, row.filename)) : '',
+        // partial：服务返回成功但关键字段缺失，属于「待补充」而不是「完整」（APP-14B）。
+        status: libraryStatusOf(row),
+        documentType: row.documentType || '',
+        invoiceType: row.invoiceType || '',
+        error: row.error || '',
+      };
+      if ((row.status || '').toLowerCase() === 'success' && /^\d{20}$/.test(invoice.invoiceNo)) {
+        const group = duplicateGroups.get(invoice.invoiceNo) ?? [];
+        group.push(invoice);
+        duplicateGroups.set(invoice.invoiceNo, group);
+      }
+      return invoice;
+    })
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
   const seenFiles = new Set(rows.map((row) => row.filename).filter(Boolean));
   for (const row of readCsvRows(ocr.pendingCsv)) {
@@ -263,6 +346,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
     if (!filename || seenFiles.has(filename)) continue;
     seenFiles.add(filename);
     rows.push({
+      ...metadata(row),
       date: row.date || '',
       seller: row.documentType === 'supporting' ? '支撑材料' : '待识别',
       invoiceNo: '',
@@ -280,6 +364,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
     for (const entry of fs.readdirSync(resolveIn(cwd, cfg.paths.invoices), { withFileTypes: true })) {
       if (!entry.isFile() || !isArchivedDocument(entry.name) || seenFiles.has(entry.name)) continue;
       rows.push({
+        ...metadata({ filename: entry.name }),
         date: '',
         seller: '待识别',
         invoiceNo: '',
@@ -298,6 +383,17 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
   }
   rows.sort((a, b) => Date.parse(b.date) - Date.parse(a.date) || a.filename.localeCompare(b.filename, 'zh-CN'));
 
+  const duplicates = { groups: 0, rows: 0 };
+  for (const [invoiceNo, group] of duplicateGroups) {
+    if (group.length < 2) continue;
+    duplicates.groups++;
+    duplicates.rows += group.length;
+    for (const row of group) {
+      row.duplicateGroup = invoiceNo;
+      row.duplicateCount = group.length;
+    }
+  }
+
   const itinerary = ocr.byDocumentType.find((group) => group.key === 'itinerary')?.count ?? 0;
   const supporting = ocr.ignored;
   const invoiceLike = Math.max(0, ocr.recognized - itinerary);
@@ -312,6 +408,7 @@ export function summarizeLibrary(cfg: Config, cwd = process.cwd(), opts?: Summar
   const pendingRows = statusCounts[LIBRARY_STATUS.PENDING];
   const page = pageOf(rows, opts);
   return {
+    duplicates,
     pendingCsv: ocr.pendingCsv,
     resultsCsv: ocr.resultsCsv,
     // total 是切片前的真实总数，renderer 据此判断是否还有下一页。
