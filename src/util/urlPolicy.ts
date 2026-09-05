@@ -1,8 +1,42 @@
 import net from 'node:net';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { ipv6ToBytes, isBlockedIp, isLoopbackHost, isLoopbackIp } from './ipPolicy.js';
+import { isResolverPlaceholder, loadResolverProfile } from './resolverProfile.js';
+import { log } from '../log.js';
 
 export { ipv6ToBytes };
+
+let placeholderNoticeEmitted = false;
+
+/**
+ * 把一次 DNS 结果筛成「可以连的地址」，命中 default-deny 就抛 `blocked_url:private_ip`。
+ *
+ * 唯一的放宽口是 fake-IP 解析器（Clash / Surge 等把所有公网域名映射到
+ * `198.18.0.0/15` 之类的占位段）：这种机器上 DNS 结果不再代表真实目的地，
+ * 逐条按 IP 判定会把每一张发票直链都误判成内网。详见 `resolverProfile.ts`。
+ * 该放宽**只对域名解析结果生效**——URL 里写死的 IP 字面量在调用方就已判掉，
+ * 走不到这里。
+ */
+async function screenResolvedAddresses(host: string, addresses: string[]): Promise<string[]> {
+  const blocked = addresses.filter((address) => isBlockedIp(address));
+  if (blocked.length === 0) return [...addresses];
+
+  const profile = await loadResolverProfile();
+  const stillBlocked = blocked.filter((address) => !isResolverPlaceholder(profile, address));
+  if (stillBlocked.length > 0) {
+    throw new Error(`blocked_url:private_ip:${host}->${stillBlocked[0]}`);
+  }
+
+  // 整批都是解析器占位地址：本机跑着 fake-IP 代理，真实目的地由 TUN/代理还原。
+  if (!placeholderNoticeEmitted) {
+    placeholderNoticeEmitted = true;
+    log.info(
+      `DNS placeholder mode detected (${profile.detail}); `
+      + 'resolved addresses are proxy placeholders, not private hosts',
+    );
+  }
+  return [...addresses];
+}
 
 /** 一次 SSRF 校验得到的 URL + 已验证的公网 IP 列表（用于 DNS pin）。 */
 export interface PublicUrlResolution {
@@ -42,12 +76,7 @@ export async function resolvePublicUrl(urlStr: string): Promise<PublicUrlResolut
     throw new Error(`blocked_url:dns:${host}`);
   }
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
-  const publicAddrs: string[] = [];
-  for (const a of addrs) {
-    if (isBlockedIp(a.address)) throw new Error(`blocked_url:private_ip:${host}->${a.address}`);
-    publicAddrs.push(a.address);
-  }
-  return { url, addresses: publicAddrs };
+  return { url, addresses: await screenResolvedAddresses(host, addrs.map((a) => a.address)) };
 }
 
 /**
@@ -103,12 +132,7 @@ export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolu
     return { url, addresses: loopbackAddrs };
   }
 
-  const publicAddrs: string[] = [];
-  for (const a of addrs) {
-    if (isBlockedIp(a.address)) throw new Error(`blocked_url:private_ip:${host}->${a.address}`);
-    publicAddrs.push(a.address);
-  }
-  return { url, addresses: publicAddrs };
+  return { url, addresses: await screenResolvedAddresses(host, addrs.map((a) => a.address)) };
 }
 
 /** Redirect / service hop policy locked from the first authorized hop. */

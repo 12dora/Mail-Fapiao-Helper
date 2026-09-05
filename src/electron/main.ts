@@ -44,6 +44,7 @@ import {
 } from './runtime.js';
 import {
   ocrRunMessage,
+  pendingRetryRunMessage,
   pipelineRunMessage,
   recordHistory,
   reportFor,
@@ -183,6 +184,7 @@ const operationHandlers = registerOperationHandlers({
   recordHistory,
   tryAppSummary,
   ocrRunMessage,
+  pendingRetryRunMessage,
   pipelineRunMessage,
   ocrPendingCsvPath,
   readCsvRows,

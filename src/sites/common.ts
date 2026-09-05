@@ -13,6 +13,18 @@ const MAX_ZIP_TOTAL_BYTES = MAX_DOC_BYTES;
 /** 超过该压缩比且解压后超过 `ZIP_RATIO_FLOOR_BYTES` 的条目视为 zip bomb。 */
 const MAX_ZIP_RATIO = 200;
 const ZIP_RATIO_FLOOR_BYTES = 1024 * 1024;
+/**
+ * 允许下钻的 ZIP 层数（外层包算第 1 层）。
+ *
+ * 票根网（`service@invoice.txffp.com`）的通行费发票有两种投递格式：一种是
+ * `通行费电子发票.zip` 里直接放 `1_<纳税人识别号>_<uuid>.pdf`；另一种是**包中包**
+ * ——外层每个开票方一个 `<纳税人识别号>_<uuid>.zip`，真正的 PDF/OFD/XML 在里面。
+ * 只解一层时后者会一份票都取不到（实测 10 封邮件、68 个 PDF/OFD 条目静默丢失）。
+ *
+ * 深度仍然收紧到 2：观察到的真实格式只嵌套一层，每多允许一层就多一层解压攻击面。
+ * 超出深度的 `.zip` 条目会记进 `skipped`，形成可见的部分失败，绝不静默丢弃。
+ */
+const MAX_ZIP_NESTING_DEPTH = 2;
 
 export { decodeHtmlEntities };
 
@@ -174,6 +186,14 @@ export interface ZipExtraction {
   documents: PdfArtifact[];
   /** 被防护规则挡下的条目，供调用方形成可见的部分失败记录。 */
   skipped: string[];
+  /**
+   * 包内出现过、但不是可归档格式的条目后缀（小写，含点；无后缀记 `''`）。
+   *
+   * 调用方用它区分「这个压缩包里根本没有票」和「这是数电发票的 XML 副本」：
+   * 后者是同一张票的机读版本，`formatForEntry` 永远不会接受它，手动归档也不收，
+   * 因此在 PDF 已经归档的前提下不该再把整封邮件挂进待确认（EXT-13）。
+   */
+  unsupportedExtensions: string[];
 }
 
 /**
@@ -190,12 +210,54 @@ export interface ZipExtraction {
  * 对象。只在循环里对“受支持后缀”计数，等于让几十万个不支持后缀的目录项绕过上限，
  * 在解压前就吃掉大量 CPU/内存（APP-09）。
  */
-export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
-  const documents: PdfArtifact[] = [];
-  const skipped: string[] = [];
-  let total = 0;
-  let supportedCount = 0;
+/** 整次解包（含所有嵌套层）共享的预算：嵌套包不得让上限翻倍。 */
+interface ZipWalkState {
+  documents: PdfArtifact[];
+  skipped: string[];
+  unsupported: Set<string>;
+  totalBytes: number;
+  supportedCount: number;
+  /** 命中文档数上限后停止继续取件（跨层生效）。 */
+  documentLimitHit: boolean;
+}
 
+/** 解压一个条目并复核尺寸/压缩比；返回 null 表示已记入 skipped。 */
+function readZipEntry(
+  entry: ReturnType<AdmZip['getEntries']>[number],
+  label: string,
+  state: ZipWalkState,
+): Buffer | null {
+  const declared = entry.header.size;
+  const compressed = entry.header.compressedSize;
+  if (declared > MAX_ZIP_ENTRY_BYTES || state.totalBytes + declared > MAX_ZIP_TOTAL_BYTES) {
+    state.skipped.push(`${label}:zip_size_cap`);
+    return null;
+  }
+  // zip bomb 防护：高压缩比且解压后体量可观的条目直接跳过，绝不 getData()。
+  const ratio = compressed > 0 ? declared / compressed : declared;
+  if (declared > ZIP_RATIO_FLOOR_BYTES && ratio > MAX_ZIP_RATIO) {
+    state.skipped.push(`${label}:zip_ratio_${Math.round(ratio)}`);
+    return null;
+  }
+
+  let content: Buffer;
+  try {
+    content = entry.getData();
+  } catch (err) {
+    state.skipped.push(`${label}:zip_entry_unreadable:${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  // 声明大小可以撒谎，解压后按真实长度复核一次。
+  if (content.length > MAX_ZIP_ENTRY_BYTES || state.totalBytes + content.length > MAX_ZIP_TOTAL_BYTES) {
+    state.skipped.push(`${label}:zip_size_cap`);
+    return null;
+  }
+  state.totalBytes += content.length;
+  return content;
+}
+
+/** 一层 ZIP 的遍历。`depth` 从 1 开始（最外层包）。 */
+function walkZip(data: Buffer, source: string, depth: number, state: ZipWalkState): void {
   let entries: ReturnType<AdmZip['getEntries']>;
   try {
     const zip = new AdmZip(data);
@@ -206,59 +268,66 @@ export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
     }
     entries = zip.getEntries();
   } catch (err) {
-    throw new Error(`zip_unreadable:${err instanceof Error ? err.message : String(err)}`);
+    const detail = `zip_unreadable:${err instanceof Error ? err.message : String(err)}`;
+    // 最外层解不开仍然抛给调用方（既有契约）；内层只记 skipped，不牵连兄弟条目。
+    if (depth === 1) throw new Error(detail);
+    state.skipped.push(`${source}:${detail}`);
+    return;
   }
 
   for (const entry of entries) {
+    if (state.documentLimitHit) return;
     if (entry.isDirectory) continue;
     const entryName = entry.name;
+    const label = `${source}/${entryName}`;
+
+    // 包中包：票根网通行费发票的第二种投递格式。`.ofd` 虽然也是 PK 容器，但它
+    // 本身就是要归档的文档，由下面的 formatForEntry 分支整包收下，不在这里下钻。
+    if (/\.zip$/i.test(entryName)) {
+      if (depth >= MAX_ZIP_NESTING_DEPTH) {
+        state.skipped.push(`${label}:zip_nesting_depth_${MAX_ZIP_NESTING_DEPTH}`);
+        continue;
+      }
+      const nested = readZipEntry(entry, label, state);
+      if (!nested) continue;
+      // 后缀说是 zip，magic 也必须是 PK，否则按“后缀撒谎”记 skipped。
+      const nestedKind = detectDocumentKind(nested);
+      if (nestedKind !== 'archive') {
+        state.skipped.push(`${label}:magic_mismatch:claimed_zip:got_${nestedKind}`);
+        continue;
+      }
+      walkZip(nested, label, depth + 1, state);
+      continue;
+    }
+
     const format = formatForEntry(entryName);
-    if (!format) continue;
-
-    if (++supportedCount > MAX_ZIP_DOCUMENTS) {
-      skipped.push(`${source}/*:zip_document_limit_${MAX_ZIP_DOCUMENTS}`);
-      break;
-    }
-
-    const declared = entry.header.size;
-    const compressed = entry.header.compressedSize;
-    if (declared > MAX_ZIP_ENTRY_BYTES || total + declared > MAX_ZIP_TOTAL_BYTES) {
-      skipped.push(`${source}/${entryName}:zip_size_cap`);
-      continue;
-    }
-    // zip bomb 防护：高压缩比且解压后体量可观的条目直接跳过，绝不 getData()。
-    const ratio = compressed > 0 ? declared / compressed : declared;
-    if (declared > ZIP_RATIO_FLOOR_BYTES && ratio > MAX_ZIP_RATIO) {
-      skipped.push(`${source}/${entryName}:zip_ratio_${Math.round(ratio)}`);
+    if (!format) {
+      const dot = entryName.lastIndexOf('.');
+      state.unsupported.add(dot > 0 ? entryName.slice(dot).toLowerCase() : '');
       continue;
     }
 
-    let content: Buffer;
-    try {
-      content = entry.getData();
-    } catch (err) {
-      skipped.push(`${source}/${entryName}:zip_entry_unreadable:${err instanceof Error ? err.message : String(err)}`);
-      continue;
+    if (++state.supportedCount > MAX_ZIP_DOCUMENTS) {
+      state.skipped.push(`${source}/*:zip_document_limit_${MAX_ZIP_DOCUMENTS}`);
+      state.documentLimitHit = true;
+      return;
     }
-    // 声明大小可以撒谎，解压后按真实长度复核一次。
-    if (content.length > MAX_ZIP_ENTRY_BYTES || total + content.length > MAX_ZIP_TOTAL_BYTES) {
-      skipped.push(`${source}/${entryName}:zip_size_cap`);
-      continue;
-    }
-    total += content.length;
+
+    const content = readZipEntry(entry, label, state);
+    if (!content) continue;
 
     // EXT-08：后缀与 magic 不一致时跳过并记入 skipped，避免把 JSON 错误页当 PDF。
     const kind = detectDocumentKind(content);
     if (format === 'pdf' && kind !== 'pdf') {
-      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_pdf:got_${kind}`);
+      state.skipped.push(`${label}:magic_mismatch:claimed_pdf:got_${kind}`);
       continue;
     }
     if (format === 'ofd' && kind !== 'archive') {
-      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_ofd:got_${kind}`);
+      state.skipped.push(`${label}:magic_mismatch:claimed_ofd:got_${kind}`);
       continue;
     }
     if (format === 'image' && kind !== 'image') {
-      skipped.push(`${source}/${entryName}:magic_mismatch:claimed_image:got_${kind}`);
+      state.skipped.push(`${label}:magic_mismatch:claimed_image:got_${kind}`);
       continue;
     }
 
@@ -266,13 +335,33 @@ export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
     const suggestedName = safeFilename(leaf, format === 'pdf' ? 'invoice.pdf' : `invoice.${format === 'ofd' ? 'ofd' : 'png'}`);
     // documentType / requiresOcr 交给归档阶段的 withDocumentClassification 统一判定，
     // 这样包内的“订单明细/结账单”仍会被识别为 supporting 而不是发票。
-    documents.push({
+    state.documents.push({
       data: content,
-      source: `${source}/${entryName}`,
+      source: label,
       suggestedName,
       format,
     });
   }
+}
 
-  return { documents, skipped };
+export function documentsFromZip(data: Buffer, source: string): ZipExtraction {
+  const state: ZipWalkState = {
+    documents: [],
+    skipped: [],
+    unsupported: new Set<string>(),
+    totalBytes: 0,
+    supportedCount: 0,
+    documentLimitHit: false,
+  };
+
+  walkZip(data, source, 1, state);
+
+  // 包内 `<stem>.pdf` + `<stem>.ofd` 的去重不在这里做：它与「同一封邮件的两个同名
+  // 附件」是同一条规则，统一由 `preferPdfOverDuplicateOfd()` 按 containerStemKey
+  // 判定（EXT-16），免得同一件事有两处实现、各自漂移。
+  return {
+    documents: state.documents,
+    skipped: state.skipped,
+    unsupportedExtensions: [...state.unsupported],
+  };
 }

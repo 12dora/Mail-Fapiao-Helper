@@ -33,6 +33,18 @@ export interface RunOpts {
   onlyMail: string | undefined;
   concurrency: number;
   force: boolean;
+  /**
+   * `mfh pending retry`：把待确认目录里的 `.eml` 当作输入源，而不是 samples 缓存。
+   * 只由 `cmdPendingRetry` 设置，`mfh run` 的解析器不会产出它。
+   */
+  pendingRetry?: boolean;
+}
+
+export interface DedupeOpts {
+  configPath: string;
+  /** 默认 dry-run；只有显式 `--apply` 才动磁盘。 */
+  apply: boolean;
+  json: boolean;
 }
 
 export interface RebuildStateOpts {
@@ -43,8 +55,12 @@ export interface RebuildStateOpts {
 }
 
 export interface PendingOpts {
+  command: 'list' | 'retry';
   configPath: string;
   json: boolean;
+  /** `pending retry` 专用：状态文件与并发度，与 `mfh run` 同义。 */
+  statePath: string;
+  concurrency: number;
 }
 
 export function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
@@ -163,12 +179,37 @@ export function parsePendingArgs(argv: string[]): PendingOpts | 'help' {
   if (argv.length === 0) return 'help';
   const [subcmd, ...rest] = argv;
   if (subcmd === '-h' || subcmd === '--help') return 'help';
-  if (subcmd !== 'list') throw new Error(`unknown pending command: ${subcmd}`);
-  const opts: PendingOpts = { configPath: './config.json', json: false };
+  if (subcmd !== 'list' && subcmd !== 'retry') throw new Error(`unknown pending command: ${subcmd}`);
+  const opts: PendingOpts = {
+    command: subcmd, configPath: './config.json', json: false,
+    statePath: './state.json', concurrency: 4,
+  };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '-h' || a === '--help') return 'help';
     if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
+    if (a === '--json') { opts.json = true; continue; }
+    if (a === '--state') { opts.statePath = requireValue(rest, ++i, a); continue; }
+    if (a === '--concurrency') {
+      const v = Number(requireValue(rest, ++i, a));
+      if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
+      opts.concurrency = v; continue;
+    }
+    throw new Error(`unknown option: ${a}`);
+  }
+  if (opts.command === 'list' && (opts.statePath !== './state.json' || opts.concurrency !== 4)) {
+    throw new Error('--state and --concurrency are only valid for mfh pending retry');
+  }
+  return opts;
+}
+
+export function parseDedupeArgs(argv: string[]): DedupeOpts | 'help' {
+  const opts: DedupeOpts = { configPath: './config.json', apply: false, json: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') return 'help';
+    if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
+    if (a === '--apply') { opts.apply = true; continue; }
     if (a === '--json') { opts.json = true; continue; }
     throw new Error(`unknown option: ${a}`);
   }

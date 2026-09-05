@@ -103,6 +103,7 @@ export const BUSY_ACTIONS = new Set([
     'rename-organize',
     'run-pipeline',
     'rerun-pipeline',
+    'retry-all-pending',
     'pending-primary',
     'discard-config',
     'ocr-toggle',
@@ -145,7 +146,8 @@ export async function withBusyButton(button, runner) {
     }
 }
 
-export const MUTEX_ACTIONS = new Set(['run-pipeline', 'rerun-pipeline', 'ocr-toggle', 'rename-organize']);
+// 「全部重试」和整轮管线抢的是同一把 pipeline 锁，必须一起参与本地互斥。
+export const MUTEX_ACTIONS = new Set(['run-pipeline', 'rerun-pipeline', 'retry-all-pending', 'ocr-toggle', 'rename-organize']);
 
 export async function handleAction(action) {
     const name = action.dataset.action;
@@ -231,6 +233,7 @@ const ACTION_HANDLERS = {
     'repair-config': async () => { await repairConfig(); },
     'developer-reset': async () => { await developerReset(); },
     'pending-primary': async (action) => { await handlePendingAction(action, runBridgeAction); },
+    'retry-all-pending': async () => { await retryAllPending(); },
     'clear-secret': async (action) => { await clearSecret(action); },
     'archive-journal-refresh': async () => { await refreshArchiveJournalStatus(); },
     'archive-journal-quarantine': async () => { await quarantineArchiveJournal(); },
@@ -239,6 +242,37 @@ const ACTION_HANDLERS = {
 export async function handleActionImpl(action, name) {
     const handler = ACTION_HANDLERS[name];
     if (handler) await handler(action);
+}
+
+/**
+ * 「全部重试」：把整个待确认队列按队列自带的 .eml 副本重跑一遍。
+ *
+ * 单封「重试」走 runPipeline + onlyMail；这里改用 pendingRetry 标志，主进程会转成
+ * `mfh pending retry`——跑完由 CLI 核对 pending.csv：成功的行出队，仍失败的留在
+ * 队列里并换上最新原因。归档按内容哈希幂等，重复点不会重复入库。
+ */
+export async function retryAllPending() {
+    const total = Number(getState().pending?.total || 0);
+    if (total === 0) {
+        showToast('没有可重试的邮件', '待确认队列是空的。', 'warn');
+        return;
+    }
+    const confirmed = window.confirm([
+        `确认重试全部 ${total} 封待确认邮件吗？`,
+        '',
+        '会按队列里保存的原始邮件重新处理一遍：',
+        '· 这次能取到发票的，自动归档并移出队列',
+        '· 仍然失败的，留在队列里并更新失败原因',
+        '',
+        '已经归档过的发票不会重复入库，原始邮件也不会被删除。',
+    ].join('\n'));
+    if (!confirmed) return;
+    await runBridgeAction(
+        'runPipeline',
+        { pendingRetry: true, avoidConflictBeforeOcr: downloadRenameEnabled() },
+        '重试完成',
+        '待确认队列已重新处理。',
+    );
 }
 
 export function selectedOcrConcurrency() {

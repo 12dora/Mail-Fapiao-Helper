@@ -5,7 +5,8 @@ import { showToast } from './toast.js';
 /* ---------- Mutually exclusive operations (contract: 'op-state') ---------- */
 export const MUTEX_GROUPS = [
     { kind: 'fetch',    selector: '#run-btn' },
-    { kind: 'pipeline', selector: '[data-action="run-pipeline"], [data-action="rerun-pipeline"]' },
+    // 「全部重试」也占 pipeline 锁，必须和整轮管线一起被 op-state 禁用/恢复。
+    { kind: 'pipeline', selector: '[data-action="run-pipeline"], [data-action="rerun-pipeline"], [data-action="retry-all-pending"]' },
     { kind: 'ocr',      selector: '[data-action="ocr-toggle"]' },
     { kind: 'organize', selector: '[data-action="rename-organize"]' },
 ];

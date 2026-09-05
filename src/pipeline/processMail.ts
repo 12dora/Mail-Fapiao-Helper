@@ -7,7 +7,7 @@ import type { State } from '../state.js';
 import { resolveMailIdentity } from '../util/hash.js';
 import { testFaultEnabled } from '../util/testFaults.js';
 import type { Ctx } from '../extract/types.js';
-import { supportingReason } from '../extract/classify.js';
+import { supportingOnlyReason, supportingReason } from '../extract/classify.js';
 import { stageDocuments } from '../download/downloader.js';
 import {
   ArchiveRecoveryError,
@@ -342,6 +342,35 @@ function finishPartial(
   };
 }
 
+/**
+ * 票已经拿到了，就把「目标本来就不是发票」造成的失败从 issue 列表里去掉（EXT-13）。
+ *
+ * 提取器用 `ExtractIssue.incidental` 标记这类失败：页脚的追踪像素、旺旺挂件、
+ * 邮箱首页、数电发票的 XML 副本、下载 OFD 阅读器的链接……它们失败与否都不影响
+ * 这封邮件的票是否齐全，却会让整封邮件按「部分成功」躺进待确认，而用户打开之后
+ * 无事可做。
+ *
+ * 判定放在 pipeline 而不是各提取器里：附件、直链、站点处理器共用同一条规则，
+ * 而且「邮件整体有没有产出」只有汇总之后才知道。零产出时**保留**全部 issue，
+ * 那才是真的需要人来看。
+ */
+function dropIncidentalIssues(
+  extraction: AggregatedExtraction,
+  log: Logger,
+  hash: string,
+): AggregatedExtraction {
+  if (extraction.artifacts.length === 0) return extraction;
+  const kept = extraction.issues.filter((issue) => issue.incidental !== true);
+  const dropped = extraction.issues.length - kept.length;
+  if (dropped === 0) return extraction;
+  log.info(`Ignored ${dropped} incidental issue(s) for ${hash}: invoices archived, failures were on non-invoice targets`);
+  // 被丢掉的是什么必须留痕：判错一次就是一张票无声消失，而现场只剩一个计数。
+  for (const issue of extraction.issues) {
+    if (issue.incidental === true) log.debug(`  incidental issue for ${hash}: ${issue.reason}`);
+  }
+  return { ...extraction, issues: kept };
+}
+
 // ---------------------------------------------------------------------------
 
 export async function processMail(
@@ -388,7 +417,7 @@ export async function processMail(
     context,
   );
 
-  const extraction = await runExtractors(mail, ctx, hash);
+  const extraction = dropIncidentalIssues(await runExtractors(mail, ctx, hash), log, hash);
 
   if (extraction.matched.length === 0) {
     log.info(`No extractor matched ${hash}, -> pending`);
@@ -435,11 +464,21 @@ export async function processMail(
     return pending(reason);
   }
 
+  // EXT-17：只归档到附属材料（汇总单 / 订单明细 / 结账单）时，票必然是半路丢的。
+  // 提取器各自都「成功」了，没人会报错，所以这一条只能在汇总之后判。
+  const supportingOnly = supportingOnlyReason(extraction.artifacts);
+  if (supportingOnly !== null) {
+    log.warn(`Only supporting documents archived for ${hash}: ${supportingOnly}`);
+  }
+  const withCanary = supportingOnly === null
+    ? extraction
+    : { ...extraction, issues: [...extraction.issues, { reason: supportingOnly }] };
+
   // 部分成功：已归档的票必须保留，同时留下可见的待确认记录，不得当作完整成功。
   // partial 可挂在 archived 或 retryable_failure 上：后者表示票已落盘但 pending 未写上。
-  if (extraction.issues.length > 0) {
+  if (withCanary.issues.length > 0) {
     return finishPartial(
-      extraction,
+      withCanary,
       downloadsCount,
       mail,
       cfg,

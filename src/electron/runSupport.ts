@@ -146,6 +146,37 @@ export function pipelineRunMessage(
   return '处理缓存邮件没有完成。请先重试；如仍失败，请展开「查看技术详情」。';
 }
 
+/**
+ * 「全部重试」的结果文案。
+ *
+ * 与整轮管线不同，这里用户关心的是**队列少了多少**，而不是处理了多少封：
+ * - 出队 = `archived - partial + skipped`（票全落盘、或本就无需归档）
+ * - 仍在队列 = `pending + partial`（partial 表示票已归档但仍有待确认项）
+ */
+export function pendingRetryRunMessage(
+  counts: RunTerminalCounts,
+  status: RunHistoryEntry['status'],
+): string {
+  const attempted = counts.archived + counts.pending + counts.skipped;
+  const resolved = Math.max(0, counts.archived - counts.partial) + counts.skipped;
+  const stillPending = counts.pending + counts.partial;
+
+  if (attempted === 0 && counts.failed === 0) {
+    return '待确认队列里没有可重试的邮件。';
+  }
+  if (status === 'success') {
+    if (stillPending === 0) return `已重试 ${attempted} 封，全部处理完成，待确认队列已清空。`;
+    return `已重试 ${attempted} 封：${resolved} 封已完成并移出队列，${stillPending} 封仍需你确认。`;
+  }
+  if (status === 'partial') {
+    if (counts.failed > 0) {
+      return `已重试 ${attempted} 封，${resolved} 封已移出队列，另有 ${counts.failed} 封没有跑完。请稍后再试一次；如仍失败，请展开「查看技术详情」。`;
+    }
+    return `已重试 ${attempted} 封：${resolved} 封已移出队列，${stillPending} 封仍需你确认。`;
+  }
+  return '全部重试没有完成，待确认队列保持不变。请稍后再试；如仍失败，请展开「查看技术详情」。';
+}
+
 // ---------------------------------------------------------------------------
 // GUI 运行历史（APP-18B：best-effort + 原子写，绝不覆盖真实操作结果）
 // ---------------------------------------------------------------------------

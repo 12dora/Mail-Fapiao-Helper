@@ -75,7 +75,7 @@ const IPV4_SPECIAL_PURPOSE: ReadonlyArray<readonly [network: number, prefixLen: 
 ];
 
 /** Parse dotted-quad to uint32; null if not a strict IPv4 literal. */
-function parseIpv4Uint(ip: string): number | null {
+export function parseIpv4Uint(ip: string): number | null {
   const parts = ip.split('.');
   if (parts.length !== 4) return null;
   let n = 0;
@@ -88,7 +88,7 @@ function parseIpv4Uint(ip: string): number | null {
   return n >>> 0;
 }
 
-function ipv4InPrefix(ip: number, network: number, prefixLen: number): boolean {
+export function ipv4InPrefix(ip: number, network: number, prefixLen: number): boolean {
   if (prefixLen <= 0) return true;
   if (prefixLen >= 32) return ip === (network >>> 0);
   const mask = (0xffffffff << (32 - prefixLen)) >>> 0;

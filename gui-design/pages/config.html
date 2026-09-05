@@ -22,7 +22,7 @@
             <span class="toolbar__meta"><span data-summary="config-path">本机配置</span></span>
         </div>
 
-        <div class="page stagger">
+        <div class="page config-page stagger">
             <!-- 配置损坏时的阻断式修复入口 -->
             <div class="config-blocker" data-config-blocker hidden></div>
 
@@ -37,11 +37,16 @@
             <div class="error-summary" data-config-error-summary hidden></div>
 
             <!-- 邮箱连接 -->
-            <div class="card">
-                <h2 class="card__title">邮箱</h2>
-                <p class="card__sub">建议使用邮箱的「授权码 / 应用专用密码」，而不是登录密码</p>
+            <section class="card config-card config-card--mail">
+                <header class="config-card__head">
+                    <div class="config-card__heading">
+                        <h2 class="config-card__title">邮箱连接</h2>
+                        <p class="config-card__sub">填写收件服务器信息，并选择需要扫描的文件夹</p>
+                    </div>
+                </header>
 
-                <div class="field-row">
+                <div class="config-card__body">
+                    <div class="config-credentials-grid">
                     <div class="field">
                         <label class="field__label" for="cfg-imap-host">邮箱服务地址</label>
                         <input class="input" id="cfg-imap-host" data-config="imap.host" placeholder="例如 imap.exmail.qq.com" autocomplete="off">
@@ -50,70 +55,88 @@
                     <div class="field">
                         <label class="field__label" for="cfg-imap-user">邮箱账号</label>
                         <input class="input" id="cfg-imap-user" data-config="imap.user" placeholder="例如 you@company.com" autocomplete="off">
+                        <div class="field__hint">请输入完整邮箱地址</div>
                     </div>
-                </div>
-
-                <div class="field-row">
-                    <div class="field">
+                    <div class="field config-credentials-grid__wide">
                         <label class="field__label" for="cfg-imap-pass">授权码 <span class="field__hint">只保存在本设备</span></label>
-                        <input class="input" id="cfg-imap-pass" data-config="imap.pass" type="password" placeholder="留空则不修改已保存的授权码" autocomplete="off">
-                        <div class="row gap-8" style="margin-top: 8px;">
+                        <div class="config-secret-row">
+                            <input class="input" id="cfg-imap-pass" data-config="imap.pass" type="password" placeholder="留空则不修改已保存的授权码" autocomplete="off">
                             <button class="btn btn--sm btn--ghost" type="button" data-action="clear-secret" data-secret-key="imap.pass" data-secret-label="邮箱授权码">清除已保存的授权码</button>
                         </div>
                     </div>
-                    <div class="field">
-                        <label class="field__label" for="cfg-imap-mailbox">要扫描的邮箱文件夹 <span class="field__hint">不选则扫描全部</span></label>
+                    </div>
+
+                    <div class="mailbox-picker">
+                        <div class="mailbox-picker__head">
+                            <div>
+                                <label class="field__label" for="cfg-imap-mailbox">要扫描的邮箱文件夹</label>
+                                <div class="field__hint">可多选；不选择时扫描全部文件夹</div>
+                            </div>
+                            <div class="mailbox-picker__actions">
+                                <span class="small muted" data-mailbox-status role="status">未读取过</span>
+                                <button class="btn btn--sm" type="button" data-action="reload-mailboxes">读取我的邮箱文件夹</button>
+                            </div>
+                        </div>
                         <select class="select select--mailboxes" id="cfg-imap-mailbox" multiple size="6" data-config="imap.mailbox">
                             <option value="INBOX">收件箱</option>
                         </select>
-                        <div class="row gap-8" style="margin-top: 8px;">
-                            <button class="btn btn--sm" type="button" data-action="reload-mailboxes">读取我的邮箱文件夹</button>
-                            <span class="small muted" data-mailbox-status role="status">未读取过</span>
-                        </div>
+                    </div>
+
+                    <div class="config-card__footer">
+                        <button class="btn btn--primary" type="button" data-action="test-connection">测试邮箱连接</button>
+                        <span class="small muted">连接成功后，侧栏会显示「已连接」</span>
                     </div>
                 </div>
-
-                <div class="row gap-8 mt-16">
-                    <button class="btn" type="button" data-action="test-connection">测试邮箱连接</button>
-                    <span class="small muted">测试成功后才会显示「已连接」。</span>
-                </div>
-            </div>
+            </section>
 
             <!-- 关键词 -->
-            <div class="card">
-                <h2 class="card__title">要找哪些邮件</h2>
-                <p class="card__sub">日期范围在「开始处理」页每次运行前选择，这里只设置关键词</p>
-
-                <div class="field">
-                    <label class="field__label" for="cfg-keywords">关键词 <span class="field__hint">用逗号分隔</span></label>
-                    <input class="input" id="cfg-keywords" data-config="filter.keywords" placeholder="发票, 票据, 电子发票, 行程单">
-                    <div class="field__hint">会搜索邮件标题和正文。建议保留“发票”“票据”“行程单”等常用词。</div>
+            <section class="card config-card config-card--compact">
+                <header class="config-card__head">
+                    <div class="config-card__heading">
+                        <h2 class="config-card__title">邮件筛选</h2>
+                        <p class="config-card__sub">日期范围在「开始处理」页选择，这里只设置关键词</p>
+                    </div>
+                </header>
+                <div class="config-card__body">
+                    <div class="field config-card__single-field">
+                        <label class="field__label" for="cfg-keywords">关键词 <span class="field__hint">用逗号分隔</span></label>
+                        <input class="input" id="cfg-keywords" data-config="filter.keywords" placeholder="发票, 票据, 电子发票, 行程单">
+                        <div class="field__hint">会同时搜索邮件标题和正文，建议保留“发票”“票据”“行程单”等常用词。</div>
+                    </div>
                 </div>
-            </div>
+            </section>
 
             <!-- 保存位置 -->
-            <div class="card">
-                <h2 class="card__title">保存位置</h2>
-                <p class="card__sub">先保存所有发票和行程单原件，再识别和整理，识别失败也不会丢文件</p>
-
-                <div class="field">
+            <section class="card config-card config-card--paths">
+                <header class="config-card__head">
+                    <div class="config-card__heading">
+                        <h2 class="config-card__title">保存位置</h2>
+                        <p class="config-card__sub">先保存所有发票和行程单原件，再识别和整理；识别失败也不会丢失文件</p>
+                    </div>
+                </header>
+                <div class="config-card__body config-path-grid">
+                    <div class="field">
                     <label class="field__label" for="cfg-path-invoices">发票保存文件夹</label>
                     <input class="input input--mono" id="cfg-path-invoices" data-config="paths.invoices" placeholder="例如：发票文件夹">
-                    <div class="field__hint">选择或填写保存发票和行程单原件的位置。可使用本机任意文件夹。</div>
-                </div>
-                <div class="field">
+                    <div class="field__hint">保存发票和行程单原件</div>
+                    </div>
+                    <div class="field">
                     <label class="field__label" for="cfg-path-samples">已保存的邮件文件夹</label>
                     <input class="input input--mono" id="cfg-path-samples" data-config="paths.samples" placeholder="例如：已保存的邮件">
-                </div>
-                <div class="field">
+                    <div class="field__hint">保存邮件原文，便于重新处理</div>
+                    </div>
+                    <div class="field">
                     <label class="field__label" for="cfg-path-pending">待确认文件夹</label>
                     <input class="input input--mono" id="cfg-path-pending" data-config="paths.pending" placeholder="例如：待确认">
-                </div>
-                <div class="field">
+                    <div class="field__hint">存放需要手动确认的文件</div>
+                    </div>
+                    <div class="field">
                     <label class="field__label" for="cfg-output-csv">发票清单表格 <span class="field__hint">可用 Excel 打开</span></label>
                     <input class="input input--mono" id="cfg-output-csv" data-config="output.csv" placeholder="例如：发票清单.csv">
+                    <div class="field__hint">汇总识别后的发票信息</div>
+                    </div>
                 </div>
-            </div>
+            </section>
 
             <!-- 识别方式 -->
             <div class="card">

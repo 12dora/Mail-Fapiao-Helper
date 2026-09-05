@@ -201,6 +201,8 @@ function fakeOcr(ctx: FakeBackendContext): FakeCliResult {
 export function runFakeCli(command: string, args: string[], ctx: FakeBackendContext): FakeCliResult {
   if (command === 'fetch') return fakeFetch(ctx, args);
   if (command === 'run') return fakePipeline(ctx, args);
+  // 「全部重试」走 `pending retry`：与 run 同样的终态行契约，fake 侧共用同一实现。
+  if (command === 'pending' && args[0] === 'retry') return fakePipeline(ctx, args.slice(1));
   if (command === 'ocr') return fakeOcr(ctx);
   if (command === 'organize') {
     const paths = fakeConfigPaths(ctx);

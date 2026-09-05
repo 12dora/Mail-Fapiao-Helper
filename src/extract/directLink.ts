@@ -2,6 +2,7 @@ import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { extractMailUrls } from './mailLinks.js';
+import { linkedImageHasInvoiceEvidence, looksLikeEmailChrome } from './assetEvidence.js';
 import { handlers } from '../sites/registry.js';
 import { preferPdfOverDuplicateOfd } from './documentIdentity.js';
 import {
@@ -124,17 +125,37 @@ function invoiceProbeScore(url: string): number {
 }
 
 /**
- * 直链图片是否有「真是发票」的独立证据（NEW-DEFECT 2）。
- * 普通营销/跟踪图不得仅因 magic 是 image 就被归档成财务发票。
+ * 探测失败的这条链接，*有没有可能*真的是发票入口？（EXT-13）
+ *
+ * 只在「同一封邮件已经归档到票」时用于决定是否还要留待确认记录。判据刻意与
+ * `invoiceProbeScore` 分开：排序分给「带 id/token 参数」加 25 分，而追踪像素
+ * （`s23.cnzz.com/z_stat.php?id=…`）、旺旺挂件（`amos.alicdn.com/msg.aw`）
+ * 恰好也带这类参数——拿排序分当发票证据会把整封邮件永远钉在待确认里。
+ *
+ * 这里只认真正的发票语义：发票相关词、文档后缀、下载/票据类路径。host 也参与
+ * 匹配，`ticket.download.<vendor>.com` 这种确实可能是发票入口，宁可留下记录。
  */
-function linkedImageHasInvoiceEvidence(url: string): boolean {
-  if (/\d{20}/.test(url)) return true;
-  const lower = url.toLowerCase();
-  if (/(invoice|fapiao|einvoice|dzfp|fpjf|vat|发票|行程单|itinerary|e-?ticket)/i.test(lower)) {
-    return true;
+function probeFailureCouldBeInvoice(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const target = `${parsed.hostname}${parsed.pathname}`.toLowerCase();
+    if (/(invoice|fapiao|fpjf|einvoice|dzfp|kpfw|vat|发票|行程单|itinerary|e-?ticket)/i.test(target)) return true;
+    if (/\.(pdf|ofd|zip)$/i.test(parsed.pathname)) return true;
+    if (/(download|export|bill|receipt|ticket|reimburse)/i.test(target)) return true;
+    return false;
+  } catch {
+    // 解析不了的 URL 本来也进不了候选：当作与发票无关。
+    return false;
   }
-  // host/path 发票语义足够强时也放行（score 的 +40 档）。
-  return invoiceProbeScore(url) >= 40;
+}
+
+/** 取 URL 的路径部分用于物料判定；解析不了就退回原串。 */
+function safePathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
 }
 
 /** magic-byte 探测时只读前 2 KiB，避免把完整文档拉下来。 */
@@ -347,14 +368,25 @@ function artifactsFromDownload(
   }
 
   try {
-    const { documents, skipped } = documentsFromZip(data, url);
+    const { documents, skipped, unsupportedExtensions } = documentsFromZip(data, url);
     for (const item of skipped) {
       issues.push({ reason: `directLink:zip_entry_skipped:${redactErrorDetail(item)}` });
       ctx.log.warn(`directLink ZIP entry skipped: ${redactErrorDetail(item)}`);
     }
     if (documents.length === 0) {
-      issues.push({ reason: 'directLink:zip_no_invoice_entries' });
-      ctx.log.warn(`directLink ZIP ${safeUrl} had no extractable invoice entries`);
+      // 数电发票的 XML 包：同一张票的机读副本。归档流程不收 XML（formatForEntry
+      // 不认，手动归档的文件类型里也没有），所以在票已经拿到的前提下把它报成
+      // 「缺票」只会白占待确认队列——标成 incidental，由调用方按有无产出决定（EXT-13）。
+      const xmlOnly = unsupportedExtensions.length > 0
+        && unsupportedExtensions.every((ext) => ext === '.xml');
+      issues.push({
+        reason: xmlOnly ? 'directLink:zip_xml_only' : 'directLink:zip_no_invoice_entries',
+        incidental: xmlOnly,
+      });
+      ctx.log.warn(
+        `directLink ZIP ${safeUrl} had no extractable invoice entries`
+        + (xmlOnly ? ' (XML-only 数电发票 package)' : ''),
+      );
       return { artifacts: [], issues };
     }
     return { artifacts: documents, issues };
@@ -366,10 +398,17 @@ function artifactsFromDownload(
   }
 }
 
-/** 没有强 PDF 特征的链接最多探测这么多个，避免营销邮件把 run 拖成线性等待。 */
-const MAX_PROBE_LINKS = 8;
+/**
+ * 没有强 PDF 特征的链接最多探测这么多个，避免营销邮件把 run 拖成线性等待。
+ *
+ * 8 太紧：真实的开票通知里除了下载链接还有页脚、退订、App 下载、客服等一串链接，
+ * 一旦溢出就直接落成 `probe_budget_exceeded` 的待确认。探测已经是**有界并发**且
+ * 每条只读 2 KiB magic bytes，把预算提到 24 的代价约是几秒，换回的是这批邮件能
+ * 自动完成。真正的营销轰炸邮件仍然会被截断。
+ */
+const MAX_PROBE_LINKS = 24;
 /** HEAD/GET 探测的有界并发度。 */
-const PROBE_CONCURRENCY = 4;
+const PROBE_CONCURRENCY = 6;
 
 /** 保序的有界并发 map，用来替代逐链接串行探测。 */
 async function mapWithConcurrency<T, R>(
@@ -458,8 +497,10 @@ async function probeCandidates(
   classified: ClassifiedLinks,
   ctx: Ctx,
   issues: ExtractIssue[],
-): Promise<{ pdfCandidates: string[]; probeFailures: string[] }> {
+): Promise<{ pdfCandidates: string[]; probeFailures: string[]; invoiceProbeFailures: string[] }> {
   const probeFailures: string[] = [];
+  // 只统计「链接本身确实像发票入口」的探测失败：它们才是真的缺票。
+  const invoiceProbeFailures: string[] = [];
   const probed = await mapWithConcurrency(classified.probedLinks, PROBE_CONCURRENCY, async (link) => {
     const safeUrl = redactUrlForLog(link);
     try {
@@ -467,7 +508,14 @@ async function probeCandidates(
     } catch (err) {
       const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
       probeFailures.push(msg);
-      issues.push({ reason: `directLink:probe_failed:${msg}`, retryable: true });
+      // 探测失败的链接本身有没有发票语义，决定它能不能把整封邮件拖进待确认。
+      const incidental = !probeFailureCouldBeInvoice(link);
+      if (!incidental) invoiceProbeFailures.push(msg);
+      issues.push({
+        reason: `directLink:probe_failed:${msg}`,
+        retryable: true,
+        incidental,
+      });
       ctx.log.warn(`PDF probe failed after retries for ${safeUrl}: ${msg}`);
       return null;
     }
@@ -479,6 +527,7 @@ async function probeCandidates(
       ...probed.filter((link): link is string => link !== null),
     ],
     probeFailures,
+    invoiceProbeFailures,
   };
 }
 
@@ -516,7 +565,11 @@ async function downloadCandidates(
     }
     if (!('data' in outcome)) {
       rejectedCandidates++;
-      issues.push({ reason: `directLink:download_rejected:${outcome.rejected}` });
+      // `.zip` / `.pdf` 后缀会让链接直接进强候选，跳过发票语义打分。页脚里的
+      // 「下载 OFD 阅读器」`…/public/ofd_read.zip` 就这样混进来，而且长期 404
+      // ——它不是票，不该把整封邮件按缺票挂进待确认（EXT-15）。
+      const chrome = looksLikeEmailChrome(safePathOf(url));
+      issues.push({ reason: `directLink:download_rejected:${outcome.rejected}`, incidental: chrome });
       ctx.log.warn(`Failed to download ${safeUrl}: ${outcome.rejected}`);
       continue;
     }
@@ -555,8 +608,17 @@ function buildExtractResult(
     if (downloaded.rejectedCandidates === 0 && unprobedLinks.length === 0) {
       return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };
     }
+    // EXT-13：所有失败都只发生在「本来就不是发票」的目标上（追踪链接、数电 XML
+    // 副本）时，directLink 是不适用，而不是提取失败——别让同封邮件里附件那张票
+    // 被降级成部分成功。整封邮件零产出时 pipeline 仍会按 notApplicable 入待确认。
+    if (unprobedLinks.length === 0 && issues.length > 0 && issues.every((issue) => issue.incidental === true)) {
+      return { kind: 'not_applicable', reason: issues[0]?.reason ?? 'directLink:no_pdf_links' };
+    }
     return { kind: 'manual', reason: issues[0]?.reason ?? 'directLink:download_failed' };
   }
+
+  // incidental issue 的过滤统一由 pipeline 的 dropIncidentalIssues() 负责：
+  // 「整封邮件有没有产出」要汇总所有提取器之后才知道，单个提取器判不了（EXT-13）。
 
   // 去重只丢弃“可靠匹配到同一张票的 PDF”的那份 OFD，与附件流程共用同一算法：
   // 不再因为邮件里存在任意 PDF 就删掉不相关的 OFD（APP-02 / EXT-01）。
@@ -594,14 +656,19 @@ const directLinkExtractor: Extractor = {
       });
     }
 
-    const { pdfCandidates, probeFailures } = await probeCandidates(classified, ctx, issues);
+    const { pdfCandidates, probeFailures, invoiceProbeFailures } = await probeCandidates(classified, ctx, issues);
 
     if (pdfCandidates.length === 0) {
-      // 有未检查候选或探测失败：这是部分失败，不能当成“本提取器不适用”。
-      if (classified.unprobedLinks.length > 0 || probeFailures.length > 0) {
+      // 有未检查候选、或**像发票的**链接探测失败：这是部分失败，不能当成“本提取器不适用”。
+      if (classified.unprobedLinks.length > 0 || invoiceProbeFailures.length > 0) {
         const first = issues[0]?.reason
           ?? (probeFailures[0] ? `directLink:probe_unavailable:${probeFailures[0]}` : 'directLink:probe_budget_exceeded');
         return { kind: 'manual', reason: first };
+      }
+      // EXT-13：只有追踪像素 / 旺旺挂件 / 邮箱首页这类链接探测失败时，directLink
+      // 依旧是「与本邮件无关」——附件里那张票不该因为它们被压进待确认。
+      if (probeFailures.length > 0) {
+        ctx.log.info(`directLink: ${probeFailures.length} probe failure(s) on non-invoice links only; extractor not applicable`);
       }
       // 邮件里只有普通链接，没有任何发票线索：本提取器不适用，不是提取失败。
       return { kind: 'not_applicable', reason: 'directLink:no_pdf_links' };

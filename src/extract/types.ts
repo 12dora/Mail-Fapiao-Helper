@@ -33,6 +33,12 @@ export interface ExtractIssue {
   reason: string;
   /** 是否属于网络重试耗尽这类可恢复失败。 */
   retryable?: boolean;
+  /**
+   * 这条 issue 是否只来自一个**没有任何发票语义**的链接（追踪像素、广告跳转、
+   * 邮箱首页等）。同一封邮件已经归档到票时，这种失败不该把整封邮件按
+   * 「部分成功」压在待确认里等人工——用户能做的事情是零（EXT-13）。
+   */
+  incidental?: boolean;
 }
 
 export type ExtractResult =

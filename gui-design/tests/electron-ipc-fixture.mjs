@@ -498,6 +498,29 @@ async function main() {
     if (manualGroups !== 0) fail(`「手动归档」Tab 不应包含 refresh_link 分组，实际 ${manualGroups} 组`);
     await activeMain(page, '[data-pending-tab="all"]').click();
 
+    /* 「全部重试」：整队重放的唯一 GUI 入口。它与整轮管线抢同一把 pipeline 锁，
+       所以必须登记在 MUTEX_GROUPS 的 pipeline 选择器里，否则任务运行期间它仍可点，
+       用户会在 CLI 侧撞上「另一个任务正在运行」。 */
+    const retryAll = activeMain(page, '[data-action="retry-all-pending"]');
+    if (await retryAll.count() !== 1) fail('待确认页必须有且只有一个「全部重试」入口');
+    const opStateSrc = await readFile(join(repoRoot, 'gui-design/scripts/op-state.js'), 'utf8');
+    const pipelineSelector = opStateSrc.match(/kind:\s*'pipeline',\s*selector:\s*'([^']+)'/)?.[1] || '';
+    if (!pipelineSelector) fail('无法从 op-state.js 读出 pipeline 互斥组选择器');
+    const inPipelineGroup = await retryAll.evaluate((el, sel) => el.matches(sel), pipelineSelector);
+    if (!inPipelineGroup) {
+      fail(`「全部重试」不在 pipeline 互斥组选择器内（${pipelineSelector}），任务运行期间它不会被禁用`);
+    }
+
+    /* 「全部重试」与单封重试是互斥的输入源：同时给出必须明确拒绝。静默降级成
+       单封会让用户以为整队跑过了。 */
+    const conflicting = await page.evaluate(() => window.mfhBridge.runPipeline({
+      pendingRetry: true,
+      onlyMail: 'a'.repeat(32),
+    }));
+    if (conflicting?.ok !== false || conflicting?.code !== 'invalid_pending_retry') {
+      fail(`pendingRetry + onlyMail 必须被拒绝：${JSON.stringify(conflicting)}`);
+    }
+
     const pendingHash = await activeMain(page, '[data-action="pending-primary"]').first().getAttribute('data-hash');
     await activeMain(page, '[data-action="pending-primary"]').first().click();
     await page.locator('.toast').first().waitFor({ state: 'visible', timeout: 8000 });

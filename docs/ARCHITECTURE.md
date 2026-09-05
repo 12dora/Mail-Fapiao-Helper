@@ -91,6 +91,8 @@ CLI **不会**自动 `npx playwright install`。桌面版也不“随应用准�
 | `src/extract/registry.ts` | 组合全部匹配 extractor |
 | `src/download/archiveJournal.ts` | 持久化事务与恢复 |
 | `src/util/dataDirLock.ts` | 跨进程数据目录锁 |
+| `src/util/urlPolicy.ts` · `ipPolicy.ts` · `resolverProfile.ts` | SSRF 主防线：逐跳校验 + DNS pin + 解析器画像 |
+| `src/cli/pending.ts` | 待确认队列查看与批量重放（`pending list` / `pending retry`） |
 | `src/electron/opCoordinator.ts` | GUI 操作互斥 + 租约下发 |
 | `src/electron/main.ts` | Electron 主进程 / IPC |
 | `gui-design/` | 渲染层 HTML/CSS/JS |
@@ -112,3 +114,11 @@ CLI **不会**自动 `npx playwright install`。桌面版也不“随应用准�
 | 2026-05 | 文件型状态，无数据库 |
 | 2026-07 | Electron 桌面壳；schema v3；archive journal；data-dir 锁 token 继承 |
 | 2026-07 | mock OCR 需 `MFH_ALLOW_MOCK_OCR=1`；邮件 hash 扩至 32 hex（有 raw 时） |
+| 2026-09 | SSRF 判定引入解析器画像（`src/util/resolverProfile.ts`）：fake-IP 代理把公网域名映射进 `198.18.0.0/15` 等占位段时，仅放行**域名解析结果**；内网段与 IP 字面量始终拒绝，`MFH_RESERVED_IP_POLICY=strict` 可关闭 |
+| 2026-09 | `ExtractIssue.incidental`：票已归档时，仅由「本来就不是发票」的目标（追踪链接、数电 XML 副本）造成的失败不再降级为部分成功；`mfh pending retry` 批量重放待确认队列 |
+| 2026-09 | ZIP 解包支持一层嵌套（`MAX_ZIP_NESTING_DEPTH=2`，票根网通行费「包中包」），预算跨层共享；同容器内 `<stem>.pdf` + `<stem>.ofd` 只留 PDF；附件流程里「压缩包零产出」必须记 issue，不得静默通过 |
+| 2026-09 | 待确认页新增「全部重试」：`mfh:run-pipeline` 带 `pendingRetry` 标志转跑 `mfh pending retry`，与整轮管线共用 pipeline 锁与 MUTEX_GROUPS |
+| 2026-09 | `src/extract/assetEvidence.ts`：票面证据只看**路径**不看 host——开票平台 CDN 同时供应自家 logo/广告/二维码/阅读器安装包，旧的 host 判据把 99 张物料图当成发票归档 |
+| 2026-09 | 图片附件按 MIME 语义判定：`multipart/related` 且非 `Content-Disposition: attachment` = 正文内联物料；仅在同封另有真文档时才静默丢弃 |
+| 2026-09 | `containerStemKey()` 统一 PDF/OFD 同票判据（同一次投递 + 同容器 + 非通用词干），压缩包内条目与同封附件共用；`mfh dedupe` 复用同一函数回溯清理，规则一致才不会来回抖动 |
+| 2026-09 | 「只归档到附属材料」报警（`supportingOnlyReason()`）：一封邮件的产出**全是**汇总单 / 订单明细 / 结账单时判为部分成功并进待确认。汇总单归档成功会让整封邮件按 archived 干净收尾，票根网通行费 34 张票、星星充电 2 张票就是这样静默丢的——待确认队列里一条都看不到 |

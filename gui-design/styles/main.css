@@ -1477,6 +1477,106 @@ kbd {
 .log-jump:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
 
 /* ---------- Config: sticky save status, inline field errors ---------- */
+.config-page {
+  width: 100%;
+  max-width: 1120px;
+  margin-inline: auto;
+}
+.config-page > .card,
+.config-page > details.card {
+  margin-bottom: 14px;
+}
+.config-card__head {
+  display: block;
+}
+.config-card__heading {
+  min-width: 0;
+}
+.config-card__title {
+  margin: 0 0 10px;
+  color: var(--fg-strong);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.config-card__sub {
+  margin: -6px 0 12px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.config-card__body {
+  padding: 0;
+}
+.config-card__body > :last-child,
+.config-card__single-field,
+.config-path-grid .field {
+  margin-bottom: 0;
+}
+.config-credentials-grid,
+.config-path-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 18px;
+  row-gap: 16px;
+}
+.config-credentials-grid .field {
+  margin-bottom: 0;
+  align-content: start;
+}
+.config-credentials-grid__wide {
+  grid-column: 1 / -1;
+}
+.config-secret-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+.config-secret-row .btn {
+  white-space: nowrap;
+}
+.mailbox-picker {
+  margin-top: 20px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-app);
+}
+.mailbox-picker__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.mailbox-picker__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+.mailbox-picker__actions [data-mailbox-status] {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mailbox-picker .select--mailboxes {
+  display: block;
+  background: var(--bg-pane);
+}
+.config-card__footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.config-path-grid {
+  row-gap: 18px;
+}
 .save-bar {
   position: sticky;
   top: 0;
@@ -1516,6 +1616,35 @@ kbd {
   border-radius: var(--radius-lg);
   padding: 16px 18px;
   margin-bottom: 14px;
+}
+
+@media (max-width: 1000px) {
+  .config-credentials-grid,
+  .config-path-grid {
+    grid-template-columns: 1fr;
+  }
+  .config-credentials-grid__wide {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .mailbox-picker__head,
+  .config-card__footer {
+    align-items: flex-start;
+  }
+  .mailbox-picker__head,
+  .config-card__footer {
+    flex-direction: column;
+  }
+  .mailbox-picker__actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .config-secret-row {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
 }
 
 /* ---------- Pending queue item removal ---------- */
