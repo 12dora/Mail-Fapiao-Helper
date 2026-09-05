@@ -1,0 +1,156 @@
+/**
+ * 设置页内部复用的三种字段。放在页面目录里，别的页面用不到。
+ */
+import { CopyOutlined, FolderOpenOutlined } from '@ant-design/icons';
+import { Button, Form, Input, Space, Tooltip } from 'antd';
+import type { ReactNode } from 'react';
+import { bridge } from '../../bridge/index.js';
+import type { OpenLocation, SecretPresence } from '../../bridge/index.js';
+import { notify, notifyResult } from '../../components/index.js';
+import { SECRET_PRESENCE, secretPlaceholder, toNamePath } from './model.js';
+
+export function openLocation(location: OpenLocation): void {
+  void bridge.openPath({ location }).then((result) => {
+    if (!result.ok) notifyResult(result, { success: '已打开', failure: '打开失败' });
+  });
+}
+
+export interface TextFieldProps {
+  label: string;
+  path: string;
+  hint?: ReactNode;
+  placeholder?: string;
+  disabled?: boolean;
+}
+
+/** 普通文本字段。 */
+export function TextField({ label, path, hint, placeholder, disabled }: TextFieldProps): JSX.Element {
+  return (
+    <Form.Item label={label} name={toNamePath(path)} extra={hint}>
+      <Input placeholder={placeholder} disabled={disabled} autoComplete="off" />
+    </Form.Item>
+  );
+}
+
+export interface PathFieldProps extends TextFieldProps {
+  /** 有对应位置时右侧显示「打开」。 */
+  location?: OpenLocation;
+}
+
+/**
+ * 路径字段：可直接编辑，右侧「打开」调用主进程按位置打开。
+ * 主进程没有目录选择通道，所以这里不做「选择…」。
+ */
+export function PathField({ label, path, hint, placeholder, location, disabled }: PathFieldProps): JSX.Element {
+  return (
+    <Form.Item label={label} extra={hint}>
+      <Space.Compact style={{ width: '100%' }}>
+        <Form.Item name={toNamePath(path)} noStyle>
+          <Input placeholder={placeholder} disabled={disabled} autoComplete="off" spellCheck={false} />
+        </Form.Item>
+        {location ? (
+          <Button icon={<FolderOpenOutlined />} disabled={disabled} onClick={() => openLocation(location)}>
+            打开
+          </Button>
+        ) : null}
+      </Space.Compact>
+    </Form.Item>
+  );
+}
+
+export interface SecretFieldProps {
+  label: string;
+  path: string;
+  hint?: ReactNode;
+  secrets: SecretPresence | undefined;
+  cleared: ReadonlySet<string>;
+  onClear(path: string): void;
+  disabled?: boolean;
+}
+
+/**
+ * 密钥字段。回读永远是空的：留空表示不修改已保存的值，
+ * 想换成「没有值」得显式点「清除」。
+ */
+export function SecretField({
+  label,
+  path,
+  hint,
+  secrets,
+  cleared,
+  onClear,
+  disabled,
+}: SecretFieldProps): JSX.Element {
+  const presenceKey = SECRET_PRESENCE[path];
+  const stored = Boolean(presenceKey && secrets?.[presenceKey]);
+  const isCleared = cleared.has(path);
+  const clearable = stored && !isCleared;
+  // extra 只在真有内容时才给：空节点也会占一行高度。
+  const extra =
+    hint || clearable ? (
+      <Space size={8} wrap>
+        {hint ? <span>{hint}</span> : null}
+        {clearable ? (
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0, height: 'auto' }}
+            disabled={disabled}
+            onClick={() => onClear(path)}
+          >
+            清除
+          </Button>
+        ) : null}
+      </Space>
+    ) : undefined;
+  return (
+    <Form.Item label={label} name={toNamePath(path)} extra={extra}>
+      <Input.Password
+        placeholder={secretPlaceholder(path, secrets, isCleared)}
+        disabled={disabled}
+        autoComplete="new-password"
+      />
+    </Form.Item>
+  );
+}
+
+export interface PathLineProps {
+  path: string;
+  /** 复制成功后的提示标题。 */
+  copiedTitle?: string;
+}
+
+/**
+ * 等宽显示一个路径或链接，右侧带复制按钮。
+ *
+ * 与共享的 `PathText` 同一职责，区别只在文字方向：`PathText` 直接给外层加
+ * `dir="rtl"`，双向算法会把 `~/…` 这类以中性字符开头的路径首尾对调，显示成
+ * `…/config.json/~`。这里用 `<bdi>` 把内容隔离出来，省略号仍落在开头，
+ * 内容本身按原顺序渲染。
+ */
+export function PathLine({ path, copiedTitle = '路径已复制' }: PathLineProps): JSX.Element {
+  if (!path) return <span className="mfh-path__text">—</span>;
+  return (
+    <span className="mfh-path">
+      <Tooltip title={path}>
+        <span className="mfh-path__text" style={{ direction: 'rtl' }}>
+          <bdi>{path}</bdi>
+        </span>
+      </Tooltip>
+      <Tooltip title="复制">
+        <Button
+          type="text"
+          size="small"
+          icon={<CopyOutlined />}
+          aria-label="复制"
+          onClick={() => {
+            void bridge.copyText(path).then((result) => {
+              if (result.ok) notify.success(copiedTitle);
+              else notify.error('复制失败', result.message);
+            });
+          }}
+        />
+      </Tooltip>
+    </span>
+  );
+}
