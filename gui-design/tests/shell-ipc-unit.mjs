@@ -77,13 +77,27 @@ try {
   assert.equal((await call('mfh:export-csv', { filename: 'a.csv', csv: '' })).code, 'export_empty');
   const tooBig = 'x'.repeat(20 * 1024 * 1024 + 1);
   assert.equal((await call('mfh:export-csv', { filename: 'a.csv', csv: tooBig })).code, 'export_too_large');
+  // 上限按补过 BOM 之后的字节数算：正好卡在上限的内容加上 BOM 就超了。
+  assert.equal(
+    (await call('mfh:export-csv', { filename: 'a.csv', csv: 'x'.repeat(20 * 1024 * 1024) })).code,
+    'export_too_large',
+  );
   assert.equal((await call('mfh:export-csv', { filename: 'a.csv', csv: 'a,b' })).canceled, true);
 
   const target = path.join(cwd, 'out.csv');
   saveDialog = { canceled: false, filePath: target };
   const saved = await call('mfh:export-csv', { filename: '发票清单.csv', csv: '日期,金额\r\n2026-09-05,12.00' });
   assert.equal(saved.ok, true);
-  assert.equal(fs.readFileSync(target, 'utf8'), '日期,金额\r\n2026-09-05,12.00');
+  // 落盘的文件必须带 UTF-8 BOM，Excel 直接双击打开才不会把中文认成乱码。
+  const bytes = fs.readFileSync(target);
+  assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'exported CSV must start with a UTF-8 BOM');
+  assert.equal(bytes.toString('utf8'), '\uFEFF日期,金额\r\n2026-09-05,12.00');
+  // 已经带 BOM 的内容不会被加第二个。
+  const twice = path.join(cwd, 'twice.csv');
+  saveDialog = { canceled: false, filePath: twice };
+  await call('mfh:export-csv', { filename: 'a.csv', csv: '\uFEFF日期\r\n1' });
+  assert.equal(fs.readFileSync(twice, 'utf8'), '\uFEFF日期\r\n1');
+  saveDialog = { canceled: false, filePath: target };
   assert.ok(!saved.path.includes(cwd), 'the returned path is redacted for display only');
   // 原子写不留临时文件。
   assert.deepEqual(fs.readdirSync(cwd).filter((name) => name.includes('.tmp-')), []);
@@ -94,7 +108,11 @@ try {
   saveDialog = { canceled: false, filePath: target };
   trusted = false;
   assert.equal((await call('mfh:export-csv', { filename: 'a.csv', csv: 'b' })).code, 'untrusted_sender');
-  assert.equal(fs.readFileSync(target, 'utf8'), '日期,金额\r\n2026-09-05,12.00', 'untrusted callers must not write');
+  assert.equal(
+    fs.readFileSync(target, 'utf8'),
+    '\uFEFF日期,金额\r\n2026-09-05,12.00',
+    'untrusted callers must not write',
+  );
 } finally {
   fs.rmSync(cwd, { recursive: true, force: true });
 }

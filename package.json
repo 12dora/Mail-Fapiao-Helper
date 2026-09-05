@@ -26,7 +26,7 @@
     "pretest:electron": "node scripts/check-test-prereqs.mjs electron",
     "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs && node gui-design/tests/summary-unit.mjs && node gui-design/tests/detail-unit.mjs && node gui-design/tests/dedupe-ipc-unit.mjs && node gui-design/tests/shell-ipc-unit.mjs && node gui-design/tests/ocr-supporting-unit.mjs && node gui-design/tests/supporting-archive-regression.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",
-    "test:browser": "node gui-design/tests/e2e.mjs",
+    "test:browser": "node gui-design/tests/renderer-csv-unit.mjs && node gui-design/tests/e2e.mjs",
     "test:core": "npm run lint && npm run test:tooling && npm run build && npm run typecheck && npm run test:cli && npm run test:electron",
     "test": "npm run test:core",
     "test:all": "npm run test:core && npm run test:browser",

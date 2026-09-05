@@ -33,6 +33,13 @@ const EXTERNAL_ALLOWLIST = new Set([
 /** 导出的 CSV 全在内存里拼好再交过来，超过这个大小说明调用方出了问题。 */
 const CSV_LIMIT_BYTES = 20 * 1024 * 1024;
 
+/**
+ * 落盘的 CSV 带 UTF-8 BOM：Excel 不认没有 BOM 的 UTF-8，中文会开成乱码。
+ * 复制到剪贴板走 copyText，那边不加——BOM 粘进表格会变成一个可见的乱码字符。
+ * 大小上限按补过 BOM 之后的字节数算，免得贴着上限的内容写盘时才超。
+ */
+const UTF8_BOM = '\uFEFF';
+
 function normalizeExternal(raw: unknown): string {
   if (typeof raw !== 'string') return '';
   const value = raw.trim();
@@ -121,7 +128,8 @@ export function registerShellHandlers(deps: ShellHandlerDeps): void {
     const raw = asObject(payload);
     const csv = typeof raw.csv === 'string' ? raw.csv : '';
     if (!csv) return { ok: false, canceled: false, code: 'export_empty', message: '没有可导出的内容。' };
-    if (Buffer.byteLength(csv, 'utf8') > CSV_LIMIT_BYTES) {
+    const text = csv.startsWith(UTF8_BOM) ? csv : `${UTF8_BOM}${csv}`;
+    if (Buffer.byteLength(text, 'utf8') > CSV_LIMIT_BYTES) {
       return { ok: false, canceled: false, code: 'export_too_large', message: '内容太大，先缩小筛选范围再导出。' };
     }
 
@@ -138,7 +146,7 @@ export function registerShellHandlers(deps: ShellHandlerDeps): void {
     }
 
     try {
-      writeCsvAtomic(result.filePath, csv);
+      writeCsvAtomic(result.filePath, text);
       return { ok: true, canceled: false, path: redactPath(result.filePath), code: 'export_saved', message: '已导出。' };
     } catch (err) {
       return {
