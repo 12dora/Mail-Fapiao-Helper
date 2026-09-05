@@ -117,6 +117,7 @@ export interface OperationHandlerDependencies {
     onlyMail: boolean,
     mailNotFound: boolean,
   ): string;
+  pendingRetryRunMessage(counts: RunTerminalCounts, status: RunHistoryEntry['status']): string;
   ocrPendingCsvPath(): string;
   readCsvRows(file: string): Record<string, string>[];
   ensureArchiveRecoveryReady(): UiError | undefined;
@@ -154,6 +155,12 @@ interface PipelineExecutionContext {
   onlyHash: string | undefined;
   lease: OpLease;
   startedAt: number;
+  /**
+   * 「全部重试」：跑 `mfh pending retry` 而不是 `mfh run`——输入是待确认队列自带的
+   * `.eml` 副本，跑完由 CLI 核对 pending.csv（成功出队、失败换新原因）。
+   * 复用同一把 pipeline 锁与同一套进度/历史/摘要管道。
+   */
+  pendingRetry: boolean;
 }
 
 interface PreparedOcrOperation {
@@ -210,6 +217,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     tryAppSummary,
     ocrRunMessage,
     pipelineRunMessage,
+    pendingRetryRunMessage,
     ocrPendingCsvPath,
     readCsvRows,
     ensureArchiveRecoveryReady,
@@ -328,7 +336,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
   }
 
   async function executePipeline(context: PipelineExecutionContext): Promise<Record<string, unknown>> {
-    const { raw, concurrency, onlyHash, lease, startedAt } = context;
+    const { raw, concurrency, onlyHash, lease, startedAt, pendingRetry } = context;
     if (typeof raw.avoidConflictBeforeOcr === 'boolean') {
       const saved = saveConfig({ rename: { avoidConflictBeforeOcr: raw.avoidConflictBeforeOcr } });
       if (!saved.ok) {
@@ -350,8 +358,11 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     }
     const args = ['--config', configPath, '--state', statePath, '--concurrency', String(concurrency)];
     if (onlyHash) args.push('--only-mail', onlyHash);
-    if (raw.force === true) args.push('--force');
-    const result = await runCli('run', args, { operation: 'files', jobId: lease.jobId });
+    // `pending retry` 本身就是强制重跑；--force / --only-mail 都不适用于它。
+    if (!pendingRetry && raw.force === true) args.push('--force');
+    const result = pendingRetry
+      ? await runCli('pending', ['retry', ...args], { operation: 'files', jobId: lease.jobId })
+      : await runCli('run', args, { operation: 'files', jobId: lease.jobId });
 
     // ELEC-08 / 簇 C：以结构化终态计数为准，不用裸 exit code 单独判定成功。
     // runCounts / terminalMailNotFound 优先取流式捕获值（ring 挤出后仍权威）。
@@ -369,11 +380,13 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       partial: counts.partial,
       mailNotFound,
     });
-    const message = pipelineRunMessage(counts, status, Boolean(onlyHash), mailNotFound);
+    const message = pendingRetry
+      ? pendingRetryRunMessage(counts, status)
+      : pipelineRunMessage(counts, status, Boolean(onlyHash), mailNotFound);
     // 操作结果在 runCli 返回时即最终；history / batch / summary 均为 best-effort。
     const historyWarning = recordHistory(
       'pipeline',
-      onlyHash ? '重新处理单封邮件' : '处理缓存邮件',
+      pendingRetry ? '重试全部待确认' : onlyHash ? '重新处理单封邮件' : '处理缓存邮件',
       startedAt,
       result,
       status,
@@ -847,13 +860,26 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       }
     }
 
+    // 「全部重试」与「单封重试」是两条互斥的输入源：同时给出说明调用方写错了，
+    // 不能猜一个执行——静默降级会让用户以为整队跑过了，其实只跑了一封。
+    const pendingRetry = raw.pendingRetry === true;
+    if (pendingRetry && onlyHash) {
+      return {
+        ok: false,
+        code: 'invalid_pending_retry',
+        message: '「全部重试」不能和单封重试一起使用。',
+        normalizedFilter: normalizedFilterFrom(),
+        summary: appSummary(),
+      };
+    }
+
     // ELEC-02：先占锁再写配置。
     const gate = acquireOperation('pipeline');
     if (!gate.ok) return { ...gate.response, normalizedFilter: normalizedFilterFrom() };
 
     const startedAt = Date.now();
     try {
-      return await executePipeline({ raw, concurrency, onlyHash, lease: gate.lease, startedAt });
+      return await executePipeline({ raw, concurrency, onlyHash, lease: gate.lease, startedAt, pendingRetry });
     } finally {
       gate.lease.release();
     }

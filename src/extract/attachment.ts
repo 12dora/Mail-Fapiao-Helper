@@ -1,6 +1,7 @@
 import type { ParsedMail } from 'mailparser';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { looksLikeItineraryText } from './classify.js';
+import { looksLikeEmailChrome } from './assetEvidence.js';
 import { looksLikeOfdItinerary, preferPdfOverDuplicateOfd } from './documentIdentity.js';
 import { detectDocumentKind, documentsFromZip } from '../sites/common.js';
 import { MAX_DOC_BYTES } from '../util/net.js';
@@ -96,15 +97,52 @@ type ImageDisposition =
   | { action: 'keep' }
   | { action: 'keep_with_issue'; reason: string };
 
-function classifyImageAttachment(att: AttachmentMeta, referencedCids: Set<string>): ImageDisposition {
+/**
+ * 这是 `multipart/related` 里的**正文内联展示资源**吗？（EXT-15）
+ *
+ * MIME 语义本身就够判：真正的文档附件带 `Content-Disposition: attachment`，
+ * 而页眉横幅、下载按钮、广告位、二维码是 related 部件，没有 attachment 处置。
+ * 智慧发票服务平台（crestv）的邮件是典型：三张 related 图 `cid: header /
+ * downloadbutton / advertising`（有的版本连 filename 都没有），发票本体则是三个
+ * `disposition=attachment` 的 `<20位发票号>.pdf/.ofd/.zip`。
+ *
+ * 旧判据要求「正文里出现 `cid:` 引用」，但这些模板写的是 `<img src="header2.jpg">`
+ * 这种普通相对路径，`cid:` 一个都扫不到，于是三张图全部当发票归档。
+ */
+function isInlineBodyAsset(att: AttachmentMeta): boolean {
+  if (att.related !== true) return false;
+  const disposition = (att.contentDisposition ?? '').trim().toLowerCase();
+  return disposition !== 'attachment';
+}
+
+/**
+ * 图片附件处置（EXT-04 / EXT-15）。
+ *
+ * `hasRealDocument` = 同一封邮件里还有别的真文档附件（PDF/OFD/ZIP）。
+ * 只有在**这张票已经另有出处**时，才允许静默丢弃内联展示资源；否则宁可保留并记
+ * issue——万一某个平台真把发票做成内联图，也不能让它无声消失。
+ */
+function classifyImageAttachment(
+  att: AttachmentMeta,
+  referencedCids: Set<string>,
+  hasRealDocument: boolean,
+): ImageDisposition {
   if (!isImageAttachment(att)) return { action: 'keep' };
 
   const size = att.content?.length ?? att.size ?? 0;
   const stem = filenameStem(att.filename);
-  const decorativeName = !!(stem && DECORATIVE_IMAGE_NAMES.has(stem));
+  const decorativeName = !!(stem && DECORATIVE_IMAGE_NAMES.has(stem))
+    || looksLikeEmailChrome(att.filename)
+    || looksLikeEmailChrome(attachmentCid(att));
   const decorativeSize = size > 0 && size <= DECORATIVE_IMAGE_MAX_BYTES;
   const cid = attachmentCid(att);
   const referencedRelated = att.related === true && !!cid && referencedCids.has(cid);
+  const inlineAsset = isInlineBodyAsset(att);
+
+  // 邮件里已经有真文档：related 内联资源就是版式物料，静默丢弃。
+  if (inlineAsset && hasRealDocument) {
+    return { action: 'discard' };
+  }
 
   // 组合证据：被正文引用的 related 部件，且尺寸/文件名也像装饰资源 → 可静默丢弃。
   if (referencedRelated && (decorativeSize || decorativeName)) {
@@ -112,10 +150,11 @@ function classifyImageAttachment(att: AttachmentMeta, referencedCids: Set<string
   }
 
   // 弱信号不足以丢弃：保留，但把不确定性上报，禁止静默“当装饰图跳过”。
-  if (referencedRelated || decorativeSize || decorativeName) {
+  if (referencedRelated || decorativeSize || decorativeName || inlineAsset) {
     const label = att.filename || att.cid || att.contentId || 'inline-image';
     const signals: string[] = [];
     if (referencedRelated) signals.push('cid_related');
+    if (inlineAsset && !referencedRelated) signals.push('inline_related');
     if (decorativeSize) signals.push('small');
     if (decorativeName) signals.push('name');
     return {
@@ -127,11 +166,22 @@ function classifyImageAttachment(att: AttachmentMeta, referencedCids: Set<string
   return { action: 'keep' };
 }
 
+/** 同一封邮件里是否存在真正的文档附件（PDF / OFD / ZIP）。 */
+function hasRealDocumentAttachment(mail: ParsedMail): boolean {
+  return (mail.attachments ?? []).some(
+    (att) => isPdfAttachment(att) || isOfdAttachment(att) || isZipAttachment(att),
+  );
+}
+
 /** An attachment that should make the attachment extractor claim the email. */
-function isArchivableAttachment(att: AttachmentMeta, referencedCids: Set<string>): boolean {
+function isArchivableAttachment(
+  att: AttachmentMeta,
+  referencedCids: Set<string>,
+  hasRealDocument: boolean,
+): boolean {
   if (isPdfAttachment(att) || isOfdAttachment(att) || isZipAttachment(att)) return true;
   if (!isImageAttachment(att)) return false;
-  return classifyImageAttachment(att, referencedCids).action !== 'discard';
+  return classifyImageAttachment(att, referencedCids, hasRealDocument).action !== 'discard';
 }
 
 function looksLikeItinerary(artifact: PdfArtifact): boolean {
@@ -169,12 +219,14 @@ const attachmentExtractor: Extractor = {
     // whose only "attachments" are embedded signature logos must fall through to
     // the directLink / thirdParty extractors so its real invoice link is followed.
     const referencedCids = collectReferencedCids(mail);
-    return (mail.attachments ?? []).some((att) => isArchivableAttachment(att, referencedCids));
+    const hasRealDocument = hasRealDocumentAttachment(mail);
+    return (mail.attachments ?? []).some((att) => isArchivableAttachment(att, referencedCids, hasRealDocument));
   },
 
   async extract(mail: ParsedMail, ctx: Ctx): Promise<ExtractResult> {
     const pdfs: PdfArtifact[] = [];
     const referencedCids = collectReferencedCids(mail);
+    const hasRealDocument = hasRealDocumentAttachment(mail);
 
     if (!mail.attachments || mail.attachments.length === 0) {
       return { kind: 'manual', reason: 'no_attachments' };
@@ -245,11 +297,25 @@ const attachmentExtractor: Extractor = {
         try {
           // 与站点处理器共用同一个 ZIP 解包器：entry 数量、单条/总解压上限和
           // 压缩比（zip bomb）防护都在其中（APP-09）。
-          const { documents, skipped } = documentsFromZip(att.content, zipName);
+          const { documents, skipped, unsupportedExtensions } = documentsFromZip(att.content, zipName);
           for (const item of skipped) {
             skippedOversize = true;
             issues.push({ reason: `attachment:zip_entry_skipped:${item}` });
             ctx.log.warn(`Skipped ZIP entry ${item}`);
+          }
+          // 一个压缩包一份票都没解出来，绝不能静默通过：票根网的「包中包」曾因此
+          // 让整封邮件按 archived 收尾（同封的汇总单附件归档成功），68 个 PDF/OFD
+          // 条目无声无息地消失，连待确认队列里都看不到（EXT-14）。
+          if (documents.length === 0) {
+            const xmlOnly = unsupportedExtensions.length > 0
+              && unsupportedExtensions.every((ext) => ext === '.xml');
+            issues.push({
+              reason: xmlOnly
+                ? `attachment:zip_xml_only:${zipName}`
+                : `attachment:zip_no_invoice_entries:${zipName}`,
+              incidental: xmlOnly,
+            });
+            ctx.log.warn(`ZIP ${zipName} yielded no archivable document`);
           }
           for (const doc of documents) {
             if (!admit(doc.data.length, doc.source)) continue;
@@ -262,7 +328,7 @@ const attachmentExtractor: Extractor = {
         }
       } else if (isImageAttachment(att)) {
         // EXT-04：仅在组合证据下静默丢弃装饰图；弱信号保留并记 issue。
-        const disposition = classifyImageAttachment(att, referencedCids);
+        const disposition = classifyImageAttachment(att, referencedCids, hasRealDocument);
         if (disposition.action === 'discard') {
           ctx.log.debug(`Skip decorative image ${att.filename || att.cid || 'inline-image'}`);
           continue;

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { log } from './log.js';
+import { cmdDedupe } from './cli/dedupe.js';
 import { cmdFetch } from './cli/fetch.js';
 import { installSignalHandlers } from './cli/lifecycle.js';
 import { releaseDataDirLock } from './cli/lock.js';
@@ -31,6 +32,8 @@ async function main(): Promise<number> {
         return await cmdPending(rest);
       case 'organize':
         return await cmdOrganize(rest);
+      case 'dedupe':
+        return await cmdDedupe(rest);
       case 'rebuild-state':
       case '--rebuild-state':
         return await cmdRebuildState(rest);

@@ -9,6 +9,7 @@ Commands:
   ocr            Run OCR for archived documents
   pending        Inspect manual processing queue
   organize       Copy archived invoices into optional OCR-based names/folders
+  dedupe         Remove OFD copies of invoices already archived as PDF
   rebuild-state  Rebuild state.json from INDEX/cache/invoices.csv (no data deleted)
 
 Options:
@@ -24,11 +25,22 @@ Usage:
 
 Commands:
   list    List emails currently in pending.csv
+  retry   Re-process every cached pending email and drop the rows that succeed
 
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --json               Print machine-readable summary for GUI integration
+  --state <path>       Path to state.json         (retry only, default: ./state.json)
+  --concurrency <n>    Re-process N emails in parallel (retry only, default: 4)
   -h, --help           Show this help
+
+Notes:
+  * retry reads pending/<hash>.eml — the queue's own copy of each email — so it
+    works even after the sample cache has been pruned.
+  * A row whose email now archives cleanly is removed from pending.csv; a row
+    that fails again keeps its place and gets the fresh reason. Nothing is
+    deleted from invoices/ and no .eml is discarded.
+  * Re-archiving is idempotent: documents already in invoices.csv are skipped.
 `;
 
 export const ORGANIZE_USAGE = `mfh organize — copy archived invoices into optional OCR-based names/folders
@@ -123,4 +135,29 @@ Options:
   --concurrency <n>    Process up to N cached emails in parallel (default: 4)
   --force              Re-process cached emails even if state says they were handled
   -h, --help           Show this help
+`;
+
+export const DEDUPE_USAGE = `mfh dedupe — remove OFD copies of invoices already archived as PDF
+
+Usage:
+  mfh dedupe [options]
+
+Options:
+  --config <path>      Path to config.json        (default: ./config.json)
+  --apply              Perform the cleanup (without it, only report)
+  --json               Print machine-readable report
+  -h, --help           Show this help
+
+What counts as a duplicate:
+  Exactly the rule the extractor now applies while archiving — same email, same
+  container path, same stem, one .pdf and one .ofd. It is NOT a general
+  by-filename dedupe: two invoices that merely share a name are never merged.
+
+Safety:
+  * A row is only acted on when the file on disk matches the ledger contentHash.
+    Rows that do not match are reported and left completely untouched.
+  * Files are MOVED into invoices/.dedupe-quarantine/<timestamp>/, never deleted.
+    Remove that folder yourself once you have checked the result.
+  * invoices.csv, ocr-pending.csv and ocr-results.csv lose only the matching rows.
+  * Running it twice is a no-op.
 `;

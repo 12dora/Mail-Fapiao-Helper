@@ -65,6 +65,35 @@ function countChar(value: string, ch: string): number {
   return n;
 }
 
+/**
+ * 在第一个「不配对的闭括号」处截断（APP-10B）。
+ *
+ * 中文正文里 `（请到 https://inv-veri.chinatax.gov.cn)查询发票真伪` 这种写法很常见：
+ * 开括号在 URL 之前，闭括号在 URL 之中。此前只检查**结尾**字符是否配对，于是
+ * `)查询发票真伪` 整段被留在 token 里，`new URL()` 又把它 IDNA 编码成
+ * `inv-veri.chinatax.gov.xn--cn)-u09ds6sex7awjwy8diu6c`，最后必然以
+ * `blocked_url:dns` 落进待确认。
+ *
+ * token 一定从 `https?://` 开始，所以其中的开括号只可能来自 URL 自身：
+ * `https://x/a_(b)_c` 里的 `)` 有配对，保留；孤立的 `)` 一律视为正文收尾。
+ */
+function cutAtUnmatchedCloser(value: string): string {
+  const openCounts = new Map<string, number>();
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (Object.values(BRACKET_PAIRS).includes(ch)) {
+      openCounts.set(ch, (openCounts.get(ch) ?? 0) + 1);
+      continue;
+    }
+    const open = BRACKET_PAIRS[ch];
+    if (!open) continue;
+    const depth = openCounts.get(open) ?? 0;
+    if (depth === 0) return value.slice(0, i);
+    openCounts.set(open, depth - 1);
+  }
+  return value;
+}
+
 /** 反复剥离结尾的行文标点；闭括号只在明显不配对时剥离，避免破坏合法 URL。 */
 function stripTrailingProse(value: string): string {
   let s = value;
@@ -95,6 +124,7 @@ export function normalizeExtractedUrl(raw: string): string | null {
 
   const cut = cleaned.search(PROSE_CUT);
   if (cut >= 0) cleaned = cleaned.slice(0, cut);
+  cleaned = cutAtUnmatchedCloser(cleaned);
   cleaned = stripTrailingProse(cleaned).trim();
   if (cleaned.length === 0) return null;
 

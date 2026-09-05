@@ -30,9 +30,17 @@ export class RunAccumulator {
   /** CORE-09：--only-mail 是否命中过目标（含 pending/<hash>.eml）。 */
   onlyMailMatched = false;
   readonly networkFailures: ProcessMailResult[] = [];
+  /**
+   * 逐封终态。只有 `pending retry` 需要它来核对 pending.csv，普通 run 不收集
+   * （几千封邮件全留在内存里没有意义）。
+   */
+  readonly results: ProcessMailResult[] = [];
+
+  constructor(private readonly collectResults = false) {}
 
   recordOutcome(result: ProcessMailResult): void {
     if (result.reason === 'aborted') return;
+    if (this.collectResults) this.results.push(result);
     if ((result.outcome === 'pending_durable' || result.partial === true) && result.reason?.includes('network_retry_failed')) {
       this.networkFailures.push(result);
     }
@@ -113,7 +121,7 @@ export async function openRunContext(opts: RunOpts): Promise<RunContext | number
     return context.browserInstance;
   };
   context = {
-    opts, cfg, store, accumulator: new RunAccumulator(), rawDir: cfg.paths.samples,
+    opts, cfg, store, accumulator: new RunAccumulator(opts.pendingRetry === true), rawDir: cfg.paths.samples,
     pendingDir: resolve(cfg.paths.pending), inFlight: new Set<string>(),
     // CORE-02：致命错误时 abort 所有 worker，并在归档临界区前再次检查。
     fatalAbort: new AbortController(), fatalError: undefined,
@@ -269,7 +277,10 @@ export async function handleEml(context: RunContext, emlPath: string): Promise<v
 export async function runWorkers(context: RunContext): Promise<void> {
   // CORE-09：--only-mail 优先使用 pending/<hash>.eml（待确认页重试的权威副本）。
   let emlPaths: string[];
-  if (context.opts.onlyMail !== undefined && isMailHash(context.opts.onlyMail)) {
+  if (context.opts.pendingRetry === true) {
+    // 待确认队列自带每封邮件的 `.eml` 副本，samples 缓存被清理过也照样能重放。
+    emlPaths = await collectEmlPaths(context.pendingDir);
+  } else if (context.opts.onlyMail !== undefined && isMailHash(context.opts.onlyMail)) {
     const target = context.opts.onlyMail.trim().toLowerCase();
     const pendingEml = join(context.pendingDir, `${target}.eml`);
     if (fileExistsNonEmpty(pendingEml)) {

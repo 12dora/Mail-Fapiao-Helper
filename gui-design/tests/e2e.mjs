@@ -850,6 +850,43 @@ async function main() {
       fail(`邮箱文件夹选择框过小：${JSON.stringify(mailboxSize)}`);
     }
 
+    // The email setup uses one consistent grid: the two primary inputs share
+    // a baseline, while the mailbox picker spans the card instead of leaving
+    // an empty half-column beside a tall multi-select.
+    const emailLayout = await activeMain(page, '.config-card--mail').evaluate((card) => {
+      const rect = (selector) => {
+        const box = card.querySelector(selector)?.getBoundingClientRect();
+        return box ? { top: box.top, width: box.width } : null;
+      };
+      return {
+        card: rect('.config-card__body'),
+        host: rect('#cfg-imap-host'),
+        user: rect('#cfg-imap-user'),
+        mailbox: rect('#cfg-imap-mailbox'),
+      };
+    });
+    if (!emailLayout.card || !emailLayout.host || !emailLayout.user || !emailLayout.mailbox) {
+      fail(`邮箱布局缺少必要元素：${JSON.stringify(emailLayout)}`);
+    }
+    if (Math.abs(emailLayout.host.top - emailLayout.user.top) > 1 || Math.abs(emailLayout.host.width - emailLayout.user.width) > 2) {
+      fail(`邮箱主机与账号未对齐：${JSON.stringify(emailLayout)}`);
+    }
+    if (emailLayout.mailbox.width < emailLayout.card.width * 0.9) {
+      fail(`邮箱文件夹选择区未横跨卡片，仍可能产生大块空隙：${JSON.stringify(emailLayout)}`);
+    }
+
+    const pathLayout = await activeMain(page, '.config-card--paths').evaluate((card) => {
+      const invoice = card.querySelector('#cfg-path-invoices')?.getBoundingClientRect();
+      const samples = card.querySelector('#cfg-path-samples')?.getBoundingClientRect();
+      return invoice && samples ? {
+        invoice: { top: invoice.top, width: invoice.width },
+        samples: { top: samples.top, width: samples.width },
+      } : null;
+    });
+    if (!pathLayout || Math.abs(pathLayout.invoice.top - pathLayout.samples.top) > 1 || Math.abs(pathLayout.invoice.width - pathLayout.samples.width) > 2) {
+      fail(`保存位置首行未对齐：${JSON.stringify(pathLayout)}`);
+    }
+
     await page.getByRole('button', { name: '测试邮箱连接' }).click();
     await page.locator('.toast').getByText('邮箱连接正常', { exact: false }).first().waitFor({ state: 'visible', timeout: 5000 });
     // Only a verified connection may upgrade the sidebar status to 已连接.

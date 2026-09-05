@@ -116,6 +116,38 @@ export function sameDocument(a: PdfArtifact, b: PdfArtifact): boolean {
 }
 
 /**
+ * 「同一次投递里的同一个词干」身份（EXT-16）。返回 null 表示不适用。
+ *
+ * 这**不是** EXT-01 禁止的那种「按文件名跨来源去重」。它要求两份文件来自同一封
+ * 邮件的**同一个容器**——同一个压缩包内的同一目录，或同为该邮件的直接附件——
+ * 而且词干逐字相同、只有扩展名不同。开票方按这个约定同时给出 PDF 与 OFD：
+ *
+ *   通行费电子发票.zip/913…_1891…zip/1891….pdf  +  …/1891….ofd
+ *   携程酒店订单1128144409057843电子发票.pdf     +  …….ofd
+ *
+ * 直链下载不参与（URL 路径的同名毫无保证），通用词干（`发票`、`invoice`、`下载`
+ * 之类）也不参与——那正是不同票最容易撞名的地方，交给既有的发票号判据。
+ */
+export function containerStemKey(source: string): string | null {
+  if (!source) return null;
+  // 直链：URL 上的同名不构成同一次投递。
+  if (/^https?:\/\//i.test(source)) return null;
+  const stripped = source.replace(/\.[^./]*$/, '');
+  if (stripped.length === 0) return null;
+  const leaf = stripped.split('/').pop() ?? '';
+  const normalizedLeaf = leaf.toLowerCase().replace(/[\s_()（）【】[\]-]+/g, '').trim();
+  if (isGenericDocumentStem(normalizedLeaf)) return null;
+  return stripped;
+}
+
+/** 两个 artifact 是不是同一次投递、同一个词干的两种格式？ */
+function sameContainerDelivery(a: PdfArtifact, b: PdfArtifact): boolean {
+  const keyA = containerStemKey(a.source);
+  if (keyA === null) return false;
+  return keyA === containerStemKey(b.source);
+}
+
+/**
  * 同一封邮件里既有 PDF 又有 OFD 时，只丢弃“可靠匹配到同一张票的 PDF”的那份 OFD。
  * `subject` 可选：邮件主题命中行程单关键词时，OFD 一律保留为行程单。
  */
@@ -139,9 +171,11 @@ export function preferPdfOverDuplicateOfd(
       continue;
     }
 
-    // 仅当同一邮件里的某个 PDF 可证明是同一份文档（两边 20 位发票号一致）才丢弃 OFD。
-    // 文件名撞名、或只有一方有发票号，都必须保留双方，交给 OCR 后再合并。
-    const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf));
+    // 仅当同一邮件里的某个 PDF 可证明是同一份文档才丢弃 OFD，两条判据都是强身份：
+    //   a) 两边 20 位发票号一致（EXT-01：号码不等则强制 distinct，禁止回落到文件名）
+    //   b) 同一次投递的同一个容器 + 同一个非通用词干（EXT-16）
+    // 单纯的文件名撞名仍然不足以删除——(b) 要求同容器且词干非通用。
+    const duplicatePdf = pdfs.find((pdf) => sameDocument(artifact, pdf) || sameContainerDelivery(artifact, pdf));
     if (duplicatePdf) {
       log.debug(`Filtered duplicate OFD invoice ${artifact.source}; keeping PDF ${duplicatePdf.source}`);
       continue;
