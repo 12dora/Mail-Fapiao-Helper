@@ -165,7 +165,7 @@ async function openResolvedMail(
       ok: false,
       opened: 'none' as const,
       code: result.code,
-      message: result.message ?? result.error ?? '出于安全考虑，无法打开该目标。',
+      message: result.message ?? '出于安全考虑，无法打开该目标。',
       error: result.error,
     };
   }
@@ -221,7 +221,7 @@ async function openPendingFallback(
         ok: false,
         opened: 'none' as const,
         code: folderResult.code,
-        message: folderResult.message ?? folderResult.error ?? '出于安全考虑，无法打开该位置。',
+        message: folderResult.message ?? '出于安全考虑，无法打开该位置。',
         ...(folderResult.error ? { error: sanitizeText(folderResult.error, { maxLength: 200 }) } : {}),
       };
     }
@@ -264,7 +264,7 @@ async function openPendingFallback(
     opened: 'folder' as const,
     code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
     message: row
-      ? '没有找到原始邮件文件，已打开已保存邮件文件夹，请手动查找后再到开票平台重新下载。'
+      ? '未找到原始邮件，已打开邮件保存文件夹供您查找。'
       : '没有找到这封邮件，已打开已保存邮件文件夹。',
   };
 }
@@ -355,7 +355,8 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
             ok: true,
             kind: 'warn',
             code: 'imap_mailbox_fallback',
-            message: `邮箱连接正常，但找不到配置的文件夹「${mailbox}」，已临时打开「${fallbackMailbox}」。请在配置中重新选择目标文件夹。`,
+            message: '邮箱连接正常，但目标文件夹不可用，请在设置中重新选择。',
+            detail: sanitizeText(`目标文件夹：${mailbox}；临时打开：${fallbackMailbox}`, { maxLength: 200 }),
           };
         }
         return { ok: true, code: 'imap_ok', message: '邮箱连接正常，可以获取邮件。' };
@@ -525,7 +526,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
           canceled: false,
           code: result.code ?? 'manual_archive_failed',
           message: result.message
-            ?? (isDup ? '选择的文件都已经归档过了，没有新增内容。' : '文件没有归档成功，待确认记录保持不变。'),
+            ?? (isDup ? '所选文件均已归档，无需重复添加。' : '文件没有归档成功，待确认记录保持不变。'),
           ...(result.detail ? { detail: result.detail } : {}),
           files: [],
           duplicates: result.duplicates,
@@ -544,7 +545,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
       } else if (pendingRemoved > 0) {
         message = `文件已保存，并已从「待确认」移除${skipped}。`;
       } else {
-        message = `文件已保存，并会在下次识别时处理；但这封邮件仍在「待确认」中${skipped}。请刷新列表后重试移除。`;
+        message = `文件已保存并加入识别队列${skipped}，请刷新「待确认」列表后重试移除这封邮件。`;
       }
       const summaryPart = deps.tryAppSummary();
       return {

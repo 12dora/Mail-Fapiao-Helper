@@ -363,16 +363,6 @@ function probeMacFinderAlias(target: string, head: Buffer): 'alias' | 'clean' | 
   }
 }
 
-/**
- * 廉价检测 macOS Finder 替身（防御纵深）。
- * 真正检查 `target`：数据叉 bookmark 头 +（darwin）resource fork 中的 `alis`。
- * 无法判定时视为可疑（true），调用方不得 mint open 令牌。
- */
-function hasMacFinderAliasIndicator(target: string, head: Buffer): boolean {
-  const probe = probeMacFinderAlias(target, head);
-  return probe === 'alias' || probe === 'unknown';
-}
-
 type OpenFileDisposition =
   | { action: 'open' }
   | { action: 'reveal' }
@@ -419,13 +409,13 @@ function dispositionForOpenTarget(
       return {
         action: 'refuse',
         code: 'path_executable_refused',
-        message: '出于安全考虑，不能打开可执行文件或脚本。请在文件管理器中自行处理。',
+        message: '无法打开可执行文件或脚本，请在文件管理器中处理。',
       };
     }
     return {
       action: 'refuse',
       code: 'path_missing',
-      message: '目标位置不存在，无法打开或在文件夹中显示。请确认路径是否正确，或先在应用内完成抓取/归档。',
+      message: '目标位置不存在，请检查保存位置或先获取邮件并归档发票。',
     };
   }
   if (st.isDirectory()) {
@@ -453,7 +443,7 @@ function dispositionForOpenTarget(
     return {
       action: 'refuse',
       code: 'path_executable_refused',
-      message: '出于安全考虑，不能打开可执行文件或脚本。请在文件管理器中自行处理。',
+      message: '无法打开可执行文件或脚本，请在文件管理器中处理。',
     };
   }
   // 真正 ALLOW-LIST：白名单扩展名 + 内容 magic 正向匹配才 open。
@@ -470,7 +460,7 @@ function dispositionForOpenTarget(
       return {
         action: 'refuse',
         code: 'path_alias_refused',
-        message: '出于安全考虑，不能打开 macOS 替身（别名）文件。请打开真实的文档原件。',
+        message: '无法打开替身文件，请选择文档原件。',
       };
     }
     if (aliasProbe === 'unknown') {
@@ -480,7 +470,7 @@ function dispositionForOpenTarget(
       return {
         action: 'refuse',
         code: 'path_shortcut_refused',
-        message: '出于安全考虑，不能打开快捷方式或链接文件。请打开真实的文档原件。',
+        message: '无法打开快捷方式或链接文件，请选择文档原件。',
       };
     }
     if (!contentMatchesClaimedOpenableType(ext, head)) {
@@ -499,13 +489,13 @@ function dispositionForOpenTarget(
  * 且目标当时仍存在，不能断言文件管理器窗口一定出现。对用户说清楚实际做了什么。
  */
 const REVEAL_REQUESTED_FILE_MSG =
-  '已请求在文件管理器中显示该文件。若未看到窗口，请到应用内对应文件夹查找。';
+  '已请求显示该文件，若未出现窗口，请通过应用内的文件夹入口查找。';
 const REVEAL_REQUESTED_LOCATION_MSG =
-  '已请求在文件管理器中显示该位置。若未看到窗口，请通过应用内的文件夹入口再试。';
+  '已请求显示该位置，若未出现窗口，请通过应用内的文件夹入口重试。';
 const REVEAL_REQUESTED_BUNDLE_MSG =
-  '已请求在文件管理器中显示该应用程序包（不会启动）。若未看到窗口，请手动在访达中查看。';
+  '已请求在访达中显示该应用程序包，若未出现窗口，请手动查找。';
 const REVEAL_REQUESTED_UNSUITABLE_MSG =
-  '该文件不适合直接打开；已请求在文件管理器中显示。若未看到窗口，请到应用内对应文件夹查找。';
+  '无法直接打开该文件，已请求在文件管理器中显示。';
 
 type OpenPolicyResult = {
   ok: boolean;
@@ -630,7 +620,7 @@ async function recheckOpenTarget(
       };
     }
   } catch {
-    return missingResult('目标位置不存在，无法打开。请确认它仍然存在。');
+    return missingResult('目标位置不存在，无法打开。');
   }
   // mint 前最后一次策略重检（含读头 + resource fork 替身探测）。
   const recheck = dispositionForOpenTarget(target, policyOpts);
@@ -670,7 +660,7 @@ async function openOrRevealByPolicy(
     // reveal 前再次确认存在：策略判定与调用之间可能消失；不存在不得报成功。
     return revealTarget(
       target,
-      '目标位置不存在，无法在文件夹中显示。请确认路径是否正确，或先在应用内完成抓取/归档。',
+      '目标位置不存在，请检查保存位置或先获取邮件并归档发票。',
       policyOpts.allowFileOpen || policyOpts.allowDirectoryOpen
         ? REVEAL_REQUESTED_UNSUITABLE_MSG
         : REVEAL_REQUESTED_LOCATION_MSG,
