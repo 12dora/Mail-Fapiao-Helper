@@ -44,4 +44,16 @@ npm run screenshots    # 自带静态服务器，按路由截图到 docs/screens
 
 ## 测试
 
-`gui-design/tests/` 下的用例仍指向旧界面，会随本次重写另行更新。
+| 套件 | 跑什么 | 不跑什么 |
+| --- | --- | --- |
+| `tests/e2e.mjs` | 静态服务器 + Chromium + `?fake=…`：路由、运行流程、列表、抽屉、空状态、深色模式、文案检查 | Electron、IPC、CLI |
+| `tests/electron-smoke.mjs` | 真 Electron 启动、preload 桥接、五个路由、hash 导航后的 trusted-sender | 长任务 |
+| `tests/electron-ipc-fixture.mjs` | 真 Electron + 假 CLI：操作互斥、进度事件、清理重复、待确认动作、详情通道、配置往返、回执脱敏 | 真实抓取与识别（见 `cli-integration.mjs`） |
+
+三套共用 `tests/ui-helpers.mjs`：静态服务器、`data-testid` 选择器、antd 专属选择器
+（分段筛选、分页、抽屉、toast）、界面文案检查，以及 Electron 的临时数据目录与启动。
+
+```bash
+npm run test:browser    # 浏览器套件
+npm run test:electron   # Electron 两套 + 单元套件
+```

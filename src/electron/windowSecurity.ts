@@ -104,7 +104,7 @@ export function createWindowSecurity(deps: WindowSecurityDeps): {
         nodeIntegration: false,
       },
     });
-    // ELEC-01：只允许导航到本应用 gui-design/pages 下的 file: 页面，并禁止 window.open。
+    // ELEC-01：只允许导航到唯一的应用页面 gui-design/index.html，并禁止 window.open。
     mainWindow.webContents.on('will-navigate', (event, url) => {
       if (!isCanonicalAppPageUrl(url)) event.preventDefault();
     });
