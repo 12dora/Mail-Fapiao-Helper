@@ -54,6 +54,7 @@ Options:
   --out <dir>           Organized output directory          (default: config.rename.organizedDir)
   --apply-rename        Force OCR-based renaming for this run (overrides config.rename.applyAfterOcr)
   --no-apply-rename     Disable OCR-based renaming for this run
+  --include-supporting Include supporting documents (skipped by default)
   -h, --help            Show this help
 
 Notes:
@@ -152,6 +153,7 @@ Options:
 Modes:
   container   Match PDF/OFD pairs from the same email, container and stem.
   invoice-no  Match successful OCR results with the same 20-digit invoice number.
+              Supporting documents are excluded.
               Keep PDF first, then earliest date, then smallest filename.
               Skip groups with conflicting amounts or sellers.
 

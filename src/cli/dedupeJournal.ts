@@ -147,6 +147,37 @@ export function applyDedupePlan(
   return finishPlan(planFile, plan);
 }
 
+function* loadRecoveryPlans(root: string): Generator<string> {
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const planFile = path.join(root, entry.name, 'plan.json');
+    if (fs.existsSync(planFile)) yield planFile;
+  }
+}
+
+function validateRecoveryPlan(plan: DedupePlan, expectedPaths: DedupePlan['csvPaths']): void {
+  if (plan.version !== 1 || !Array.isArray(plan.moves)
+    || Object.entries(expectedPaths).some(([key, file]) => plan.csvPaths?.[key as keyof typeof expectedPaths] !== file)) {
+    throw new Error('Invalid dedupe recovery plan');
+  }
+}
+
+function validateRecoveryMove(
+  move: DedupeMove, invoicesDir: string, planDir: string, realInvoicesDir: string, realPlanDir: string,
+): void {
+  if (typeof move.filename !== 'string' || !validArchivedFilename(move.filename)
+    || typeof move.contentHash !== 'string' || !move.contentHash
+    || move.source !== path.join(invoicesDir, move.filename)
+    || typeof move.target !== 'string' || path.resolve(move.target) !== move.target
+    || !inside(planDir, move.target)
+    || path.basename(move.target) !== move.filename
+    || move.csvKeys?.filename !== move.filename || move.csvKeys.contentHash !== move.contentHash
+    || !inside(realInvoicesDir, realPlanDir)
+    || !(existingParent(move.target) === realPlanDir || inside(realPlanDir, existingParent(move.target)))) {
+    throw new Error('Invalid dedupe recovery move');
+  }
+}
+
 /** Called before either mode, while cmdDedupe holds the pipeline command lock. */
 export function recoverDedupePlans(cfg: Config, cwd: string): number {
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
@@ -154,30 +185,14 @@ export function recoverDedupePlans(cfg: Config, cwd: string): number {
   if (!fs.existsSync(root)) return 0;
   const expectedPaths = csvPaths(cfg, cwd);
   let recovered = 0;
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const planDir = path.join(root, entry.name);
-    const planFile = path.join(planDir, 'plan.json');
-    if (!fs.existsSync(planFile)) continue;
+  for (const planFile of loadRecoveryPlans(root)) {
     const plan = JSON.parse(fs.readFileSync(planFile, 'utf8')) as DedupePlan;
-    if (plan.version !== 1 || !Array.isArray(plan.moves)
-      || Object.entries(expectedPaths).some(([key, file]) => plan.csvPaths?.[key as keyof typeof expectedPaths] !== file)) {
-      throw new Error('Invalid dedupe recovery plan');
-    }
+    validateRecoveryPlan(plan, expectedPaths);
+    const planDir = path.dirname(planFile);
     const realPlanDir = fs.realpathSync(planDir);
     const realInvoicesDir = fs.realpathSync(invoicesDir);
     for (const move of plan.moves) {
-      if (typeof move.filename !== 'string' || !validArchivedFilename(move.filename)
-        || typeof move.contentHash !== 'string' || !move.contentHash
-        || move.source !== path.join(invoicesDir, move.filename)
-        || typeof move.target !== 'string' || path.resolve(move.target) !== move.target
-        || !inside(planDir, move.target)
-        || path.basename(move.target) !== move.filename
-        || move.csvKeys?.filename !== move.filename || move.csvKeys.contentHash !== move.contentHash
-        || !inside(realInvoicesDir, realPlanDir)
-        || !(existingParent(move.target) === realPlanDir || inside(realPlanDir, existingParent(move.target)))) {
-        throw new Error('Invalid dedupe recovery move');
-      }
+      validateRecoveryMove(move, invoicesDir, planDir, realInvoicesDir, realPlanDir);
     }
     finishPlan(planFile, plan);
     recovered += plan.moves.length;

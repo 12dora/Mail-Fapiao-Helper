@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { isSupportingDocument } from '../extract/classify.js';
 import path from 'node:path';
 import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
@@ -58,11 +59,20 @@ function pendingRow(raw: Record<string, string>): PendingRow {
     filename: raw.filename ?? '',
     source: raw.source ?? '',
     format: asFormat(raw.format ?? ''),
-    documentType: asDocumentType(raw.documentType ?? ''),
+    documentType: isSupportingDocument(raw) ? 'supporting' : asDocumentType(raw.documentType ?? ''),
     status: raw.status ?? '',
     reason: raw.reason ?? '',
     contentHash: raw.contentHash ?? '',
   };
+}
+
+function supportingQueueRows(pendingCsv: string, resultCsv: string): PendingRow[] {
+  const supporting = new ArtifactIndex<boolean>();
+  for (const raw of readCsvRows(resultCsv)) {
+    if (isSupportingDocument(raw)) supporting.set(rowIdentity(pendingRow(raw)), true);
+  }
+  return readCsvRows(pendingCsv).map(pendingRow).map((row) =>
+    supporting.get(rowIdentity(row)) ? { ...row, documentType: 'supporting' } : row);
 }
 
 function ensureDir(dir: string): void {
@@ -253,6 +263,7 @@ function applyOcrResult(
   summary: OcrRunSummary,
   log: Logger,
 ): void {
+  if (result.fields.documentType === 'supporting') row.documentType = 'supporting';
   appendResult(resultCsv, row, result);
   seenResults.set(rowIdentity(row), { status: result.status, error: result.error }, keepSuccess);
   if (result.status === 'success') {
@@ -460,7 +471,7 @@ export async function runOcrPending(
   const resultCsv = cfg.ocr.resultsCsv;
   // 整次 run 只迁移/准备 results CSV 一次，避免每个结果 O(N) 重读（OCR-13）。
   ensureResultCsvReady(resultCsv);
-  const rows = readCsvRows(pendingCsv).map(pendingRow);
+  const rows = supportingQueueRows(pendingCsv, resultCsv);
   const nextRows = rows.map((row) => ({ ...row }));
   const seenResults = opts.force ? new ArtifactIndex<ResultStatus>() : readResultIndex(resultCsv);
   const provider = getOcrProvider(cfg);

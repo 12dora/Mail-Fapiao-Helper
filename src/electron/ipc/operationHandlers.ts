@@ -1,5 +1,8 @@
+import { registerDedupeHandlers } from './dedupeHandlers.js';
+// 保留既有调用方的报告解析入口。
+export { parseDedupeReport, type DedupeReport } from './dedupeHandlers.js';
+import { registerConfigHandlers } from './configHandlers.js';
 import type { ChildProcess } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
 import type * as ElectronAPI from 'electron';
 import type { AppSummary, RunHistoryEntry } from '../summary.js';
@@ -184,91 +187,10 @@ type PrepareOcrResult =
   | { ok: true; operation: PreparedOcrOperation }
   | { ok: false; response: Record<string, unknown> };
 
-export interface DedupeReport {
-  mode: 'container' | 'invoice-no';
-  applied: boolean;
-  quarantineDir: string | null;
-  pairs: number;
-  redundant: number;
-  quarantined: number;
-  ledgerRowsRemoved: number;
-  ocrRowsRemoved: number;
-  recovered?: number;
-  groups: {
-    invoiceNo: string;
-    kept: { filename: string; date: string; seller: string; amount: string; format: string };
-    removed: { filename: string; date: string; seller: string; amount: string; format: string; reason: string }[];
-    conflict: boolean;
-    conflictReason: string;
-  }[];
-  conflicts: number;
-  skipped: { filename: string; reason: string }[];
-}
-
-/** CLI 日志前后可有普通文本；只接受最后一份完整 JSON 对象报告。 */
-export function parseDedupeReport(stdout: string): DedupeReport | null {
-  let last: unknown;
-  for (let start = 0; start < stdout.length; start++) {
-    if (stdout[start] !== '{') continue;
-    let depth = 0;
-    let quoted = false;
-    let escaped = false;
-    for (let end = start; end < stdout.length; end++) {
-      const char = stdout[end];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') quoted = true;
-      else if (char === '{') depth++;
-      else if (char === '}' && --depth === 0) {
-        try {
-          last = JSON.parse(stdout.slice(start, end + 1));
-          start = end;
-        } catch { /* 普通日志中的花括号不是报告。 */ }
-        break;
-      }
-    }
-  }
-  return validateDedupeReport(last);
-}
-
-function validateDedupeReport(value: unknown): DedupeReport | null {
-  const row = asObject(value);
-  const counters = ['pairs', 'redundant', 'quarantined', 'ledgerRowsRemoved', 'ocrRowsRemoved', 'conflicts'];
-  if ((row.mode !== 'container' && row.mode !== 'invoice-no') || typeof row.applied !== 'boolean'
-    || (row.quarantineDir !== null && typeof row.quarantineDir !== 'string')
-    || !counters.every((key) => typeof row[key] === 'number' && Number.isSafeInteger(row[key]) && Number(row[key]) >= 0)
-    || (row.recovered !== undefined && (!Number.isSafeInteger(row.recovered) || Number(row.recovered) < 0))
-    || !Array.isArray(row.groups) || !Array.isArray(row.skipped)) return null;
-  return row as unknown as DedupeReport;
-}
-
-function readDedupeReport(file: string, stdout: string): DedupeReport | null {
-  try {
-    const report = validateDedupeReport(JSON.parse(fs.readFileSync(file, 'utf8')));
-    if (report) return report;
-  } catch { /* 兼容尚未写报告文件的 CLI，也允许损坏文件回退到 stdout。 */ }
-  return parseDedupeReport(stdout);
-}
-
-function projectDedupeReport(report: DedupeReport, dataDir: string): DedupeReport {
-  let quarantineDir: string | null = null;
-  if (report.quarantineDir !== null) {
-    const relative = path.relative(dataDir, path.resolve(dataDir, report.quarantineDir));
-    const outside = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
-    quarantineDir = outside ? '' : relative.split(path.sep).join('/') || '.';
-  }
-  return {
-    ...report,
-    quarantineDir,
-    skipped: report.skipped.map((row) => ({ ...row, reason: sanitizeText(row.reason) })),
-  };
-}
-
-export function registerOperationHandlers(deps: OperationHandlerDependencies): {
+export function registerOperationHandlers(
+  deps: OperationHandlerDependencies,
+  options: { includeDedupe?: boolean } = {},
+): {
   resolveOpenTarget(target: string): { ok: true; path: string } | { ok: false; code: string; message: string };
 } {
   const {
@@ -281,10 +203,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     getDevBackend,
     configPath,
     statePath,
-    bundledConfigPath,
     dataDir,
-    loadGuiConfig,
-    redactConfig,
     saveConfig,
     looksLikeRedactedPathDisplay,
     appSummary,
@@ -324,6 +243,8 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     openOrRevealByPolicy,
   } = deps;
   const { ocrProcesses, ocrStopRequested } = processRegistries;
+  // 兼容旧的整体注册入口；main 显式注册独立模块。
+  if (options.includeDedupe !== false) registerDedupeHandlers(deps);
 
   async function executeFetch(context: FetchExecutionContext): Promise<Record<string, unknown>> {
     const { range, lease, startedAt } = context;
@@ -845,50 +766,7 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
     };
   });
 
-  handleTrusted('mfh:get-config', () => {
-    const { cfg, error } = loadGuiConfig(configPath, bundledConfigPath);
-    const typedCfg = cfg as Record<string, unknown> & { imap?: { pass?: string } };
-    // Redact secrets so they never reach the renderer process. We still report whether each
-    // secret is populated so the UI can show "已保存（留空则不修改）" placeholders.
-    const ocrSrc = (typedCfg as { ocr?: Record<string, unknown> }).ocr ?? {};
-    const credsSrc = asObject((ocrSrc as Record<string, unknown>).credentials);
-    const redactedConfig = redactConfig(typedCfg as unknown as Record<string, unknown>);
-    const secrets = {
-      imapPass: Boolean(typedCfg.imap?.pass),
-      tencentSecretId: Boolean(credsSrc.tencentSecretId || credsSrc.secretId),
-      tencentSecretKey: Boolean(credsSrc.tencentSecretKey || credsSrc.secretKey),
-      ocrApiKey: Boolean(credsSrc.apiKey),
-    };
-    return {
-      // ELEC-07：绝对路径不进 renderer；仅提供脱敏展示串。
-      configPath: redactPath(configPath),
-      configExists: fs.existsSync(configPath),
-      // 保留原字段名（renderer 已在读取），同时新增结构化版本。
-      configError: error ? sanitizeText(error) : '',
-      configErrorInfo: error ? { message: sanitizeText(error) } : undefined,
-      config: redactedConfig,
-      secrets,
-      dataDir: redactPath(dataDir),
-    };
-  });
-
-  handleTrusted('mfh:save-config', (_event, payload: unknown) => {
-    // ELEC-02：配置写入与 CLI 任务互斥，避免运行中改写 paths/ocr 造成交错。
-    const begin = coordinator.begin('pipeline', { silent: true });
-    if (!begin.ok) {
-      return {
-        ok: false,
-        configPath: redactPath(configPath),
-        configError: { message: begin.message },
-      };
-    }
-    try {
-      const raw = asObject(payload);
-      return saveConfig(payload, { repairCorrupt: raw.repairCorrupt === true });
-    } finally {
-      begin.lease.release();
-    }
-  });
+  registerConfigHandlers(deps);
 
   handleTrusted('mfh:start-fetch', async (_event, payload: unknown) => {
     const range = asDateRange(payload);
@@ -1092,57 +970,6 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
             },
           }
           : {}),
-        ...(warning ? { warning } : {}),
-        ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
-        ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
-      };
-    } finally {
-      gate.lease.release();
-    }
-  });
-
-  handleTrusted('mfh:dedupe', async (_event, payload: unknown) => {
-    const raw = asObject(payload);
-    if ((raw.by !== 'invoice-no' && raw.by !== 'container') || typeof raw.apply !== 'boolean') {
-      return { ok: false, status: 'failed', started: false, jobId: '', code: 'invalid_dedupe_options',
-        message: '清理选项无效，请重新选择。', report: null };
-    }
-    const gate = acquireOperation('pipeline');
-    if (!gate.ok) return { ...gate.response, status: 'failed', started: false, jobId: '', report: null };
-    const jobId = gate.lease.jobId;
-    const startedAt = Date.now();
-    try {
-      const recoveryError = ensureArchiveRecoveryReady();
-      if (recoveryError) {
-        return { ok: false, ...recoveryError, status: 'failed', started: false, jobId, report: null };
-      }
-      const reportFile = path.join(dataDir, '.mfh-cache', 'dedupe-report.json');
-      // 持有操作租约后清掉旧报告，避免本次 CLI 失败时误读上一次成功结果。
-      fs.rmSync(reportFile, { force: true });
-      const result = await runCli('dedupe', [
-        '--config', configPath, '--by', raw.by, ...(raw.apply ? ['--apply'] : []), '--json',
-      ], { jobId });
-      const rawReport = readDedupeReport(reportFile, result.stdout);
-      const report = rawReport ? projectDedupeReport(rawReport, dataDir) : null;
-      const status = deriveRunStatus({
-        code: result.code,
-        started: result.started,
-        succeeded: report ? (raw.apply ? report.quarantined : report.redundant) : 0,
-        failed: !report || result.code !== 0 ? 1 : 0,
-        partial: report ? report.conflicts + report.skipped.length : 0,
-      });
-      const message = status === 'success'
-        ? (raw.apply ? '重复发票清理完成。' : '重复发票检查完成。')
-        : status === 'partial'
-          ? '部分发票未能清理，请查看清理结果。'
-          : '重复发票清理未完成，请查看诊断信息。';
-      const historyWarning = recordHistory('dedupe', '清理重复发票', startedAt, result, status, message);
-      const cliReport = reportFor('dedupe', jobId, result,
-        { ok: 'dedupe_done', failed: 'dedupe_failed', partial: 'dedupe_partial' }, status);
-      const summaryPart = tryAppSummary(appSummary);
-      const warning = [historyWarning, summaryPart.warning].filter(Boolean).join(' ') || undefined;
-      return {
-        ok: status === 'success', status, started: result.started, ...cliReport, jobId, message, report,
         ...(warning ? { warning } : {}),
         ...(summaryPart.summary ? { summary: summaryPart.summary } : {}),
         ...(summaryPart.summaryUnavailable ? { summaryUnavailable: true } : {}),
