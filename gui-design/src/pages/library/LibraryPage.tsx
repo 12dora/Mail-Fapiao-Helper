@@ -1,19 +1,153 @@
-import { Empty } from 'antd';
-import { PageHeader } from '../../components/index.js';
-
 /**
- * 发票库页：识别结果列表、重复发票处理与文件打开。
+ * 发票库页：已归档文件的总表。
  *
- * 占位实现。页面私有的状态、列定义、抽屉都放在本目录下；
- * 需要被别的页面复用的东西请提到 components/ 或 bridge/。
+ * 数据全部来自 summary.library.rows（一次取回，搜索与分页都在渲染层做）。
+ * 默认只看发票——附属材料（费用汇总单一类）报销用不上，压在「附属材料」筛选里，
+ * 判定规则见 documentType.ts。
  */
+import { Button, Card, Empty, Space, Tag } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
+import { useMemo, useState } from 'react';
+import { useSummary } from '../../bridge/index.js';
+import type { InvoiceRow } from '../../bridge/index.js';
+import { PageHeader, StatusTag } from '../../components/index.js';
+import { navigate } from '../../router.js';
+import { DedupeModal } from './DedupeModal.js';
+import { humanizeDocumentType, isSupportingDocument } from './documentType.js';
+import { InvoiceDrawer } from './InvoiceDrawer.js';
+import { LibraryActions } from './LibraryActions.js';
+import { LibraryTable } from './LibraryTable.js';
+
+/** 默认落在「仅发票」上：附属材料要显式切过去才看得到。 */
+const DEFAULT_CHIP = 'invoice';
+
+const CHIPS: { key: string; label: string; test: (row: InvoiceRow) => boolean }[] = [
+  { key: 'invoice', label: '仅发票', test: (row) => !isSupportingDocument(row) },
+  { key: 'recognized', label: '已识别', test: (row) => row.status === '完整' && !isSupportingDocument(row) },
+  { key: 'incomplete', label: '待补充', test: (row) => row.status === '信息不完整' && !isSupportingDocument(row) },
+  { key: 'failed', label: '识别失败', test: (row) => row.status === '识别失败' && !isSupportingDocument(row) },
+  { key: 'duplicate', label: '重复', test: (row) => row.duplicateCount > 1 },
+  { key: 'supporting', label: '附属材料', test: (row) => isSupportingDocument(row) },
+  { key: 'all', label: '全部', test: () => true },
+];
+
+const SEARCH_KEYS: (keyof InvoiceRow)[] = ['seller', 'invoiceNo', 'filename', 'subject'];
+
+function mono(value: string): JSX.Element {
+  return <span style={{ fontFamily: 'var(--mfh-mono)' }}>{value || '—'}</span>;
+}
+
+const COLUMNS: ColumnsType<InvoiceRow> = [
+  { title: '日期', dataIndex: 'date', width: 108, render: (value: string) => value || '—' },
+  { title: '销售方', dataIndex: 'seller', ellipsis: true, render: (value: string) => value || '待识别' },
+  {
+    title: '发票号',
+    dataIndex: 'invoiceNo',
+    width: 218,
+    render: (value: string, row: InvoiceRow) => (
+      <Space size={6}>
+        {mono(value)}
+        {row.duplicateCount > 1 && (
+          <Tag color="warning" bordered={false} style={{ marginInlineEnd: 0 }}>
+            重复 ×{row.duplicateCount}
+          </Tag>
+        )}
+      </Space>
+    ),
+  },
+  {
+    title: '金额',
+    dataIndex: 'amount',
+    width: 112,
+    align: 'right',
+    render: (value: string) => <span className="mfh-num">{value ? `¥ ${value}` : '—'}</span>,
+  },
+  { title: '类型', key: 'type', width: 104, render: (_: unknown, row: InvoiceRow) => humanizeDocumentType(row) },
+  {
+    title: '状态',
+    dataIndex: 'status',
+    width: 104,
+    render: (value: string) => <StatusTag status={value} />,
+  },
+  { title: '文件', dataIndex: 'filename', ellipsis: true, render: (value: string) => mono(value) },
+];
+
 export function LibraryPage(): JSX.Element {
+  const { data: summary, loading } = useSummary();
+
+  const [query, setQuery] = useState('');
+  const [chip, setChip] = useState(DEFAULT_CHIP);
+  const [active, setActive] = useState<InvoiceRow | null>(null);
+  const [dedupeOpen, setDedupeOpen] = useState(false);
+
+  const rows = useMemo(() => summary?.library.rows ?? [], [summary]);
+
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const test = CHIPS.find((item) => item.key === chip)?.test ?? (() => true);
+    return rows.filter((row) => {
+      if (!test(row)) return false;
+      if (!needle) return true;
+      return SEARCH_KEYS.some((key) => String(row[key] ?? '').toLowerCase().includes(needle));
+    });
+  }, [rows, query, chip]);
+
+  const counts = useMemo(() => {
+    let invoices = 0;
+    let incomplete = 0;
+    let duplicated = 0;
+    for (const row of rows) {
+      if (!isSupportingDocument(row)) invoices++;
+      if (row.status === '信息不完整') incomplete++;
+      if (row.duplicateCount > 1) duplicated++;
+    }
+    return { invoices, incomplete, duplicated };
+  }, [rows]);
+
+  const empty = !loading && rows.length === 0;
+
   return (
     <>
-      <PageHeader title="发票库" subtitle="已归档的发票、行程单与支撑材料" />
-      <div className="mfh-scroll" style={{ alignItems: 'center', justifyContent: 'center' }}>
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="页面建设中" />
+      <PageHeader
+        title="发票库"
+        subtitle={
+          summary
+            ? `发票 ${counts.invoices} · 待补充 ${counts.incomplete} · 重复 ${counts.duplicated}`
+            : '正在读取本机数据'
+        }
+        actions={<LibraryActions visible={visible} onDedupe={() => setDedupeOpen(true)} />}
+      />
+
+      <div className="mfh-scroll" style={empty ? { alignItems: 'center', justifyContent: 'center' } : undefined}>
+        {empty ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有归档的发票">
+            <Button type="primary" onClick={() => navigate('dashboard')}>
+              去处理
+            </Button>
+          </Empty>
+        ) : (
+          <Card size="small">
+            <LibraryTable<InvoiceRow>
+              rows={visible}
+              columns={COLUMNS}
+              rowKey={(row) => row.filename}
+              loading={loading && !summary}
+              query={query}
+              onQueryChange={setQuery}
+              searchPlaceholder="搜索销售方、发票号或文件名"
+              chips={CHIPS.map(({ key, label }) => ({ key, label }))}
+              chipKey={chip}
+              onChipChange={setChip}
+              onOpen={setActive}
+              scrollX={940}
+              emptyText="没有符合条件的发票"
+            />
+          </Card>
+        )}
       </div>
+
+      <InvoiceDrawer row={active} onClose={() => setActive(null)} />
+      <DedupeModal open={dedupeOpen} onClose={() => setDedupeOpen(false)} />
     </>
   );
 }
