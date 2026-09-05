@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildMailStatusIndex, mailStatusFor } from '../../dist/electron/mailStatus.js';
+import { buildMailStatusIndex, mailStatusFor, mailHashForRow } from '../../dist/electron/mailStatus.js';
+import { summarizeLibrary } from '../../dist/electron/summary.js';
 import { currentOcrRows, detailLinkUrl, invoicePath, registerDetailHandlers } from '../../dist/electron/ipc/detailHandlers.js';
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mfh-detail-'));
 try {
@@ -27,6 +28,8 @@ try {
   assert.deepEqual(currentOcrRows([success, { ...success, status: 'error' }, { ...success, contentHash: 'two', status: 'partial' }]), [success, { ...success, contentHash: 'two', status: 'partial' }]);
   const signed = 'https://example.com/invoice.pdf?token=short&x=1';
   assert.equal(detailLinkUrl(signed), signed);
+  const mailLink = 'https://user:password@example.com/invoice.pdf?token=short';
+  assert.equal(detailLinkUrl(mailLink), mailLink, 'mail.links keeps its explicit full-URL exception');
   const hidden = new URL(detailLinkUrl(`https://example.com/invoice.pdf?token=${'x'.repeat(65)}&x=1`));
   assert.equal(hidden.searchParams.get('token'), '[已隐藏]');
   assert.equal(hidden.searchParams.get('x'), '1');
@@ -43,7 +46,7 @@ try {
   const file = path.join(cwd, `samples/${large}.eml`);
   const fd = fs.openSync(file, 'w'); fs.ftruncateSync(fd, 32 * 1024 * 1024 + 1); fs.closeSync(fd);
   const handlers = new Map();
-  registerDetailHandlers({ handleTrusted: (name, fn) => handlers.set(name, fn), readConfigForPaths: () => cfg, realDataDir: () => cwd, ledgerCsvPath: () => path.join(cwd, 'invoices.csv'), invoicesDirPath: () => root, appSummary: () => ({}), resolveOpenTarget: target => ({ ok: true, path: target }) });
+  registerDetailHandlers({ handleTrusted: (name, fn) => handlers.set(name, fn), readConfigForPaths: () => cfg, realDataDir: () => cwd, ledgerCsvPath: () => path.join(cwd, 'invoices.csv'), invoicesDirPath: () => root, appSummary: () => { throw new Error('Details must not build a summary'); }, issueOpenableHandle: target => path.relative(cwd, target), resolveOpenTarget: target => ({ ok: true, path: target }) });
   assert.equal((await handlers.get('mfh:mail-detail')({}, { hash: large })).code, 'eml_unreadable');
   const many = '9'.repeat(32);
   const parts = Array.from({ length: 55 }, (_, i) => `--boundary\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename="${i}.pdf"\r\n\r\npdf${i}\r\n`).join('');
@@ -59,6 +62,55 @@ try {
   assert.equal(preferred.ok, true);
   assert.equal(preferred.mail.emlLocation, 'samples');
   assert.deepEqual(preferred.mail.links.map(link => link.url), ['https://example.com/invoice.pdf']);
+
+  // Legacy results and their later strong retry are one artifact, even when success is older.
+  const legacySuccess = { filename: 'legacy.pdf', status: 'success', invoiceNo: 'short-number' };
+  const strongRetry = { ...legacySuccess, hash: archived, contentHash: 'legacy-content', status: 'error' };
+  assert.deepEqual(currentOcrRows([legacySuccess, strongRetry]), [legacySuccess]);
+  assert.equal(currentOcrRows([legacySuccess, strongRetry, {
+    ...strongRetry, contentHash: 'other-content',
+  }]).length, 2, 'different nonempty hashes must remain separate artifacts');
+  const source = `https://user:password@example.com/invoice.pdf?token=${'s'.repeat(65)}&short=keep`;
+  fs.writeFileSync(path.join(cwd, 'invoices.csv'), [
+    'mailHash,messageId,filename,contentHash,source',
+    `${archived},<a>,legacy.pdf,legacy-content,${source}`,
+    `${archived},<a>,partial.pdf,partial-content,plain-attachment.pdf`,
+  ].join('\n'));
+  fs.writeFileSync(path.join(cwd, 'ocr.csv'), [
+    'hash,filename,contentHash,status,invoiceNo',
+    ',legacy.pdf,,success,short-number',
+    `${archived},legacy.pdf,legacy-content,error,short-number`,
+    `${archived},partial.pdf,partial-content,partial,short-number`,
+  ].join('\n'));
+  const legacyDetail = await handlers.get('mfh:invoice-detail')({}, { filename: 'legacy.pdf' });
+  assert.equal(legacyDetail.ok, true);
+  assert.equal(legacyDetail.invoice.ocr.status, 'success');
+  assert.equal(legacyDetail.invoice.row.duplicateCount, 2);
+  assert.equal(legacyDetail.invoice.duplicates.length, 1);
+  assert.equal(legacyDetail.invoice.duplicates[0].filename, 'partial.pdf');
+  assert.equal(legacyDetail.invoice.file.handle, 'invoices/legacy.pdf');
+  for (const projected of [legacyDetail.invoice.row.source, legacyDetail.invoice.ledger.source]) {
+    const url = new URL(projected);
+    assert.equal(url.username, '');
+    assert.equal(url.password, '');
+    assert.equal(url.searchParams.get('token'), '[已隐藏]');
+    assert.equal(url.searchParams.get('short'), 'keep');
+  }
+  const library = summarizeLibrary(cfg, cwd, { limit: 100000 });
+  assert.deepEqual(library.duplicates, { groups: 1, rows: 2 });
+  assert.equal(library.rows.find(row => row.filename === 'legacy.pdf').duplicateCount,
+    legacyDetail.invoice.row.duplicateCount);
+  const archivedDetail = await handlers.get('mfh:mail-detail')({}, { hash: archived });
+  assert.equal(archivedDetail.ok, true);
+  assert.equal(archivedDetail.mail.documents[0].source, legacyDetail.invoice.row.source);
+  assert.equal(archivedDetail.mail.documents[1].source, 'plain-attachment.pdf');
+  // Legacy INDEX identity is identical in summary, status, and detail paths.
+  const legacyMail = { messageId: '<legacy-mail>', from: 'old@example.com', subject: 'old mail', date: '' };
+  const legacyHash = mailHashForRow(legacyMail);
+  fs.appendFileSync(path.join(cwd, 'samples/INDEX.csv'), ',<legacy-mail>\n');
+  const oldMailDetail = await handlers.get('mfh:mail-detail')({}, { hash: legacyHash });
+  assert.equal(oldMailDetail.ok, true);
+  assert.equal(oldMailDetail.mail.mailHash, legacyHash);
 
   console.log('detail-unit: passed');
 } finally { fs.rmSync(cwd, { recursive: true, force: true }); }

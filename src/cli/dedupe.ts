@@ -1,16 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { loadConfig, type Config } from '../config.js';
 import { log } from '../log.js';
 import { assertArchiveTransactionsRecovered } from '../download/archiveJournal.js';
-import { hardenFile, INVOICE_CSV_HEADER, withCsvRetry } from '../pipeline/csvDurability.js';
-import { readCsvRows, rewriteCsvRows } from '../util/csv.js';
+import { readCsvRows } from '../util/csv.js';
 import { containerStemKey } from '../extract/documentIdentity.js';
 import { ArtifactIndex } from '../util/identity.js';
 import { contentHash as hashOf } from '../util/hash.js';
 import { parseDedupeArgs, type DedupeOpts } from './args.js';
 import { acquireCommandLock } from './lock.js';
 import { DEDUPE_USAGE } from './usage.js';
+import { resolveDataDir } from '../util/dataDirLock.js';
+import { applyDedupePlan, recoverDedupePlans, validArchivedFilename, writeAtomicJson } from './dedupeJournal.js';
 
 /**
  * `mfh dedupe` —— 把「同一个容器里 `<stem>.pdf` 和 `<stem>.ofd` 是同一张票」这条
@@ -41,6 +43,7 @@ interface LedgerRow {
 export interface DedupeReport {
   mode: 'container' | 'invoice-no';
   applied: boolean;
+  recovered: number;
   quarantineDir: string | null;
   pairs: number;
   redundant: number;
@@ -114,11 +117,13 @@ function redundantOfdRows(rows: LedgerRow[]): LedgerRow[] {
 /** 磁盘上的文件确实是台账这一行指的那份吗？ */
 function fileMatchesRow(invoicesDir: string, item: LedgerRow): { ok: true; file: string } | { ok: false; why: string } {
   if (item.filename.length === 0) return { ok: false, why: 'ledger row has no filename' };
+  if (!validArchivedFilename(item.filename)) return { ok: false, why: 'invalid archived filename' };
   const file = path.join(invoicesDir, item.filename);
   if (!fs.existsSync(file)) return { ok: false, why: 'archived file is already gone' };
   if (item.contentHash.length === 0) return { ok: false, why: 'ledger row has no contentHash to verify against' };
   let actual: string;
   try {
+    if (!fs.lstatSync(file).isFile()) return { ok: false, why: 'archived file is not a regular file' };
     actual = hashOf(fs.readFileSync(file));
   } catch (err) {
     return { ok: false, why: `unreadable: ${err instanceof Error ? err.message : String(err)}` };
@@ -129,30 +134,24 @@ function fileMatchesRow(invoicesDir: string, item: LedgerRow): { ok: true; file:
   return { ok: true, file };
 }
 
-/** 从一个 OCR CSV 里删掉指定 (hash, source) 的行；返回删除条数。 */
-function pruneOcrCsv(csvPath: string, keys: Set<string>, keyOf = (row: Record<string, string>) => `${(row.hash ?? '').trim().toLowerCase()}\0${row.source ?? ''}`): number {
-  if (!fs.existsSync(csvPath)) return 0;
-  const rows = readCsvRows(csvPath);
-  if (rows.length === 0) return 0;
-  const kept = rows.filter((row) => !keys.has(keyOf(row)));
-  const removed = rows.length - kept.length;
-  if (removed === 0) return 0;
-  // 原样保留该文件当前的列集合：OCR 结果表随版本迁移过，不能硬套某一版表头。
-  const header = `${Object.keys(rows[0] ?? {}).join(',')}\n`;
-  withCsvRetry(() => rewriteCsvRows(csvPath, header, kept));
-  hardenFile(csvPath);
-  return removed;
+export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['by'] }, cwd = process.cwd()): DedupeReport {
+  const recovered = recoverDedupePlans(cfg, cwd);
+  const report = opts.by === 'invoice-no'
+    ? runInvoiceNoDedupe(cfg, opts.apply, cwd)
+    : runContainerDedupe(cfg, opts.apply, cwd);
+  report.recovered = recovered;
+  return report;
 }
 
-export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['by'] }, cwd = process.cwd()): DedupeReport {
-  if (opts.by === 'invoice-no') return runInvoiceNoDedupe(cfg, opts.apply, cwd);
+function runContainerDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport {
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
   const ledgerCsv = path.resolve(cwd, cfg.output.csv);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const stamp = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`;
   const quarantineDir = path.join(invoicesDir, '.dedupe-quarantine', stamp);
 
   const report: DedupeReport = {
     mode: 'container',
+    recovered: 0,
     groups: [],
     conflicts: 0,
     pairs: 0,
@@ -162,7 +161,7 @@ export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['
     ocrRowsRemoved: 0,
     skipped: [],
     quarantineDir,
-    applied: opts.apply,
+    applied: apply,
   };
 
   const rawRows = readCsvRows(ledgerCsv);
@@ -185,46 +184,16 @@ export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['
   }
   report.redundant = actionable.length;
 
-  if (!opts.apply || actionable.length === 0) return report;
+  if (!apply || actionable.length === 0) return report;
 
-  fs.mkdirSync(quarantineDir, { recursive: true });
-  const removedIndexes = new Set<number>();
-  const ocrKeys = new Set<string>();
-  for (const { item, file } of actionable) {
-    const target = path.join(quarantineDir, item.filename);
-    if (!moveToQuarantine(file, target, item.filename, report)) continue;
-    report.quarantined++;
-    removedIndexes.add(item.index);
-    ocrKeys.add(`${item.mailHash}\0${item.source}`);
-  }
-
-  if (removedIndexes.size > 0) {
-    const kept = rawRows.filter((_, index) => !removedIndexes.has(index));
-    withCsvRetry(() => rewriteCsvRows(ledgerCsv, INVOICE_CSV_HEADER, kept));
-    hardenFile(ledgerCsv);
-    report.ledgerRowsRemoved = removedIndexes.size;
-
-    report.ocrRowsRemoved += pruneOcrCsv(path.join(invoicesDir, 'ocr', 'ocr-pending.csv'), ocrKeys);
-    report.ocrRowsRemoved += pruneOcrCsv(path.resolve(cwd, cfg.ocr.resultsCsv), ocrKeys);
-  }
-
+  Object.assign(report, applyDedupePlan(cfg, cwd, quarantineDir, actionable.map(({ item, file }) => ({
+    source: file,
+    target: path.join(quarantineDir, item.filename),
+    filename: item.filename,
+    contentHash: item.contentHash,
+    csvKeys: { filename: item.filename, contentHash: item.contentHash },
+  }))));
   return report;
-}
-
-/** Preserve the existing rename / copy-and-unlink quarantine behavior. */
-function moveToQuarantine(file: string, target: string, filename: string, report: DedupeReport): boolean {
-  try {
-    fs.renameSync(file, target);
-  } catch {
-    try {
-      fs.copyFileSync(file, target);
-      fs.unlinkSync(file);
-    } catch (err) {
-      report.skipped.push({ filename, reason: `quarantine failed: ${err instanceof Error ? err.message : String(err)}` });
-      return false;
-    }
-  }
-  return true;
 }
 
 function fileKey(row: Record<string, string>): string {
@@ -249,12 +218,11 @@ function normalizeAmount(value: string): string {
 
 function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport {
   const report: DedupeReport = {
-    mode: 'invoice-no', applied: apply, quarantineDir: null,
+    mode: 'invoice-no', applied: apply, recovered: 0, quarantineDir: null,
     pairs: 0, redundant: 0, quarantined: 0, ledgerRowsRemoved: 0, ocrRowsRemoved: 0,
     groups: [], conflicts: 0, skipped: [],
   };
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
-  const ledgerCsv = path.resolve(cwd, cfg.output.csv);
   const resultsCsv = path.resolve(cwd, cfg.ocr.resultsCsv);
   const index = new ArtifactIndex<Record<string, string>>();
   for (const row of readCsvRows(resultsCsv)) {
@@ -293,14 +261,13 @@ function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
     };
     report.groups.push(group);
     if (group.conflict) { report.conflicts++; continue; }
+    if (!fileMatchesRow(invoicesDir, toLedgerRow(keeper, 0)).ok) {
+      report.skipped.push({ filename: keeper.filename ?? '', reason: 'keeper_unverified' });
+      continue;
+    }
     report.pairs++;
     for (const row of members.slice(1)) {
       const item = toLedgerRow(row, 0);
-      // Results are untrusted CSV input; only direct children of invoices may move.
-      if (!item.filename || path.basename(item.filename) !== item.filename || item.filename.includes('\\')) {
-        report.skipped.push({ filename: item.filename, reason: 'invalid archived filename' });
-        continue;
-      }
       // A historical identity may point at the same physical file as the keeper.
       if (item.filename === keeper.filename) {
         report.skipped.push({ filename: item.filename, reason: 'same filename as keeper' });
@@ -317,34 +284,26 @@ function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
   }
   report.redundant = actionable.size;
   if (!apply || !actionable.size) return report;
-  const quarantineDir = path.join(invoicesDir, '.dedupe-quarantine', new Date().toISOString().replace(/[:.]/g, '-'), 'by-invoice-no');
+  const planDir = path.join(invoicesDir, '.dedupe-quarantine', `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`);
+  const quarantineDir = path.join(planDir, 'by-invoice-no');
   fs.mkdirSync(quarantineDir, { recursive: true });
   report.quarantineDir = quarantineDir;
-  const removed = new Set<string>();
-  for (const [key, { item, file }] of actionable) {
-    if (!moveToQuarantine(file, path.join(quarantineDir, item.filename), item.filename, report)) continue;
-    removed.add(key);
-    report.quarantined++;
-  }
-  if (removed.size) {
-    const rows = readCsvRows(ledgerCsv);
-    const kept = rows.filter((row) => !removed.has(fileKey(row)));
-    report.ledgerRowsRemoved = rows.length - kept.length;
-    if (report.ledgerRowsRemoved) {
-      withCsvRetry(() => rewriteCsvRows(ledgerCsv, INVOICE_CSV_HEADER, kept));
-      hardenFile(ledgerCsv);
-    }
-    report.ocrRowsRemoved += pruneOcrCsv(path.join(invoicesDir, 'ocr', 'ocr-pending.csv'), removed, fileKey);
-    report.ocrRowsRemoved += pruneOcrCsv(resultsCsv, removed, fileKey);
-  }
+  Object.assign(report, applyDedupePlan(cfg, cwd, planDir, [...actionable.values()].map(({ item, file }) => ({
+    source: file,
+    target: path.join(quarantineDir, item.filename),
+    filename: item.filename,
+    contentHash: item.contentHash,
+    csvKeys: { filename: item.filename, contentHash: item.contentHash },
+  }))));
   return report;
 }
 
 function printReport(report: DedupeReport): void {
+  if (report.recovered) process.stdout.write(`Recovered pending dedupe moves: ${report.recovered}.\n`);
   if (report.mode === 'invoice-no') {
     process.stdout.write(`Invoice-number groups: ${report.groups.length}; ${report.applied ? 'removed' : 'would remove'}: ${report.applied ? report.quarantined : report.redundant}; conflicts: ${report.conflicts}; skipped: ${report.skipped.length}.\n`);
     if (report.quarantineDir) process.stdout.write(`Quarantine: ${report.quarantineDir}\n`);
-    if (!report.applied) process.stdout.write('Dry run — nothing changed. Re-run with --apply to perform the cleanup.\n');
+    if (!report.applied) process.stdout.write('Dry run — no new cleanup applied. Re-run with --apply to perform the cleanup.\n');
     return;
   }
   if (report.redundant === 0 && report.skipped.length === 0) {
@@ -359,7 +318,7 @@ function printReport(report: DedupeReport): void {
     process.stdout.write(`  OCR rows removed   : ${report.ocrRowsRemoved}\n`);
     process.stdout.write('Nothing was deleted. Delete the quarantine folder yourself once you are happy.\n');
   } else {
-    process.stdout.write('Dry run — nothing changed. Re-run with --apply to perform the cleanup.\n');
+    process.stdout.write('Dry run — no new cleanup applied. Re-run with --apply to perform the cleanup.\n');
   }
   if (report.skipped.length > 0) {
     process.stdout.write(`Skipped ${report.skipped.length} row(s) whose ledger entry does not match the file on disk:\n`);
@@ -381,7 +340,9 @@ export async function cmdDedupe(argv: string[]): Promise<number> {
   try {
     assertArchiveTransactionsRecovered(path.resolve(cfg.paths.invoices));
     const report = runDedupe(cfg, { apply: parsed.apply, by: parsed.by });
-    if (parsed.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    const reportFile = path.join(resolveDataDir({ configPath: parsed.configPath }), '.mfh-cache', 'dedupe-report.json');
+    writeAtomicJson(reportFile, report);
+    if (parsed.json) process.stdout.write(`${JSON.stringify(report)}\n`);
     else printReport(report);
     return 0;
   } catch (e) { log.error((e as Error).message); return 1; }
