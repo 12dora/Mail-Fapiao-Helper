@@ -193,6 +193,7 @@ export interface DedupeReport {
   quarantined: number;
   ledgerRowsRemoved: number;
   ocrRowsRemoved: number;
+  recovered?: number;
   groups: {
     invoiceNo: string;
     kept: { filename: string; date: string; seller: string; amount: string; format: string };
@@ -231,13 +232,40 @@ export function parseDedupeReport(stdout: string): DedupeReport | null {
       }
     }
   }
-  const row = asObject(last);
+  return validateDedupeReport(last);
+}
+
+function validateDedupeReport(value: unknown): DedupeReport | null {
+  const row = asObject(value);
   const counters = ['pairs', 'redundant', 'quarantined', 'ledgerRowsRemoved', 'ocrRowsRemoved', 'conflicts'];
   if ((row.mode !== 'container' && row.mode !== 'invoice-no') || typeof row.applied !== 'boolean'
     || (row.quarantineDir !== null && typeof row.quarantineDir !== 'string')
     || !counters.every((key) => typeof row[key] === 'number' && Number.isSafeInteger(row[key]) && Number(row[key]) >= 0)
+    || (row.recovered !== undefined && (!Number.isSafeInteger(row.recovered) || Number(row.recovered) < 0))
     || !Array.isArray(row.groups) || !Array.isArray(row.skipped)) return null;
   return row as unknown as DedupeReport;
+}
+
+function readDedupeReport(file: string, stdout: string): DedupeReport | null {
+  try {
+    const report = validateDedupeReport(JSON.parse(fs.readFileSync(file, 'utf8')));
+    if (report) return report;
+  } catch { /* 兼容尚未写报告文件的 CLI，也允许损坏文件回退到 stdout。 */ }
+  return parseDedupeReport(stdout);
+}
+
+function projectDedupeReport(report: DedupeReport, dataDir: string): DedupeReport {
+  let quarantineDir: string | null = null;
+  if (report.quarantineDir !== null) {
+    const relative = path.relative(dataDir, path.resolve(dataDir, report.quarantineDir));
+    const outside = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    quarantineDir = outside ? '' : relative.split(path.sep).join('/') || '.';
+  }
+  return {
+    ...report,
+    quarantineDir,
+    skipped: report.skipped.map((row) => ({ ...row, reason: sanitizeText(row.reason) })),
+  };
 }
 
 export function registerOperationHandlers(deps: OperationHandlerDependencies): {
@@ -1088,10 +1116,14 @@ export function registerOperationHandlers(deps: OperationHandlerDependencies): {
       if (recoveryError) {
         return { ok: false, ...recoveryError, status: 'failed', started: false, jobId, report: null };
       }
+      const reportFile = path.join(dataDir, '.mfh-cache', 'dedupe-report.json');
+      // 持有操作租约后清掉旧报告，避免本次 CLI 失败时误读上一次成功结果。
+      fs.rmSync(reportFile, { force: true });
       const result = await runCli('dedupe', [
         '--config', configPath, '--by', raw.by, ...(raw.apply ? ['--apply'] : []), '--json',
       ], { jobId });
-      const report = parseDedupeReport(result.stdout);
+      const rawReport = readDedupeReport(reportFile, result.stdout);
+      const report = rawReport ? projectDedupeReport(rawReport, dataDir) : null;
       const status = deriveRunStatus({
         code: result.code,
         started: result.started,
