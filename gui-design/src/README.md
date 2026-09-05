@@ -1,0 +1,89 @@
+# Renderer (React 18 + Ant Design 5)
+
+Single-page renderer for the Electron app. Bundled by esbuild into
+`gui-design/dist/app.js` + `app.css`, loaded by `gui-design/index.html`.
+No CDN, no runtime downloads: everything ships from `node_modules`.
+
+```
+npm run build:renderer   # production bundle (also part of npm run build)
+npm run dev:renderer     # esbuild watch
+npm run typecheck        # tsc -p . && tsc -p tsconfig.renderer.json
+npm run screenshots      # static server + ?fake=1 -> docs/screenshots/
+```
+
+## Layout
+
+```
+gui-design/src/
+  main.tsx            entry: dayjs locale, startEventHub(), render <App/>
+  App.tsx             ConfigProvider + Layout shell (sider, OpBanner, page slot)
+  router.ts           hash router (#/dashboard …), useRoute(), navigate()
+  theme.ts            antd tokens, light/dark, useColorScheme()
+  app.css             only what tokens cannot express (height chain, log panel)
+  bridge/             types.ts, bridge.ts, fakeBridge.ts, hooks.ts
+  components/         shared UI kit — anything used by two pages lives here
+  pages/<name>/       one folder per route; page-local state stays inside it
+```
+
+## Adding a page
+
+1. Create `pages/<name>/<Name>Page.tsx` exporting a component.
+2. Add the key to `ROUTE_KEYS` in `router.ts`.
+3. Register the label, icon and component in `NAV` / `PAGES` in `App.tsx`.
+
+A page renders exactly two things: a `<PageHeader>` and a `<div className="mfh-scroll">`.
+The header stays fixed, the scroll area is the only scroller on the screen.
+Keep local state, column definitions and drawers inside the page folder; promote
+anything a second page needs into `components/` or `bridge/`.
+
+## Bridge hub rule
+
+`electron/preload.cjs` calls `removeAllListeners` before every `on*`
+subscription, so **one listener per channel exists at a time**. Two components
+subscribing directly would silently unsubscribe each other.
+
+Therefore: `bridge.ts` subscribes once at startup (`startEventHub()` in
+`main.tsx`) and fans out. Components must use `subscribe(channel, cb)` or the
+`useProgress` / `useOpState` hooks — never `window.mfhBridge.on*` directly, and
+never `window.mfhBridge` at all.
+
+`useSummary()`, `useConfig()` and `useAppInfo()` are backed by module-level
+stores: the data is fetched once and shared. After any write, call `reload()`
+from the hook or `reloadSummary()` from a plain callback.
+
+Routing is hash-only. `pushState` would create a new `file:` path that
+`isCanonicalAppPageUrl` rejects, which then breaks every IPC call through the
+trusted-sender check.
+
+## Copy rules
+
+- Chinese, sentence case, verbs first: 开始处理 / 打开归档目录 / 复制日志.
+- One idea per string. Toast titles ≤ 20 characters, one optional sentence of
+  detail. No exclamation marks, no 请注意, no 「静态预览」 or other dev-only concepts.
+- Never expose internal identifiers, file paths, channel names or status codes
+  in user-facing text — those belong in `detail`.
+- Say the outcome, not the mechanism: 已完成，新增 12 份发票, not 管道执行成功.
+- Keep one verb per concept across the app: 获取 for fetching, 归档 for archiving,
+  识别 for OCR. Do not mix 抓取 / 下载 / 处理 for the same step.
+- Empty states tell the user what to do next in one line: 本次运行还没有新邮件.
+- All toasts go through `notify.success/info/warning/error(title, detail?)` or
+  `notifyResult(result, { success, failure })`. No `window.alert` / `confirm`;
+  use antd `Modal.confirm` for destructive actions.
+
+## Theme tokens
+
+Set in `theme.ts`, consumed through `ConfigProvider`. Do not hardcode colors in
+components — read `theme.useToken()` or use the CSS variables that `App.tsx`
+mirrors onto `:root` (`--mfh-border`, `--mfh-surface`, `--mfh-text-dim`, `--mfh-mono`).
+
+| token | value | note |
+| --- | --- | --- |
+| `colorPrimary` | `#2F6BFF` | the only accent; everything else is neutral |
+| `borderRadius` | `8` | |
+| `fontSize` | `13` | |
+| `fontFamily` | system CN stack | no webfonts (CSP allows `'self'` only) |
+| `colorBgLayout` | `#F4F5F7` / `#15171C` | page ground, light / dark |
+| Table | `size="small"`, transparent header | via `DataTable` |
+
+Dark mode follows `prefers-color-scheme` through `theme.darkAlgorithm`. There is
+no in-app theme switch: a desktop tool follows the system.
