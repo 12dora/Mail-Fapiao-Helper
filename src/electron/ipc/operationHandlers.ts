@@ -365,9 +365,9 @@ export function registerOperationHandlers(
     if (onlyHash) args.push('--only-mail', onlyHash);
     // `pending retry` 本身就是强制重跑；--force / --only-mail 都不适用于它。
     if (!pendingRetry && raw.force === true) args.push('--force');
-    const result = pendingRetry
-      ? await runCli('pending', ['retry', ...args], { operation: 'files', jobId: lease.jobId })
-      : await runCli('run', args, { operation: 'files', jobId: lease.jobId });
+    const cli: [string, string[]] = pendingRetry ? ['pending', ['retry', ...args]] : ['run', args];
+    getDevBackend()?.recordTestGlobal(getMainWindow(), '__mfhLastPipelineArgs', [cli[0], ...cli[1]]);
+    const result = await runCli(cli[0], cli[1], { operation: 'files', jobId: lease.jobId });
 
     // ELEC-08 / 簇 C：以结构化终态计数为准，不用裸 exit code 单独判定成功。
     // runCounts / terminalMailNotFound 优先取流式捕获值（ring 挤出后仍权威）。
@@ -736,7 +736,12 @@ export function registerOperationHandlers(
     return { ok: false, code: 'path_outside_data_dir', message: '路径不在允许的目录范围内。' };
   }
 
-  handleTrusted('mfh:get-summary', (_event, payload: unknown) => appSummary(asSummaryOptions(payload)));
+  handleTrusted('mfh:get-summary', (_event, payload: unknown) => {
+    const options = asSummaryOptions(payload);
+    // fixture 用它证明「操作结束后按完整查询重新拉过」；假后端不在时是空操作。
+    getDevBackend()?.recordTestGlobal(getMainWindow(), '__mfhLastSummaryQuery', options ?? null);
+    return appSummary(options);
+  });
 
   handleTrusted('mfh:get-op-state', () => sanitizeOpState(coordinator.state()));
 

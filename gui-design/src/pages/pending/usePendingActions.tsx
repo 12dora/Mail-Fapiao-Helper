@@ -92,7 +92,9 @@ export function usePendingActions(onDone?: () => void): PendingActions {
   const retry = useCallback(
     (row: PendingQueueRow) =>
       run(async () => {
-        const result = await bridge.runPipeline({ onlyMail: row.hash, pendingRetry: true });
+        // 单封重试只传 onlyMail：主进程把 onlyMail + pendingRetry 视为互斥输入，
+        // 同时给出会被 invalid_pending_retry 直接拒绝。pendingRetry 留给「全部重试」。
+        const result = await bridge.runPipeline({ onlyMail: row.hash });
         primeSummary(result.summary);
         const hint =
           row.groupAction === 'refresh_link' ? row.nextStep || row.groupNextStep || REFRESH_LINK_HINT : '';
