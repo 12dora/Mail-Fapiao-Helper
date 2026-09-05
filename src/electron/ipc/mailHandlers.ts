@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron';
+import { registerDetailHandlers } from './detailHandlers.js';
+import { MAIL_HASH_RE } from '../../util/hash.js';
+import type { AppSummary } from '../summary.js';
 import { ImapFlow } from 'imapflow';
 import { ArchiveRecoveryError } from '../../download/archiveJournal.js';
 import { parseMailHash } from '../cliProtocol.js';
@@ -88,6 +91,7 @@ export interface RegisterMailHandlersDeps {
   ledgerCsvPath(): string;
   ocrPendingCsvPath(): string;
   appSummary(): unknown;
+  sanitizeAppSummary(summary: AppSummary): AppSummary;
 }
 
 /** 连接测试/文件夹列举共用的 IMAP 参数解析（保存失败时回退到用户刚输入的值）。 */
@@ -123,7 +127,12 @@ export function imapParamsFor(
 async function openResolvedMail(
   targetPath: string,
   deps: RegisterMailHandlersDeps,
+  reveal = false,
 ): Promise<Record<string, unknown>> {
+  if (reveal) {
+    try { deps.showItemInFolderForUser(targetPath); } catch { /* best effort */ }
+    return { ok: true, opened: 'reveal_attempted', code: 'pending_mail_revealed', message: '已请求在文件管理器中显示原始邮件。' };
+  }
   const result = await deps.openOrRevealByPolicy(targetPath, {
     allowDirectoryOpen: false,
     allowFileOpen: true,
@@ -133,15 +142,15 @@ async function openResolvedMail(
       ok: true,
       opened: 'mail' as const,
       code: 'pending_mail_opened',
-      message: '已打开原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。',
+      message: '已打开原始邮件。',
     };
   }
   if (result.ok && result.revealed) {
     return {
       ok: true,
-      opened: 'mail' as const,
+      opened: 'reveal_attempted' as const,
       code: 'pending_mail_revealed',
-      message: '已请求在文件管理器中显示原始邮件。请到开票平台重新下载发票，然后回到这里选择文件归档。若未看到窗口，请到「已保存邮件」中查找。',
+      message: '已请求在文件管理器中显示原始邮件。',
     };
   }
   // 策略拒绝（可执行/bundle/替身/快捷方式等）：不得回退到无策略 open。
@@ -174,7 +183,7 @@ async function openResolvedMail(
     opened: stillThere ? 'reveal_attempted' as const : 'none' as const,
     code: stillThere ? 'pending_mail_open_failed_reveal_attempted' : 'pending_mail_open_failed',
     message: stillThere
-      ? '无法用默认应用打开原始邮件；已请求在文件管理器中显示该文件。若未看到窗口，请到「已保存邮件」文件夹查找。'
+      ? '无法打开原始邮件，已请求在文件管理器中显示该文件。'
       : '无法打开原始邮件，且文件似乎已不存在。',
     error: result.error ? sanitizeText(result.error, { maxLength: 200 }) : undefined,
   };
@@ -223,8 +232,8 @@ async function openPendingFallback(
         opened: 'none' as const,
         code: row ? 'pending_mail_missing_local_copy' : 'pending_row_not_found',
         message: row
-          ? '没有找到这封邮件的本地副本，且邮件缓存文件夹不存在。请先在「开始处理」中获取邮件，或到「配置」检查邮件缓存路径。'
-          : '没有找到这封邮件，且邮件缓存文件夹不存在。请先获取邮件或检查配置中的邮件缓存路径。',
+          ? '没有找到邮件的本地副本，请检查已保存邮件的位置。'
+          : '没有找到这封邮件，请先获取邮件或检查保存位置。',
         ...(folderResult.error ? { error: sanitizeText(folderResult.error, { maxLength: 200 }) } : {}),
       };
     }
@@ -245,8 +254,8 @@ async function openPendingFallback(
       opened: 'folder' as const,
       code: row ? 'pending_mail_folder_opened' : 'pending_row_not_found',
       message: row
-        ? '没有找到原始邮件文件，已请求在文件管理器中显示邮件缓存位置，请手动查找后再到开票平台重新下载。若未看到窗口，请到「配置」核对邮件缓存路径。'
-        : '没有找到这封邮件，已请求在文件管理器中显示邮件缓存位置。若未看到窗口，请到「配置」核对邮件缓存路径。',
+        ? '没有找到原始邮件，已请求在文件管理器中显示保存位置。'
+        : '没有找到这封邮件，已请求在文件管理器中显示保存位置。',
     };
   }
   // COPY-05：打开的是文件夹，不是原始邮件本身。
@@ -260,15 +269,18 @@ async function openPendingFallback(
   };
 }
 
-async function refreshPendingLink(
+async function openMail(
   payload: unknown,
   deps: RegisterMailHandlersDeps,
 ): Promise<Record<string, unknown>> {
   const raw = asObject(payload);
-  const hash = parseMailHash(raw.hash);
-  if (!hash) return { ok: false, code: 'pending_missing_hash', message: '缺少邮件标识。' };
+  const hash = typeof raw.hash === 'string' && MAIL_HASH_RE.test(raw.hash) ? raw.hash.toLowerCase() : '';
+  if (!hash) return { ok: false, opened: 'none', code: 'mail_not_found', message: '没有找到这封邮件。' };
+  if (raw.reveal !== undefined && typeof raw.reveal !== 'boolean') return { ok: false, opened: 'none', code: 'invalid_payload', message: '打开方式无效。' };
   const row = deps.findPendingRow(hash);
-  const emlPath = deps.pendingEmlPathForHash(hash);
+  const sample = path.join(deps.samplesDirPath(), `${hash}.eml`);
+  const emlPath = fs.existsSync(sample) ? sample : deps.pendingEmlPathForHash(hash);
+  if ((!emlPath || !fs.existsSync(emlPath)) && !row) return { ok: false, opened: 'none', code: 'mail_not_found', message: '没有找到这封邮件。' };
 
   /**
    * B2：所有桌面打开必须经 openOrRevealByPolicy（containment 之后的类型/目录/bundle 策略）。
@@ -285,16 +297,18 @@ async function refreshPendingLink(
       const rel = base ? path.relative(base, emlPath) : emlPath;
       const openedRel = deps.resolveOpenTarget(rel);
       if (!openedRel.ok) {
-        return { ok: false, code: openedRel.code, message: openedRel.message };
+        return { ok: false, opened: 'none', code: openedRel.code, message: openedRel.message };
       }
-      return openResolvedMail(openedRel.path, deps);
+      return openResolvedMail(openedRel.path, deps, raw.reveal === true);
     }
-    return openResolvedMail(opened.path, deps);
+    return openResolvedMail(opened.path, deps, raw.reveal === true);
   }
   return openPendingFallback(row, deps);
 }
 
 export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
+  registerDetailHandlers(deps);
+  deps.handleTrusted('mfh:open-mail', (_event, payload) => openMail(payload, deps));
   deps.handleTrusted('mfh:test-connection', async (_event, payload: unknown) => {
     // ELEC-02：配置落盘必须占锁；忙时仍可用表单值测连，但不写盘。
     let saved = false;
@@ -437,7 +451,7 @@ export function registerMailHandlers(deps: RegisterMailHandlersDeps): void {
   });
 
   deps.handleTrusted('mfh:pending-refresh-link', async (_event, payload: unknown) => (
-    refreshPendingLink(payload, deps)
+    openMail(payload, deps)
   ));
 
   deps.handleTrusted('mfh:pending-manual-archive', async (event, payload: unknown) => {
