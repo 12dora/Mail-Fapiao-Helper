@@ -1,10 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { log } from '../../log.js';
 import type { Config } from '../../config.js';
 import type { DocumentFormat } from '../../extract/types.js';
 
-const EFAPIAO_VERSION = '0.1.3';
+export const EFAPIAO_VERSIONS = ['0.1.4', '0.1.3'] as const;
+
+interface ResolvedBinary {
+  path: string;
+  version?: string;
+}
 
 function platformArch(): string {
   if (process.platform === 'darwin' && process.arch === 'arm64') return 'darwin-arm64';
@@ -40,18 +46,33 @@ function findBinaryInDir(dir: string, exe: string): string | undefined {
   return undefined;
 }
 
-function bundledBinaryPath(): string | undefined {
+function bundledBinary(): ResolvedBinary | undefined {
   const exe = process.platform === 'win32' ? 'efapiao.exe' : 'efapiao';
-  for (const root of resourceRoots()) {
-    const found = findBinaryInDir(path.join(root, 'vendor', 'efapiao', EFAPIAO_VERSION, platformArch()), exe);
-    if (found) return found;
+  for (const version of EFAPIAO_VERSIONS) {
+    for (const root of resourceRoots()) {
+      const found = findBinaryInDir(path.join(root, 'vendor', 'efapiao', version, platformArch()), exe);
+      if (found) return { path: found, version };
+    }
   }
   return undefined;
 }
 
+function resolveBinary(cfg: Config): ResolvedBinary {
+  if (cfg.ocr.binaryPath !== 'auto') return { path: cfg.ocr.binaryPath };
+  return bundledBinary() ?? { path: 'efapiao' };
+}
+
+/** Bundled directory version; custom/PATH engines must report their own version. */
+export function resolvedBinaryVersion(cfg: Config): string | undefined {
+  return resolveBinary(cfg).version;
+}
+
 export function binaryPath(cfg: Config): string {
-  if (cfg.ocr.binaryPath !== 'auto') return cfg.ocr.binaryPath;
-  return bundledBinaryPath() ?? 'efapiao';
+  const resolved = resolveBinary(cfg);
+  if (resolved.version && resolved.version !== EFAPIAO_VERSIONS[0]) {
+    log.info(`E-Fapiao-OCR selected bundled version ${resolved.version} for ${platformArch()} (preferred ${EFAPIAO_VERSIONS[0]})`);
+  }
+  return resolved.path;
 }
 
 function binaryDir(cfg: Config): string | undefined {

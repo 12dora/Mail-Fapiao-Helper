@@ -39,3 +39,11 @@ node dist/index.js ocr summary \
 - 批量接口语义: `/v1/invoices/parse-batch` 对单个文件失败仍返回 HTTP 200，由 `items[].status/code/message` 判断逐项结果；本项目现有批量适配保持兼容。
 - Release 资产: 上游发布 `darwin-arm64`、`linux-arm64`、`linux-x86_64`、`windows-x86_64` 的 `lite` 与 `with-model` 包；没有 `darwin-x86_64` release 资产。
 - 本项目策略: 桌面版默认内置 macOS arm64 和 Windows x64 的 `lite` 包；用户可替换为同架构 `with-model` 包，程序自动探测二进制旁 `models/` 并启用 `cnocr`。Linux 暂不作为桌面安装包目标。
+
+## 2026-09-05: v0.1.4 桌面接入
+
+- macOS arm64 已接入本地构建的 v0.1.4 lite；支持 supporting 文档分类、OFD 发票解析与 items v2。
+- capabilities 报告 PDF `supported`、OFD `partial_supported`、image `not_implemented`；列出 `pdf-supporting`、`ofd-supporting`、`image-supporting` 与 `ofd-fapiao`，不能把类别声明理解为所有版式均可解析。
+- CSV 继续直接使用引擎响应中的 `source.parser_version` 和 `source.ocr_vendor`；items v2 不改变现有汇总字段映射。
+- Windows v0.1.4 资产尚未发布，桌面 Windows 仍打包 v0.1.3 lite；待用户推送上游 tag、release 工作流完成后，通过 `scripts/fetch-efapiao.mjs` 校验下载并按 vendor README 升级打包配置。
+- 本地真实文件临时副本回归：数电普票 PDF、收费公路通行费电子票据汇总单 PDF、OFD 均为 `success`；汇总单映射为 `supporting`，OFD 票号/销售方/金额齐全。普票 PDF 的 `parser_version` 为 `0.1.0`，汇总单与 OFD 为 `0.1.4`，三者 `ocr_vendor` 均为空；保留引擎原始报告值。临时目录已删除，真实数据目录未写入。
