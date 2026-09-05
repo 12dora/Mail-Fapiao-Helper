@@ -83,6 +83,10 @@ export function exportCoverageNote(exported, loaded, total) {
     return parts.join('。') + '。';
 }
 
+export function invoiceExportRows(rows) {
+    return rows.filter((row) => row.documentType !== 'supporting');
+}
+
 export function exportVisibleTable(action) {
     const scope = activeMain();
     const page = document.body.dataset.page;
@@ -134,7 +138,7 @@ export function exportVisibleTable(action) {
         return;
     }
     if (page === 'library') {
-        const rows = selectVisibleLibraryRows();
+        const rows = invoiceExportRows(selectVisibleLibraryRows());
         const loaded = (getState().libraryRows || []).length;
         const total = Number(getState().libraryTotal ?? loaded);
         const lines = [['开票日期', '销售方', '发票号码', '金额', '文件名', '状态'].map(csvField).join(',')];

@@ -142,4 +142,73 @@ await withTempDir('mfh-summary-unit-', async (dir) => {
   assert.equal(legacyInbox.status, 'archived');
   assert.equal(legacyInbox.documentCount, 1);
 });
+await withTempDir('mfh-summary-supporting-', async (dir) => {
+  const cfg = loadConfig(path.join(repoRoot, 'config.example.json'));
+  const common = { hash: 'mail', invoiceNo: '11112222333344445555', seller: 'Vendor', amount: '10', status: 'success' };
+  const results = [
+    { ...common, filename: 'invoice.pdf', documentType: 'invoice' },
+    { ...common, filename: 'ride.pdf', documentType: 'itinerary', invoiceNo: 'other' },
+    { ...common, filename: 'attachment.pdf', documentType: 'supporting', invoiceType: 'toll_summary' },
+    { ...common, filename: '订单明细.pdf', documentType: 'invoice' },
+    { ...common, filename: 'queue-classified.pdf', documentType: 'invoice', status: 'error', error: 'historical failure' },
+  ];
+  writeCsv(path.join(dir, cfg.ocr.resultsCsv), results);
+  writeCsv(path.join(dir, cfg.paths.invoices, 'ocr/ocr-pending.csv'), [
+    ...results.map((row) => ({ ...row, status: 'pending', documentType: row.filename === 'queue-classified.pdf' ? 'supporting' : 'invoice' })),
+    { hash: 'mail', filename: '结算单.pdf', documentType: 'supporting', status: 'ignored' },
+  ]);
+  fs.writeFileSync(path.join(dir, cfg.paths.invoices, '通行费电子票据汇总单.pdf'), 'supporting');
+  const library = summarizeLibrary(cfg, dir);
+  assert.equal(library.total, 2);
+  assert.equal(library.documentTotal, 7);
+  assert.equal(library.invoiceLike, 1);
+  assert.equal(library.itinerary, 1);
+  assert.equal(library.supporting, 5);
+  assert.equal(library.recognized, 2);
+  assert.equal(library.pending, 0);
+  assert.equal(library.failed, 0);
+  assert.deepEqual(library.statusCounts, { 完整: 2, 信息不完整: 0, 已归档: 0, 识别失败: 0 });
+  assert.deepEqual(library.duplicates, { groups: 0, rows: 0 });
+  for (const row of library.rows.filter((row) => !['invoice.pdf', 'ride.pdf'].includes(row.filename))) {
+    assert.equal(row.documentType, 'supporting');
+    assert.equal(row.status, '已归档');
+    assert.equal(row.duplicateCount, 0);
+  }
+  assert.equal(library.ocr.recognized, 2);
+  assert.equal(library.ocr.ignored, 4);
+  assert.equal(library.ocr.failed, 0);
+  assert.deepEqual(library.ocr.byFailureReason, []);
+  assert.equal(library.ocr.byDocumentType.find((group) => group.key === 'supporting').count, 4);
+  fs.unlinkSync(path.join(dir, cfg.paths.invoices, 'ocr/ocr-pending.csv'));
+  const resultsOnly = summarizeLibrary(cfg, dir);
+  assert.equal(resultsOnly.ocr.recognized, 2);
+  assert.equal(resultsOnly.ocr.failed, 1);
+  assert.equal(resultsOnly.ocr.ignored, 2);
+
+  writeCsv(path.join(dir, cfg.output.csv), [
+    { filename: 'numbered.pdf', contentHash: 'ledger-content', source: '订单明细.pdf' },
+  ]);
+  writeCsv(path.join(dir, cfg.ocr.resultsCsv), [
+    { ...common, filename: 'numbered.pdf', contentHash: 'ledger-content', source: 'numbered.pdf' },
+    { ...common, filename: 'different.pdf', contentHash: 'invoice-content', source: 'different.pdf' },
+  ]);
+  writeCsv(path.join(dir, cfg.paths.invoices, 'ocr/ocr-pending.csv'), [
+    { hash: 'mail', filename: 'different.pdf', contentHash: 'support-content', documentType: 'supporting' },
+  ]);
+  const evidenceRows = summarizeLibrary(cfg, dir).rows;
+  assert.equal(evidenceRows.find((row) => row.filename === 'numbered.pdf').documentType, 'supporting');
+  assert.notEqual(evidenceRows.find((row) => row.filename === 'different.pdf').documentType, 'supporting');
+
+  globalThis.window = {};
+  try {
+    const { invoiceExportRows } = await import('../scripts/exports.js');
+    const { mergeSection } = await import('../scripts/records.js');
+    assert.deepEqual(invoiceExportRows(library.rows).map((row) => row.filename).sort(), ['invoice.pdf', 'ride.pdf']);
+    mergeSection('library', { ...library, rows: library.rows.slice(0, 2), offset: 0 });
+    assert.equal(window.FPH.libraryTotal, 7);
+    assert.equal(window.FPH.libraryCursor, 2);
+  } finally {
+    delete globalThis.window;
+  }
+});
 console.log('summary-unit: passed');

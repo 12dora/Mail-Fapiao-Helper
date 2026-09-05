@@ -79,6 +79,10 @@ export interface Config {
     /** 归档台账 CSV。`dir` / `pendingDir` 已在 v3 删除：实际输出目录由 `paths.*` 决定。 */
     csv: string;
   };
+  archive: {
+    /** Retain non-invoice supporting attachments in the archive. */
+    keepSupporting: boolean;
+  };
   rename: {
     avoidConflictBeforeOcr: boolean;
     rule: string;
@@ -187,6 +191,7 @@ const FIELD_LABELS: Record<string, string> = {
   'paths.invoices': '发票保存位置',
   'paths.pending': '待确认保存位置',
   'output.csv': '发票清单文件',
+  'archive.keepSupporting': '保留支撑材料',
   'ocr.enabled': '启用识别',
   'ocr.provider': '识别服务',
   'ocr.serviceUrl': '识别服务地址',
@@ -543,6 +548,10 @@ export function migrateRawConfig(raw: unknown): MigrateResult {
 
   out.output = output;
 
+  const archive = { ...asRecord(out.archive) };
+  fillMissing(archive, 'keepSupporting', true);
+  out.archive = archive;
+
   // v2 -> v3：删除从不生效的字段。旧文件里出现时只是被丢弃，不产生任何校验错误；
   // 迁移后的对象不再携带它们，因此 GUI 原子回写时也会把它们一并清出配置文件。
   if (declared <= 2) {
@@ -711,6 +720,7 @@ export function validateConfigCandidate(raw: unknown): ValidateConfigResult {
     output: {
       csv: readString(c, migrated, 'output.csv', { fallback: DEFAULTS.outputCsv }),
     },
+    archive: { keepSupporting: readBool(c, migrated, 'archive.keepSupporting', true) },
     rename: readRenameConfig(c, migrated),
     ocr: readOcrConfig(c, migrated),
     // llm / playwright.browserManagement 已在 v3 删除，这里不再读取（旧文件里的值

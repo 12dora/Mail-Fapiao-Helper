@@ -18,7 +18,7 @@ export async function cmdOrganize(argv: string[]): Promise<number> {
   if (!acquireCommandLock('organize', { configPath: parsed.configPath }, cfg)) return 2;
   try {
     assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
-    const summary = organizeFromOcrResults(cfg, log, { resultsCsv: parsed.resultsCsv, outDir: parsed.outDir, applyRename: parsed.applyRename });
+    const summary = organizeFromOcrResults(cfg, log, { resultsCsv: parsed.resultsCsv, outDir: parsed.outDir, applyRename: parsed.applyRename, includeSupporting: parsed.includeSupporting });
     log.info(`Organize complete: scanned=${summary.scanned}, copied=${summary.copied}, skipped=${summary.skipped}, failed=${summary.failed}`);
     return summary.failed > 0 ? 1 : 0;
   } catch (e) { log.error((e as Error).message); return 1; }

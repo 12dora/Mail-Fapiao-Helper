@@ -15,6 +15,7 @@ export interface OrganizeOpts {
   resultsCsv: string | undefined;
   outDir: string | undefined;
   applyRename: boolean | undefined;
+  includeSupporting: boolean;
 }
 
 export interface OcrOpts {
@@ -102,7 +103,7 @@ export function parseFetchArgs(argv: string[]): FetchOpts | 'help' {
 }
 
 export function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
-  const opts: OrganizeOpts = { configPath: './config.json', resultsCsv: undefined, outDir: undefined, applyRename: undefined };
+  const opts: OrganizeOpts = { configPath: './config.json', resultsCsv: undefined, outDir: undefined, applyRename: undefined, includeSupporting: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') return 'help';
@@ -110,6 +111,7 @@ export function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
     if (a === '--results-csv') { opts.resultsCsv = requireValue(argv, ++i, a); continue; }
     if (a === '--out') { opts.outDir = requireValue(argv, ++i, a); continue; }
     if (a === '--apply-rename') { opts.applyRename = true; continue; }
+    if (a === '--include-supporting') { opts.includeSupporting = true; continue; }
     if (a === '--no-apply-rename') { opts.applyRename = false; continue; }
     throw new Error(`unknown option: ${a}`);
   }
