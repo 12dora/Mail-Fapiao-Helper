@@ -6,8 +6,8 @@ import { Alert, App as AntApp, Button, Card, Descriptions, Space, Typography } f
 import { useCallback, useEffect, useState } from 'react';
 import { bridge, reloadSummary, useAppInfo } from '../../bridge/index.js';
 import type { AppInfo, ArchiveJournalStatus } from '../../bridge/index.js';
-import { notify, notifyResult, useBusy } from '../../components/index.js';
-import { PathLine, openLocation } from './fields.js';
+import { PathText, notify, notifyResult, useBusy } from '../../components/index.js';
+import { openLocation } from './fields.js';
 
 const REPO_URL = 'https://github.com/12dora/Mail-Fapiao-Helper';
 const ISSUE_URL = 'https://github.com/12dora/Mail-Fapiao-Helper/issues';
@@ -50,7 +50,7 @@ function AppCard({ configPath, info }: { configPath: string; info: AppInfo | nul
           {info ? `${platformText(info)} · Electron ${info.electron}` : '读取中'}
         </Descriptions.Item>
         <Descriptions.Item label="配置文件">
-          <PathLine path={configPath} />
+          <PathText path={configPath} />
         </Descriptions.Item>
       </Descriptions>
     </Card>
@@ -61,7 +61,7 @@ function DataCard({ dataDir }: { dataDir: string }): JSX.Element {
   return (
     <Card size="small" title="数据">
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
-        <PathLine path={dataDir} />
+        <PathText path={dataDir} />
         <Space size={8} wrap>
           <Button icon={<FolderOpenOutlined />} onClick={() => openLocation('dataDir')}>
             打开数据目录
@@ -146,10 +146,10 @@ function LinksCard(): JSX.Element {
     <Card size="small" title="项目">
       <Descriptions column={1} size="small" colon={false} labelStyle={LABEL_STYLE}>
         <Descriptions.Item label="项目地址">
-          <PathLine path={REPO_URL} copiedTitle="链接已复制" />
+          <PathText path={REPO_URL} copiedTitle="链接已复制" />
         </Descriptions.Item>
         <Descriptions.Item label="反馈问题">
-          <PathLine path={ISSUE_URL} copiedTitle="链接已复制" />
+          <PathText path={ISSUE_URL} copiedTitle="链接已复制" />
         </Descriptions.Item>
       </Descriptions>
       <Typography.Text type="secondary">应用不会打开浏览器，复制链接后在浏览器中打开。</Typography.Text>

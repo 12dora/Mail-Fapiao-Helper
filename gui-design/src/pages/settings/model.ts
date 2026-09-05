@@ -9,7 +9,7 @@
  * 为什么只提交改动：主进程回给渲染层的配置是脱敏过的——密钥被清空，绝对路径被
  * 换成展示串。整份回写会把展示串当成真路径写进 config.json，把已保存的密钥抹掉。
  */
-import type { AppConfig, ConfigDraft, ConfigPayload, SecretPresence } from '../../bridge/index.js';
+import type { AppConfig, ConfigDraft, ConfigErrorInfo, ConfigPayload, SecretPresence } from '../../bridge/index.js';
 
 export type TabKey = 'mail' | 'storage' | 'ocr' | 'about';
 
@@ -235,15 +235,10 @@ export function secretPlaceholder(path: string, secrets: SecretPresence | undefi
 }
 
 /** `configError` 在不同通道里既可能是字符串也可能是对象，统一成一句话。 */
-export function errorText(value: unknown): string {
+export function errorText(value: string | ConfigErrorInfo | undefined): string {
   if (!value) return '';
   if (typeof value === 'string') return value;
-  if (typeof value === 'object') {
-    const obj = value as { message?: unknown; detail?: unknown };
-    const parts = [obj.message, obj.detail].filter((v): v is string => typeof v === 'string' && v.length > 0);
-    return parts.join(' ');
-  }
-  return '';
+  return [value.message, value.detail].filter((v): v is string => Boolean(v)).join(' ');
 }
 
 export type { ConfigPayload };

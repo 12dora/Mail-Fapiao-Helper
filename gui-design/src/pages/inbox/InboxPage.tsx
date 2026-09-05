@@ -1,12 +1,12 @@
 import { FolderOpenOutlined, LinkOutlined, PaperClipOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Button, Empty, Space, Tooltip } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { bridge, useSummary } from '../../bridge/index.js';
 import type { InboxRow, InboxStatus } from '../../bridge/index.js';
 import { DataTable, PageHeader, StatusTag, notifyResult, statusLabel } from '../../components/index.js';
 import type { TableFilter } from '../../components/index.js';
-import { navigate } from '../../router.js';
+import { navigate, useRoute } from '../../router.js';
 import { MailDrawer } from './MailDrawer.js';
 
 const STATUS_ORDER: InboxStatus[] = ['archived', 'pending', 'unprocessed', 'ignored'];
@@ -98,8 +98,24 @@ export function InboxPage(): JSX.Element {
   const [open, setOpen] = useState(false);
 
   const inbox = summary?.inbox;
-  const rows = inbox?.rows ?? [];
+  const rows = useMemo(() => inbox?.rows ?? [], [inbox]);
   const empty = Boolean(summary) && rows.length === 0;
+
+  // 发票库的「查看邮件」跳到 #/inbox/<mailHash>：数据到了就把那封邮件的抽屉打开。
+  const target = useRoute().sub;
+  useEffect(() => {
+    if (!target) return;
+    const found = rows.find((item) => item.mailHash === target);
+    if (!found) return;
+    setRow(found);
+    setOpen(true);
+  }, [target, rows]);
+
+  function closeDrawer(): void {
+    setOpen(false);
+    // 地址里留着 hash 的话，同一封邮件再也点不开第二次。
+    if (target) navigate('inbox');
+  }
 
   return (
     <>
@@ -143,7 +159,7 @@ export function InboxPage(): JSX.Element {
         )}
       </div>
 
-      <MailDrawer row={row} open={open} onClose={() => setOpen(false)} />
+      <MailDrawer row={row} open={open} onClose={closeDrawer} />
     </>
   );
 }

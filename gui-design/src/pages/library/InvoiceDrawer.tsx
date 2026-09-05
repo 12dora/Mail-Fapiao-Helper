@@ -11,10 +11,18 @@ import type { ColumnsType } from 'antd/es/table';
 import { useEffect, useState } from 'react';
 import { bridge } from '../../bridge/index.js';
 import type { InvoiceDetail, InvoiceRow, LedgerRecord, OcrRecord } from '../../bridge/index.js';
-import { DetailDrawer, PathText, StatusTag, notify, notifyResult } from '../../components/index.js';
+import {
+  DataTable,
+  DetailDrawer,
+  PathText,
+  StatusTag,
+  humanizeDocumentType,
+  humanizeExtractedBy,
+  humanizeVendor,
+  notify,
+  notifyResult,
+} from '../../components/index.js';
 import { navigate } from '../../router.js';
-import { humanizeDocumentType, humanizeExtractedBy, humanizeVendor } from './documentType.js';
-import { LibraryTable } from './LibraryTable.js';
 
 export interface InvoiceDrawerProps {
   row: InvoiceRow | null;
@@ -119,10 +127,11 @@ function Duplicates({ rows }: { rows: InvoiceRow[] }): JSX.Element | null {
       <Typography.Title level={5} style={{ fontSize: 14, margin: '0 0 8px' }}>
         重复发票
       </Typography.Title>
-      <LibraryTable<InvoiceRow>
+      <DataTable<InvoiceRow>
         rows={rows}
         columns={DUPLICATE_COLUMNS}
         rowKey={(item) => item.filename}
+        searchKeys={[]}
         pagination={false}
         scrollX={false}
         emptyText="没有同号发票"

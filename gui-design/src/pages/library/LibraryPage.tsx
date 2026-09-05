@@ -10,18 +10,25 @@ import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState } from 'react';
 import { useSummary } from '../../bridge/index.js';
 import type { InvoiceRow } from '../../bridge/index.js';
-import { PageHeader, StatusTag } from '../../components/index.js';
+import {
+  DataTable,
+  PageHeader,
+  StatusTag,
+  filterRows,
+  humanizeDocumentType,
+  isSupportingDocument,
+} from '../../components/index.js';
+import type { TableFilter } from '../../components/index.js';
 import { navigate } from '../../router.js';
 import { DedupeModal } from './DedupeModal.js';
-import { humanizeDocumentType, isSupportingDocument } from './documentType.js';
 import { InvoiceDrawer } from './InvoiceDrawer.js';
 import { LibraryActions } from './LibraryActions.js';
-import { LibraryTable } from './LibraryTable.js';
 
 /** 默认落在「仅发票」上：附属材料要显式切过去才看得到。 */
 const DEFAULT_CHIP = 'invoice';
 
-const CHIPS: { key: string; label: string; test: (row: InvoiceRow) => boolean }[] = [
+/** 自带一个「全部」，所以要关掉 DataTable 内置的那个，免得出现两遍。 */
+const CHIPS: TableFilter<InvoiceRow>[] = [
   { key: 'invoice', label: '仅发票', test: (row) => !isSupportingDocument(row) },
   { key: 'recognized', label: '已识别', test: (row) => row.status === '完整' && !isSupportingDocument(row) },
   { key: 'incomplete', label: '待补充', test: (row) => row.status === '信息不完整' && !isSupportingDocument(row) },
@@ -82,15 +89,12 @@ export function LibraryPage(): JSX.Element {
 
   const rows = useMemo(() => summary?.library.rows ?? [], [summary]);
 
-  const visible = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    const test = CHIPS.find((item) => item.key === chip)?.test ?? (() => true);
-    return rows.filter((row) => {
-      if (!test(row)) return false;
-      if (!needle) return true;
-      return SEARCH_KEYS.some((key) => String(row[key] ?? '').toLowerCase().includes(needle));
-    });
-  }, [rows, query, chip]);
+  // 导出 CSV 要的是「用户现在看到的这些行」，所以搜索词和筛选项由页面持有，
+  // 可见行用表格内部同一套算法算出来。
+  const visible = useMemo(
+    () => filterRows(rows, { query, filterKey: chip, filters: CHIPS, searchKeys: SEARCH_KEYS }),
+    [rows, query, chip],
+  );
 
   const counts = useMemo(() => {
     let invoices = 0;
@@ -127,17 +131,19 @@ export function LibraryPage(): JSX.Element {
           </Empty>
         ) : (
           <Card size="small">
-            <LibraryTable<InvoiceRow>
-              rows={visible}
+            <DataTable<InvoiceRow>
+              rows={rows}
               columns={COLUMNS}
               rowKey={(row) => row.filename}
               loading={loading && !summary}
+              searchKeys={SEARCH_KEYS}
+              searchPlaceholder="搜索销售方、发票号或文件名"
               query={query}
               onQueryChange={setQuery}
-              searchPlaceholder="搜索销售方、发票号或文件名"
-              chips={CHIPS.map(({ key, label }) => ({ key, label }))}
-              chipKey={chip}
-              onChipChange={setChip}
+              filters={CHIPS}
+              filterKey={chip}
+              onFilterChange={setChip}
+              hideAllChip
               onOpen={setActive}
               scrollX={940}
               emptyText="没有符合条件的发票"

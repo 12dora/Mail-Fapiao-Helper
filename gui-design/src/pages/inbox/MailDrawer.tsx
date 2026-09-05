@@ -3,9 +3,20 @@ import type { DescriptionsProps } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { bridge, primeSummary, reloadSummary } from '../../bridge/index.js';
 import type { BaseResult, InboxRow, MailDetail } from '../../bridge/index.js';
-import { DetailDrawer, StatusTag, notify, notifyResult, useBusy } from '../../components/index.js';
+import {
+  AttachmentList,
+  DetailDrawer,
+  DocumentTable,
+  HistoryList,
+  LinkList,
+  PendingReason,
+  Section,
+  StatusTag,
+  notify,
+  notifyResult,
+  useBusy,
+} from '../../components/index.js';
 import { navigate } from '../../router.js';
-import { AttachmentList, DocumentTable, HistoryList, LinkList, PendingReason, Section } from './sections.js';
 
 /** 详情读不出来时的说明。code 之外的失败统一落到 fallback，不把状态码摆到界面上。 */
 const FAILURE_TEXT: Record<string, { title: string; detail: string }> = {

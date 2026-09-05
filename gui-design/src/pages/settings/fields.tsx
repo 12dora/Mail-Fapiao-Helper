@@ -1,12 +1,12 @@
 /**
  * 设置页内部复用的三种字段。放在页面目录里，别的页面用不到。
  */
-import { CopyOutlined, FolderOpenOutlined } from '@ant-design/icons';
-import { Button, Form, Input, Space, Tooltip } from 'antd';
+import { FolderOpenOutlined } from '@ant-design/icons';
+import { Button, Form, Input, Space } from 'antd';
 import type { ReactNode } from 'react';
 import { bridge } from '../../bridge/index.js';
 import type { OpenLocation, SecretPresence } from '../../bridge/index.js';
-import { notify, notifyResult } from '../../components/index.js';
+import { notifyResult } from '../../components/index.js';
 import { SECRET_PRESENCE, secretPlaceholder, toNamePath } from './model.js';
 
 export function openLocation(location: OpenLocation): void {
@@ -111,46 +111,5 @@ export function SecretField({
         autoComplete="new-password"
       />
     </Form.Item>
-  );
-}
-
-export interface PathLineProps {
-  path: string;
-  /** 复制成功后的提示标题。 */
-  copiedTitle?: string;
-}
-
-/**
- * 等宽显示一个路径或链接，右侧带复制按钮。
- *
- * 与共享的 `PathText` 同一职责，区别只在文字方向：`PathText` 直接给外层加
- * `dir="rtl"`，双向算法会把 `~/…` 这类以中性字符开头的路径首尾对调，显示成
- * `…/config.json/~`。这里用 `<bdi>` 把内容隔离出来，省略号仍落在开头，
- * 内容本身按原顺序渲染。
- */
-export function PathLine({ path, copiedTitle = '路径已复制' }: PathLineProps): JSX.Element {
-  if (!path) return <span className="mfh-path__text">—</span>;
-  return (
-    <span className="mfh-path">
-      <Tooltip title={path}>
-        <span className="mfh-path__text" style={{ direction: 'rtl' }}>
-          <bdi>{path}</bdi>
-        </span>
-      </Tooltip>
-      <Tooltip title="复制">
-        <Button
-          type="text"
-          size="small"
-          icon={<CopyOutlined />}
-          aria-label="复制"
-          onClick={() => {
-            void bridge.copyText(path).then((result) => {
-              if (result.ok) notify.success(copiedTitle);
-              else notify.error('复制失败', result.message);
-            });
-          }}
-        />
-      </Tooltip>
-    </span>
   );
 }

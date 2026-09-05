@@ -303,14 +303,30 @@ export interface ConfigPayload {
   dataDir: string;
 }
 
+/**
+ * 配置读写出错时的说明。
+ * `mfh:get-config` 回的是一句话，`mfh:save-config` 回的是结构化对象；
+ * 两个通道共用同一个字段名，所以类型是联合，渲染层统一用 errorText() 收敛成一句话。
+ */
+export type ConfigErrorInfo = {
+  message?: string;
+  detail?: string;
+  backupPath?: string;
+  backupCreated?: boolean;
+};
+
 export interface SaveConfigResult extends BaseResult {
   configPath?: string;
-  configError?: string;
+  configError?: string | ConfigErrorInfo;
   fieldErrors?: ConfigFieldError[];
 }
 
-/** 保存时用点号路径提交局部改动，例如 `{ 'imap.host': 'imap.qq.com' }`。 */
-export type ConfigDraft = Record<string, unknown>;
+/**
+ * 保存时只提交改过的字段，结构与 AppConfig 一致的嵌套局部对象，
+ * 例如 `{ imap: { host: 'imap.qq.com' } }`。
+ * 顶层另外接受 `repairCorrupt: true`——损坏的配置文件另存备份后按默认值重建。
+ */
+export type ConfigDraft = Record<string, unknown> & { repairCorrupt?: boolean };
 
 // ---------------------------------------------------------------------------
 // 长任务入参
