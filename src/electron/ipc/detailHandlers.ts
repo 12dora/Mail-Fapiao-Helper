@@ -8,27 +8,44 @@ import { handlers as siteHandlers } from '../../sites/registry.js';
 import { summarizePending, type PendingCopy } from '../../pending/summary.js';
 import { readCsvRows } from '../../util/csv.js';
 import { MAIL_HASH_RE } from '../../util/hash.js';
+import { ArtifactIndex, artifactIdentityForRow, indexArtifactResults } from '../../util/identity.js';
 import { buildMailStatusIndex, mailHashForRow, mailStatusFor, type MailStatus } from '../mailStatus.js';
-import { LIBRARY_STATUS, type InvoiceRow, type InboxRow, type AppSummary } from '../summary.js';
+import { LIBRARY_STATUS, type InvoiceRow, type InboxRow, type LibraryStatus } from '../summary.js';
 import { sanitizeText } from '../sanitize.js';
 import { asObject } from '../payload.js';
 import type { RegisterMailHandlersDeps } from './mailHandlers.js';
 
 type CsvRow = Record<string, string>;
+
 export interface DetailInvoiceRow extends InvoiceRow {
-  mailHash: string; messageId: string; from: string; subject: string; contentHash: string;
-  duplicateGroup: string; duplicateCount: number; fileHandle: string;
+  mailHash: string;
+  messageId: string;
+  from: string;
+  subject: string;
+  contentHash: string;
+  duplicateGroup: string;
+  duplicateCount: number;
+  fileHandle: string;
 }
+
 export interface MailDetail extends InboxRow {
-  mailHash: string; status: MailStatus; emlExists: boolean; emlLocation: 'samples' | 'pending' | null;
+  mailHash: string;
+  status: MailStatus;
+  emlExists: boolean;
+  emlLocation: 'samples' | 'pending' | null;
   attachments: { filename: string; size: number; contentType: string }[];
   links: { url: string; label: string }[];
   documents: DetailInvoiceRow[];
   pending: (PendingCopy & { reason: string }) | null;
   history: { time: string; action: string; status: string; message: string }[];
 }
-const ocrFields = ['documentType', 'invoiceType', 'seller', 'amount', 'dateValue', 'invoiceNo', 'transport', 'extractedBy', 'parserVersion', 'ocrVendor', 'status', 'error'] as const;
+
+const ocrFields = [
+  'documentType', 'invoiceType', 'seller', 'amount', 'dateValue', 'invoiceNo', 'transport',
+  'extractedBy', 'parserVersion', 'ocrVendor', 'status', 'error',
+] as const;
 const ledgerFields = ['messageId', 'date', 'from', 'subject', 'source', 'mailHash', 'contentHash'] as const;
+
 export interface InvoiceDetail {
   row: DetailInvoiceRow;
   ocr: Record<typeof ocrFields[number], string> | null;
@@ -36,10 +53,10 @@ export interface InvoiceDetail {
   file: { handle: string; exists: boolean; size: number; format: string };
   duplicates: DetailInvoiceRow[];
 }
+
 export type MailDetailPayload = { hash: string };
 export type InvoiceDetailPayload = { filename: string };
 export type OpenMailPayload = { hash: string; reveal?: boolean };
-
 /** Both lexical traversal and symlinks must remain within the invoices directory. */
 export function invoicePath(root: string, filename: string): string | undefined {
   if (!filename || filename.includes('\0') || path.isAbsolute(filename)) return undefined;
@@ -66,17 +83,10 @@ export function invoicePath(root: string, filename: string): string | undefined 
 }
 
 export function currentOcrRows(rows: CsvRow[]): CsvRow[] {
-  const current = new Map<string, CsvRow>();
-  for (const row of rows) {
-    const key = `${row.filename || ''}\0${row.contentHash || ''}`;
-    const previous = current.get(key);
-    if (previous?.status?.toLowerCase() === 'success' && row.status?.toLowerCase() !== 'success') continue;
-    current.set(key, row);
-  }
-  return [...current.values()];
+  return indexArtifactResults(rows).values();
 }
 
-/** Keep ordinary signed URLs intact; only long query values are hidden. */
+/** Mail links retain ordinary signed query values; only long query values are hidden. */
 export function detailLinkUrl(url: string): string {
   const parsed = new URL(url);
   let changed = false;
@@ -90,102 +100,222 @@ export function detailLinkUrl(url: string): string {
   return changed ? parsed.toString() : url;
 }
 
+function detailSource(source: string): string {
+  try {
+    const parsed = new URL(detailLinkUrl(source));
+    if (!parsed.username && !parsed.password) return detailLinkUrl(source);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return source;
+  }
+}
+
 function pick<K extends string>(row: CsvRow, fields: readonly K[]): Record<K, string> {
   return Object.fromEntries(fields.map(key => [key, row[key] || ''])) as Record<K, string>;
 }
 
-export function registerDetailHandlers(deps: RegisterMailHandlersDeps): void {
-  function context() {
-    const cfg = deps.readConfigForPaths() as unknown as Config;
-    const cwd = deps.realDataDir() || process.cwd();
-    const summary = deps.appSummary() as AppSummary;
-    const ledger = readCsvRows(deps.ledgerCsvPath());
-    const results = currentOcrRows(readCsvRows(path.resolve(cwd, cfg.ocr.resultsCsv)));
-    const resultFor = (row: CsvRow) => results.find(result => result.filename === row.filename && (result.contentHash || '') === (row.contentHash || ''));
-    const asRow = (row: CsvRow, ocr = resultFor(row)): DetailInvoiceRow => {
-      const filename = row.filename || '';
-      const target = invoicePath(deps.invoicesDirPath(), filename);
-      // The public facade invokes its private rendererOpenablePath; keep all redaction there.
-      const handle = target ? deps.sanitizeAppSummary({ ...summary, library: { ...summary.library, rows: [{ filename, filePath: target, fileHandle: target, mailHash: '', messageId: '', from: '', subject: '', contentHash: '', duplicateGroup: '', duplicateCount: 0, date: '', seller: '', invoiceNo: '', amount: '', source: '', status: LIBRARY_STATUS.PENDING, documentType: '', invoiceType: '', error: '' }] } }).library.rows[0]?.filePath || '' : '';
-      const number = ocr?.invoiceNo || '';
-      const duplicateCount = /^\d{20}$/.test(number) && ocr?.status?.toLowerCase() === 'success'
-        ? results.filter(r => r.status?.toLowerCase() === 'success' && r.invoiceNo === number).length : 0;
-      const amount = ocr?.amount || '';
-      const numeric = Number(amount.replace(/[^\d.-]/g, ''));
-      return {
-        filename, filePath: handle, fileHandle: handle, date: ocr?.dateValue || row.date || '',
-        seller: ocr?.seller || '待识别', amount: amount && Number.isFinite(numeric) ? `¥ ${numeric.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : amount,
-        invoiceNo: number, source: row.source || '', status: !ocr ? LIBRARY_STATUS.PENDING : ocr.status === 'error' ? LIBRARY_STATUS.FAILED : ocr.status === 'success' && (number || ocr.seller || amount) ? LIBRARY_STATUS.COMPLETE : LIBRARY_STATUS.PENDING,
-        documentType: ocr?.documentType || '', invoiceType: ocr?.invoiceType || '', error: sanitizeText(ocr?.error || '', { maxLength: 200 }),
-        mailHash: row.mailHash || ocr?.hash || mailHashForRow(row), messageId: row.messageId || ocr?.messageId || '',
-        from: row.from || ocr?.from || '', subject: row.subject || ocr?.subject || '', contentHash: row.contentHash || '',
-        duplicateGroup: duplicateCount > 1 ? number : '', duplicateCount: duplicateCount > 1 ? duplicateCount : 0,
-      };
-    };
-    return { cfg, cwd, ledger, results, resultFor, asRow };
-  }
+function rowStatus(ocr?: CsvRow): LibraryStatus {
+  if (!ocr) return LIBRARY_STATUS.PENDING;
+  const status = (ocr.status || '').toLowerCase();
+  if (status === 'error') return LIBRARY_STATUS.FAILED;
+  if (status === 'partial') return LIBRARY_STATUS.PENDING;
+  return ocr.invoiceNo || ocr.seller || ocr.amount ? LIBRARY_STATUS.COMPLETE : LIBRARY_STATUS.PENDING;
+}
 
+function displayAmount(amount: string): string {
+  const numeric = Number(amount.replace(/[^\d.-]/g, ''));
+  if (!amount || !Number.isFinite(numeric)) return amount;
+  return `¥ ${numeric.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function issueInvoiceHandle(deps: RegisterMailHandlersDeps, filename: string): string {
+  const target = invoicePath(deps.invoicesDirPath(), filename);
+  return target ? deps.issueOpenableHandle(target) : '';
+}
+
+function appendRow(index: Map<string, CsvRow[]>, key: string, row: CsvRow): void {
+  const group = index.get(key);
+  if (group) group.push(row);
+  else index.set(key, [row]);
+}
+
+/** All joins are indexed once per request, preserving ArtifactIndex's unambiguous legacy fallback. */
+function snapshot(deps: RegisterMailHandlersDeps) {
+  const cfg = deps.readConfigForPaths() as unknown as Config;
+  const cwd = deps.realDataDir() || process.cwd();
+  const ledger = readCsvRows(deps.ledgerCsvPath());
+  const results = indexArtifactResults(readCsvRows(path.resolve(cwd, cfg.ocr.resultsCsv)));
+  const ledgerByArtifact = new ArtifactIndex<CsvRow>();
+  const ledgerByFilename = new Map<string, CsvRow>();
+  const ledgerByMailHash = new Map<string, CsvRow[]>();
+  const legacyLedgerByMessageId = new Map<string, CsvRow[]>();
+  for (const row of ledger) {
+    ledgerByArtifact.set(artifactIdentityForRow(row), row);
+    if (!ledgerByFilename.has(row.filename || '')) ledgerByFilename.set(row.filename || '', row);
+    appendRow(ledgerByMailHash, mailHashForRow(row), row);
+    if (!row.mailHash) appendRow(legacyLedgerByMessageId, row.messageId || '', row);
+  }
+  const resultsByFilename = new Map<string, CsvRow>();
+  const resultsByInvoiceNo = new Map<string, CsvRow[]>();
+  for (const row of results.values()) {
+    const filename = row.filename || '';
+    const existing = resultsByFilename.get(filename);
+    if (!existing || (existing.status?.toLowerCase() !== 'success' && row.status?.toLowerCase() === 'success')) {
+      resultsByFilename.set(filename, row);
+    }
+    const number = (row.invoiceNo || '').trim();
+    if (number) appendRow(resultsByInvoiceNo, number, row);
+  }
+  const resultFor = (row: CsvRow) => results.get(artifactIdentityForRow(row));
+  const duplicateRows = (number: string) => resultsByInvoiceNo.get(number.trim()) || [];
+  const asRow = (row: CsvRow, ocr = resultFor(row)): DetailInvoiceRow => {
+    const filename = row.filename || '';
+    const handle = issueInvoiceHandle(deps, filename);
+    const number = (ocr?.invoiceNo || '').trim();
+    const duplicateCount = duplicateRows(number).length;
+    return {
+      filename,
+      filePath: handle,
+      fileHandle: handle,
+      date: ocr?.dateValue || row.date || '',
+      seller: ocr?.seller || '待识别',
+      amount: displayAmount(ocr?.amount || ''),
+      invoiceNo: number,
+      source: detailSource(row.source || ''),
+      status: rowStatus(ocr),
+      documentType: ocr?.documentType || '',
+      invoiceType: ocr?.invoiceType || '',
+      error: sanitizeText(ocr?.error || '', { maxLength: 200 }),
+      mailHash: mailHashForRow({ ...ocr, ...row, mailHash: row.mailHash || ocr?.hash || '' }),
+      messageId: row.messageId || ocr?.messageId || '',
+      from: row.from || ocr?.from || '',
+      subject: row.subject || ocr?.subject || '',
+      contentHash: row.contentHash || ocr?.contentHash || '',
+      duplicateGroup: duplicateCount > 1 ? number : '',
+      duplicateCount: duplicateCount > 1 ? duplicateCount : 0,
+    };
+  };
+  function documentsFor(hash: string, messageId: string): DetailInvoiceRow[] {
+    const rows = new Set(ledgerByMailHash.get(hash) || []);
+    if (messageId) {
+      for (const row of legacyLedgerByMessageId.get(messageId) || []) rows.add(row);
+    }
+    return [...rows].map(row => asRow({ ...row, mailHash: row.mailHash || hash }));
+  }
+  function duplicatesFor(ocr: CsvRow | undefined, filename: string): DetailInvoiceRow[] {
+    return duplicateRows(ocr?.invoiceNo || '')
+      .filter(other => other.filename !== filename)
+      .map(other => asRow(ledgerByArtifact.get(artifactIdentityForRow(other)) || other, other));
+  }
+  return {
+    cfg, cwd, ledgerByMailHash, ledgerByFilename, resultsByFilename,
+    resultFor, asRow, documentsFor, duplicatesFor,
+  };
+}
+
+function projectHistory(cwd: string, hash: string): MailDetail['history'] {
+  try {
+    const entries: unknown = JSON.parse(fs.readFileSync(path.resolve(cwd, '.mfh-cache/gui-history.json'), 'utf8'));
+    if (!Array.isArray(entries)) return [];
+    return entries.map(asObject)
+      .filter(entry => `${entry.detail || ''} ${entry.message || ''}`.toLowerCase().includes(hash))
+      .map(entry => ({
+        time: String(entry.time || ''),
+        action: String(entry.action || ''),
+        status: String(entry.status || ''),
+        message: sanitizeText(String(entry.message || ''), { maxLength: 200 }),
+      }));
+  } catch {
+    return []; // History is optional.
+  }
+}
+
+function invoiceLinks(parsed: Awaited<ReturnType<typeof parseMailWithGuards>>): string[] {
+  return extractMailUrls(parsed).filter(url => {
+    if (siteHandlers.some(handler => handler.match(url))) return true;
+    const target = new URL(url);
+    if (/\.(pdf|ofd|zip)$/i.test(target.pathname)) return true;
+    if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(target.pathname)) return linkedImageHasInvoiceEvidence(url);
+    return target.hostname.toLowerCase() !== 'inv-veri.chinatax.gov.cn';
+  });
+}
+
+async function readMail(target: string, deps: RegisterMailHandlersDeps) {
+  const safe = deps.resolveOpenTarget(target);
+  if (!safe.ok) throw new Error('mail_path_refused');
+  const fd = fs.openSync(safe.path, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size > 32 * 1024 * 1024) throw new Error('mail_too_large');
+    const bytes = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const read = fs.readSync(fd, bytes, offset, size - offset, offset);
+      if (!read) break;
+      offset += read;
+    }
+    return await parseMailWithGuards(bytes.subarray(0, offset));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export function registerDetailHandlers(deps: RegisterMailHandlersDeps): void {
   deps.handleTrusted('mfh:mail-detail', async (_event, payload) => {
+    const missing = { ok: false, code: 'mail_not_found', message: '没有找到这封邮件。' };
     const hash = asObject(payload).hash;
-    if (typeof hash !== 'string' || !MAIL_HASH_RE.test(hash)) return { ok: false, code: 'mail_not_found', message: '没有找到这封邮件。' };
+    if (typeof hash !== 'string' || !MAIL_HASH_RE.test(hash)) return missing;
     try {
-      const ctx = context();
+      const ctx = snapshot(deps);
       const normalized = hash.toLowerCase();
       const index = buildMailStatusIndex(ctx.cfg, ctx.cwd);
-      if (!index.has(normalized)) return { ok: false, code: 'mail_not_found', message: '没有找到这封邮件。' };
-      const pendingRow = summarizePending(ctx.cfg, ctx.cwd).groups.flatMap(g => g.rows).find(r => r.hash === normalized);
-      const indexed = readCsvRows(path.resolve(ctx.cwd, ctx.cfg.paths.samples, 'INDEX.csv')).find(r => mailHashForRow(r) === normalized);
-      const metadata = indexed || pendingRow || ctx.ledger.find(r => mailHashForRow(r) === normalized);
+      if (!index.has(normalized)) return missing;
+      const pendingRow = summarizePending(ctx.cfg, ctx.cwd).groups
+        .flatMap(group => group.rows).find(row => row.hash === normalized);
+      const indexed = readCsvRows(path.resolve(ctx.cwd, ctx.cfg.paths.samples, 'INDEX.csv'))
+        .find(row => mailHashForRow(row) === normalized);
+      const metadata = indexed || pendingRow || ctx.ledgerByMailHash.get(normalized)?.[0];
       let emlLocation: MailDetail['emlLocation'] = null;
       let parsed: Awaited<ReturnType<typeof parseMailWithGuards>> | undefined;
       for (const location of ['samples', 'pending'] as const) {
         const target = path.resolve(ctx.cwd, ctx.cfg.paths[location], `${normalized}.eml`);
         if (!fs.existsSync(target)) continue;
         emlLocation = location;
-        const safe = deps.resolveOpenTarget(target);
-        if (!safe.ok) throw new Error('mail_path_refused');
-        const fd = fs.openSync(safe.path, 'r');
-        try {
-          const size = fs.fstatSync(fd).size;
-          if (size > 32 * 1024 * 1024) throw new Error('mail_too_large');
-          const bytes = Buffer.alloc(size);
-          let offset = 0;
-          while (offset < size) {
-            const read = fs.readSync(fd, bytes, offset, size - offset, offset);
-            if (!read) break;
-            offset += read;
-          }
-          parsed = await parseMailWithGuards(bytes.subarray(0, offset));
-        } finally { fs.closeSync(fd); }
+        parsed = await readMail(target, deps);
         break;
       }
       const messageId = metadata?.messageId || parsed?.messageId || '';
-      const urls = parsed ? extractMailUrls(parsed).filter(url => {
-        if (siteHandlers.some(handler => handler.match(url))) return true;
-        const target = new URL(url);
-        if (/\.(pdf|ofd|zip)$/i.test(target.pathname)) return true;
-        if (/\.(png|jpe?g|gif|webp|bmp)$/i.test(target.pathname)) return linkedImageHasInvoiceEvidence(url);
-        return target.hostname.toLowerCase() !== 'inv-veri.chinatax.gov.cn';
-      }) : [];
-      let history: MailDetail['history'] = [];
-      try {
-        const entries: unknown = JSON.parse(fs.readFileSync(path.resolve(ctx.cwd, '.mfh-cache/gui-history.json'), 'utf8'));
-        if (Array.isArray(entries)) history = entries.filter(entry => `${entry?.detail || ''} ${entry?.message || ''}`.toLowerCase().includes(normalized)).map(entry => ({ time: String(entry.time || ''), action: String(entry.action || ''), status: String(entry.status || ''), message: sanitizeText(String(entry.message || ''), { maxLength: 200 }) }));
-      } catch { /* History is optional. */ }
+      const urls = parsed ? invoiceLinks(parsed) : [];
       const mail: MailDetail = {
-        mailHash: normalized, messageId, date: metadata?.date || parsed?.date?.toISOString() || '',
-        from: metadata?.from || parsed?.from?.text || '', subject: metadata?.subject || parsed?.subject || '',
-        mailbox: indexed?.mailbox || '', hasAttachment: parsed ? parsed.attachments.length > 0 : indexed?.hasAttachment === '1',
-        bodyLinkCount: parsed ? urls.length : Number(indexed?.bodyLinkCount || 0), ...mailStatusFor(index, normalized),
-        emlExists: emlLocation !== null, emlLocation,
-        attachments: (parsed?.attachments || []).slice(0, 50).map(a => ({ filename: a.filename || '', size: a.size, contentType: a.contentType })),
+        mailHash: normalized,
+        messageId,
+        date: metadata?.date || parsed?.date?.toISOString() || '',
+        from: metadata?.from || parsed?.from?.text || '',
+        subject: metadata?.subject || parsed?.subject || '',
+        mailbox: indexed?.mailbox || '',
+        hasAttachment: parsed ? parsed.attachments.length > 0 : indexed?.hasAttachment === '1',
+        bodyLinkCount: parsed ? urls.length : Number(indexed?.bodyLinkCount || 0),
+        ...mailStatusFor(index, normalized),
+        emlExists: emlLocation !== null,
+        emlLocation,
+        attachments: (parsed?.attachments || []).slice(0, 50).map(attachment => ({
+          filename: attachment.filename || '',
+          size: attachment.size,
+          contentType: attachment.contentType,
+        })),
         links: urls.slice(0, 50).map(url => ({ url: detailLinkUrl(url), label: '' })),
-        documents: ctx.ledger.filter(row => row.mailHash ? row.mailHash.toLowerCase() === normalized : !!messageId && row.messageId === messageId).map(row => ctx.asRow({ ...row, mailHash: row.mailHash || normalized })),
-        pending: pendingRow ? pick(pendingRow as unknown as CsvRow, ['reason', 'category', 'userMessage', 'nextStep']) : null,
-        history,
+        documents: ctx.documentsFor(normalized, messageId),
+        pending: pendingRow ? pick(pendingRow as unknown as CsvRow, [
+          'reason', 'category', 'userMessage', 'nextStep',
+        ]) : null,
+        history: projectHistory(ctx.cwd, normalized),
       };
       return { ok: true, mail };
-    } catch { return { ok: false, code: 'eml_unreadable', message: '无法读取邮件详情，请稍后重试。' }; }
+    } catch {
+      return { ok: false, code: 'eml_unreadable', message: '无法读取邮件详情，请稍后重试。' };
+    }
   });
 
   deps.handleTrusted('mfh:invoice-detail', (_event, payload) => {
@@ -195,20 +325,32 @@ export function registerDetailHandlers(deps: RegisterMailHandlersDeps): void {
     const target = invoicePath(deps.invoicesDirPath(), filename);
     if (!target) return missing;
     try {
-      const ctx = context();
-      const ledger = ctx.ledger.find(row => row.filename === filename);
-      const ocr = ledger ? ctx.resultFor(ledger) : ctx.results.filter(row => row.filename === filename).sort((a, b) => Number(b.status === 'success') - Number(a.status === 'success'))[0];
+      const ctx = snapshot(deps);
+      const ledger = ctx.ledgerByFilename.get(filename);
+      const ocr = ledger ? ctx.resultFor(ledger) : ctx.resultsByFilename.get(filename);
       let stat: fs.Stats | undefined;
-      try { stat = fs.statSync(target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      try {
+        stat = fs.statSync(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
       if ((stat && !stat.isFile()) || (!ledger && !ocr && !stat)) return missing;
       const row = ctx.asRow(ledger || ocr || { filename }, ocr);
       const invoice: InvoiceDetail = {
-        row, ocr: ocr ? { ...pick(ocr, ocrFields), error: sanitizeText(ocr.error || '', { maxLength: 200 }) } : null,
-        ledger: ledger ? pick(ledger, ledgerFields) : null,
-        file: { handle: row.fileHandle, exists: !!stat, size: stat?.size || 0, format: path.extname(filename).slice(1).toLowerCase() },
-        duplicates: ocr?.status === 'success' && /^\d{20}$/.test(ocr.invoiceNo || '') ? ctx.results.filter(other => other.status === 'success' && other.invoiceNo === ocr.invoiceNo && other.filename !== filename).map(other => ctx.asRow(ctx.ledger.find(l => l.filename === other.filename && l.contentHash === other.contentHash) || other, other)) : [],
+        row,
+        ocr: ocr ? { ...pick(ocr, ocrFields), error: sanitizeText(ocr.error || '', { maxLength: 200 }) } : null,
+        ledger: ledger ? { ...pick(ledger, ledgerFields), source: detailSource(ledger.source || '') } : null,
+        file: {
+          handle: row.fileHandle,
+          exists: !!stat,
+          size: stat?.size || 0,
+          format: path.extname(filename).slice(1).toLowerCase(),
+        },
+        duplicates: ctx.duplicatesFor(ocr, filename),
       };
       return { ok: true, invoice };
-    } catch { return missing; }
+    } catch {
+      return missing;
+    }
   });
 }
