@@ -1,3 +1,4 @@
+import type { OcrFailureReason } from './payload.js';
 import { sanitizeText } from './sanitize.js';
 import type { RunHistoryEntry } from './summary.js';
 
@@ -66,6 +67,39 @@ export interface OcrProgressState {
   skipped: number;
   processed: number;
   initialized: boolean;
+  /** 归一化失败原因 → 出现次数；Map 插入序即首次出现序。 */
+  reasons: Map<string, number>;
+}
+
+export function createOcrProgressState(total = 0): OcrProgressState {
+  return {
+    total, parsed: 0, failed: 0, skipped: 0, processed: 0, initialized: false, reasons: new Map(),
+  };
+}
+
+/** 按次数降序取前 N；次数相同保留首次出现顺序（稳定排序 + Map 插入序）。 */
+export function rankedFailureReasons(
+  reasons: Map<string, number> | undefined,
+  limit = 3,
+): OcrFailureReason[] {
+  if (!reasons || reasons.size === 0) return [];
+  return Array.from(reasons.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit)
+    .map(([reason, count]) => ({ reason, count }));
+}
+
+function normalizeOcrFailureReason(raw: string | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  return sanitizeText(trimmed, { maxLength: 120 });
+}
+
+function ocrAllFailedMessage(failed: number, top: OcrFailureReason | undefined): string {
+  if (top) {
+    return `有 ${failed} 个文件识别失败，主要原因：${top.reason}（${top.count} 个）。可在「发票库」中仅重试失败项。`;
+  }
+  return `有 ${failed} 个文件识别失败，请重试或在「设置」中检查识别选项。`;
 }
 
 export interface FileProgressState {
@@ -327,8 +361,9 @@ export function parseOcrTerminal(text: string, current: OcrProgressState, emit: 
     } else {
       phase = '识别失败';
       kind = 'err';
-      message = `有 ${current.failed} 个文件识别失败，请重试或在「设置」中检查识别选项。`;
+      message = ocrAllFailedMessage(current.failed, rankedFailureReasons(current.reasons, 1)[0]);
     }
+    const failureReasons = rankedFailureReasons(current.reasons);
     emit({
       operation: 'ocr',
       phase,
@@ -343,6 +378,7 @@ export function parseOcrTerminal(text: string, current: OcrProgressState, emit: 
       message,
       kind,
       done: true,
+      ...(failureReasons.length > 0 ? { failureReasons } : {}),
     });
     return true;
   }
@@ -378,6 +414,11 @@ export function parseOcrFailure(text: string, current: OcrProgressState, emit: P
   if (failed) {
     current.failed++;
     current.processed++;
+    const reason = normalizeOcrFailureReason(failed[2]);
+    if (reason) {
+      current.reasons ??= new Map();
+      current.reasons.set(reason, (current.reasons.get(reason) ?? 0) + 1);
+    }
     const detail = failed[2] ? sanitizeText(failed[2], { maxLength: 200 }) : '';
     emit({
       operation: 'ocr',

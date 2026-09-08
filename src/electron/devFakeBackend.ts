@@ -164,7 +164,7 @@ function fakePipeline(ctx: FakeBackendContext, args: string[]): FakeCliResult {
   };
 }
 
-function fakeOcr(ctx: FakeBackendContext): FakeCliResult {
+function fakeOcr(ctx: FakeBackendContext, _args: string[]): FakeCliResult {
   const paths = fakeConfigPaths(ctx);
   writeFile(path.join(paths.invoices, 'ocr', 'ocr-pending.csv'), csvText([
     ['hash', 'date', 'from', 'subject', 'filename', 'source', 'format', 'documentType', 'status', 'reason'],
@@ -250,7 +250,7 @@ export function runFakeCli(command: string, args: string[], ctx: FakeBackendCont
   if (command === 'run') return fakePipeline(ctx, args);
   // 「全部重试」走 `pending retry`：与 run 同样的终态行契约，fake 侧共用同一实现。
   if (command === 'pending' && args[0] === 'retry') return fakePipeline(ctx, args.slice(1));
-  if (command === 'ocr') return fakeOcr(ctx);
+  if (command === 'ocr') return fakeOcr(ctx, args);
   if (command === 'dedupe') return fakeDedupe(ctx, args);
   if (command === 'organize') {
     const paths = fakeConfigPaths(ctx);

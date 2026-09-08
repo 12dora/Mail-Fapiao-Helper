@@ -21,7 +21,17 @@ import type { OcrRerunPlan } from '../ocrRerun.js';
 import type { OpenLocationKey } from '../pathPolicy.js';
 import type { OpKind, OpLease, RunningOp } from '../opCoordinator.js';
 import type { BusyResponse, NormalizedFilter, RunBatch } from '../operationSupport.js';
-import { asDateRange, asObject, type DateRangePayload } from '../payload.js';
+import {
+  asDateRange,
+  asObject,
+  appendOcrCliFlags,
+  invalidOcrPayloadResponse,
+  ocrHistoryTitle,
+  ocrNeedsRerunBackup,
+  ocrNoWorkProgress,
+  ocrNoWorkResponse,
+  type DateRangePayload,
+} from '../payload.js';
 import type { CliReport } from '../runSupport.js';
 import type { ProcessRegistries } from '../runtime.js';
 import { redactPath, sanitizeText, type UiError } from '../sanitize.js';
@@ -124,7 +134,7 @@ export interface OperationHandlerDependencies {
   ocrPendingCsvPath(): string;
   readCsvRows(file: string): Record<string, string>[];
   ensureArchiveRecoveryReady(): UiError | undefined;
-  prepareOcrRerun(): { ok: true; plan: OcrRerunPlan } | { ok: false; error: UiError };
+  prepareOcrRerun(opts?: { preserveResults?: boolean }): { ok: true; plan: OcrRerunPlan } | { ok: false; error: UiError };
   writeOcrRunConfig(concurrency: number): { dir: string; file: string };
   removeTempDir(dir: string): void;
   sendOperationProgress(payload: Record<string, unknown>): void;
@@ -455,8 +465,8 @@ export function registerOperationHandlers(
       sendOperationProgress({ operation: 'ocr', phase: '识别失败', percent: 100, ...recoveryError, kind: 'err', done: true });
       return { ok: false, response: { ok: false, ...recoveryError, summary: appSummary() } };
     }
-    if (raw.resetResults === true || raw.force === true) {
-      const prepared = prepareOcrRerun();
+    if (ocrNeedsRerunBackup(raw)) {
+      const prepared = prepareOcrRerun({ preserveResults: raw.retryFailed === true });
       if (!prepared.ok) {
         sendOperationProgress({
           operation: 'ocr',
@@ -502,7 +512,7 @@ export function registerOperationHandlers(
     }
 
     const args = ['run', '--config', ocrTemp.file, '--allow-parse-failures'];
-    if (raw.force === true) args.push('--force');
+    appendOcrCliFlags(args, raw);
     if (concurrency > 1) {
       args.push('--concurrency', String(concurrency));
     } else {
@@ -571,7 +581,7 @@ export function registerOperationHandlers(
       });
     const historyWarning = recordHistory(
       'ocr',
-      raw.force === true ? '开始识别文件' : '识别文件',
+      ocrHistoryTitle(raw),
       startedAt,
       result,
       statusWithParseFails,
@@ -855,29 +865,12 @@ export function registerOperationHandlers(
   handleTrusted('mfh:run-ocr', async (_event, payload: unknown) => {
     const raw = asObject(payload);
     const summary = appSummary();
+    const invalid = invalidOcrPayloadResponse(raw, { summary });
+    if (invalid) return invalid;
     const pendingTotal = pendingOcrWorkCount(summary);
     if (pendingTotal === 0) {
-      sendOperationProgress({
-        operation: 'ocr',
-        phase: '没有文件',
-        percent: 100,
-        total: 0,
-        processed: 0,
-        parsed: 0,
-        skipped: 0,
-        failed: 0,
-        code: 'ocr_no_work',
-        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
-        kind: 'warn',
-        done: true,
-      });
-      return {
-        ok: false,
-        code: 'ocr_no_work',
-        exitCode: 0,
-        message: '没有等待识别的文件，请先在「开始处理」中获取邮件和发票文件。',
-        summary,
-      };
+      sendOperationProgress(ocrNoWorkProgress());
+      return ocrNoWorkResponse(summary);
     }
 
     const gate = acquireOperation('ocr');

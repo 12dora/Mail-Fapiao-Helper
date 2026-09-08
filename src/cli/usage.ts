@@ -74,6 +74,7 @@ Commands:
 Options:
   --config <path>      Path to config.json        (default: ./config.json)
   --force              Re-parse rows already present in ocr.resultsCsv
+  --retry-failed       仅重试结果为失败的文件，保留已成功识别的结果
   --single-item        Parse files one by one for visible progress and checkpoint resume
   --concurrency <n>    Parse up to N files in parallel
   --allow-parse-failures
