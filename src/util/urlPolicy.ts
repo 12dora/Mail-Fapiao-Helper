@@ -143,8 +143,7 @@ export async function resolvePublicUrl(urlStr: string): Promise<PublicUrlResolut
     if (isBlockedIp(host)) throw new Error(`blocked_url:private_ip:${host}`);
     return { url, addresses: [host] };
   }
-  let addrs: { address: string; family: number }[];
-  addrs = await lookupAddresses(host);
+  const addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
   return { url, addresses: await screenResolvedAddresses(host, addrs.map((a) => a.address)) };
 }
@@ -183,8 +182,7 @@ export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolu
     if (isBlockedIp(host)) throw new Error(`blocked_url:private_ip:${host}`);
     return { url, addresses: [host] };
   }
-  let addrs: { address: string; family: number }[];
-  addrs = await lookupAddresses(host);
+  const addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
 
   if (isLoopbackHost(host)) {
@@ -241,8 +239,7 @@ export async function resolveLoopbackServiceUrl(urlStr: string): Promise<PublicU
   if (!isLoopbackHost(host)) {
     throw new Error(`blocked_url:redirect_policy:loopback_only:${host}`);
   }
-  let addrs: { address: string; family: number }[];
-  addrs = await lookupAddresses(host);
+  const addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
   const loopbackAddrs: string[] = [];
   for (const a of addrs) {
