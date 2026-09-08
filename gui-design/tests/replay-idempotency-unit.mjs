@@ -21,6 +21,13 @@ await withTempDir('mfh-replay-select-', async (dir) => {
   const none = selectPendingReplayPaths(emls, path.join(dir, 'absent.csv'));
   assert.deepEqual(none.paths, []);
   assert.equal(none.stale, 3);
+  assert.equal(none.legacy, false);
+  // 旧版 pending.csv 没有 mailHash 列：退回重放全部副本，而不是一封都不跑。
+  const legacyCsv = path.join(dir, 'legacy.csv');
+  fs.writeFileSync(legacyCsv, 'messageId,date,from,subject,reason\n<a>,d,f,s,r\n');
+  const legacy = selectPendingReplayPaths(emls, legacyCsv);
+  assert.deepEqual(legacy.paths, emls);
+  assert.equal(legacy.legacy, true);
 });
 
 // 2. 同一 http 来源重新下载、字节变了：复用既有归档，不再多归档一份；附件来源不受影响。
@@ -31,7 +38,7 @@ await withTempDir('mfh-replay-reuse-', async (dir) => {
   fs.writeFileSync(path.join(invoices, '0001.pdf'), first);
   const attach = Buffer.from('%PDF-1.4 attach');
   fs.writeFileSync(path.join(invoices, '0002.pdf'), attach);
-  const url = 'https://dppt.shanghai.chinatax.gov.cn:8443/kpfw/fpjfzz/v1/exportDzfpwjEwm?Wjgs=PDF&Fphm=1';
+  const url = 'https://dppt.shanghai.chinatax.gov.cn:8443/kpfw/fpjfzz/v1/exportDzfpwjEwm?Wjgs=PDF&Fphm=26312000001432309111';
   const ledger = path.join(dir, 'invoices.csv');
   fs.writeFileSync(ledger, [
     '\uFEFFmessageId,date,from,subject,filename,source,contentHash,mailHash',
@@ -63,6 +70,18 @@ await withTempDir('mfh-replay-reuse-', async (dir) => {
   assert.equal(byIndex.get(1).reused, false);
   assert.equal(fs.readFileSync(path.join(invoices, '0001.pdf')).toString(), first.toString(), '既有文件不被覆盖');
   batch.dispose();
+
+  // 链接里没有发票号：同来源换了字节就当新文档，不复用。
+  const anon = 'https://files.example.com/download?id=abc';
+  fs.writeFileSync(path.join(invoices, '0004.pdf'), Buffer.from('%PDF-1.4 anon-v1'));
+  fs.appendFileSync(ledger, `<m1>,d,f,s,0004.pdf,${anon},${contentHash(Buffer.from('%PDF-1.4 anon-v1'))},h1\n`);
+  const index2 = readArchivedIndex(ledger, '<m1>', invoices);
+  const batch2 = stageDocuments([{ data: Buffer.from('%PDF-1.4 anon-v2'), source: anon, format: 'pdf' }], 'h1', invoices, silent, {
+    alreadyArchived: index2.byContentHash,
+    alreadyArchivedBySource: index2.bySource,
+  });
+  assert.equal(batch2.pending, 1, '没有发票号的链接换了内容要重新归档');
+  batch2.dispose();
 });
 
 console.log('replay-idempotency-unit: passed');

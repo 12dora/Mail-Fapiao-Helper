@@ -285,6 +285,7 @@ export async function runWorkers(context: RunContext): Promise<void> {
       join(context.pendingDir, 'pending.csv'),
     );
     emlPaths = selection.paths;
+    if (selection.legacy) log.warn('Pending retry: pending.csv has no mailHash column; replaying every queue copy');
     if (selection.stale > 0) log.info(`Pending retry: skipped ${selection.stale} already-resolved queue copies`);
     if (selection.missing > 0) log.warn(`Pending retry: ${selection.missing} pending row(s) have no .eml copy in the queue directory`);
   } else if (context.opts.onlyMail !== undefined && isMailHash(context.opts.onlyMail)) {

@@ -9,6 +9,8 @@ export interface PendingReplaySelection {
   stale: number;
   /** pending.csv 里有、但 `.eml` 副本缺失的行数。 */
   missing: number;
+  /** 旧版 pending.csv 没有 mailHash 列：无法对应副本，退回重放全部副本。 */
+  legacy: boolean;
 }
 
 /**
@@ -20,11 +22,16 @@ export interface PendingReplaySelection {
  */
 export function selectPendingReplayPaths(emlPaths: string[], pendingCsvPath: string): PendingReplaySelection {
   const listed = new Set<string>();
+  let dataRows = 0;
   if (existsSync(pendingCsvPath)) {
     for (const row of readCsvRows(pendingCsvPath)) {
+      dataRows++;
       const hash = (row.mailHash ?? '').trim().toLowerCase();
       if (hash) listed.add(hash);
     }
+  }
+  if (dataRows > 0 && listed.size === 0) {
+    return { paths: [...emlPaths], stale: 0, missing: 0, legacy: true };
   }
   const paths: string[] = [];
   const present = new Set<string>();
@@ -38,5 +45,6 @@ export function selectPendingReplayPaths(emlPaths: string[], pendingCsvPath: str
     paths,
     stale: emlPaths.length - paths.length,
     missing: listed.size - present.size,
+    legacy: false,
   };
 }

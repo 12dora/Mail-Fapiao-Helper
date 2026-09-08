@@ -374,10 +374,21 @@ function runSourceDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport
   const rawRows = readCsvRows(path.resolve(cwd, cfg.output.csv));
   if (rawRows.length === 0) return report;
   const actionable = new Map<string, { item: LedgerRow; file: string }>();
-  for (const members of httpSourceGroups(rawRows.map(toLedgerRow)).values()) {
+  const ledgerRows = rawRows.map(toLedgerRow);
+  // 同一文件可能被多行引用（同邮件两个来源字节相同时复用同一份归档）：只隔离
+  // 「除本行外没人引用」的文件，否则会顺手删掉别的来源唯一的一份。
+  const references = new Map<string, number>();
+  for (const item of ledgerRows) references.set(item.filename, (references.get(item.filename) ?? 0) + 1);
+  for (const members of httpSourceGroups(ledgerRows).values()) {
     if (members.length < 2) continue;
     members.sort(compareArchiveOrder);
-    const keeper = members[0]!;
+    // keeper 必须先验明正身：最早那份缺失或损坏时，留下一份能用的，而不是把好的删掉。
+    const keeperIndex = members.findIndex((item) => fileMatchesRow(invoicesDir, item).ok);
+    if (keeperIndex < 0) {
+      for (const item of members) report.skipped.push({ filename: item.filename, reason: 'no verified keeper in group' });
+      continue;
+    }
+    const keeper = members[keeperIndex]!;
     const group: DedupeReport['groups'][number] = {
       invoiceNo: '',
       messageId: keeper.messageId,
@@ -388,9 +399,14 @@ function runSourceDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport
       conflictReason: '',
     };
     report.groups.push(group);
-    for (const item of members.slice(1)) {
+    for (const item of members) {
+      if (item === keeper) continue;
       if (item.filename === keeper.filename) {
         report.skipped.push({ filename: item.filename, reason: 'same filename as keeper' });
+        continue;
+      }
+      if ((references.get(item.filename) ?? 0) > 1) {
+        report.skipped.push({ filename: item.filename, reason: 'file referenced by another ledger row' });
         continue;
       }
       const check = fileMatchesRow(invoicesDir, item);
