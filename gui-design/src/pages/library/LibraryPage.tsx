@@ -103,12 +103,16 @@ export function LibraryPage(): JSX.Element {
     let invoices = 0;
     let incomplete = 0;
     let duplicated = 0;
+    let failed = 0;
     for (const row of rows) {
-      if (!isSupportingDocument(row)) invoices++;
+      const supporting = isSupportingDocument(row);
+      if (!supporting) invoices++;
       if (row.status === '信息不完整') incomplete++;
       if (row.duplicateCount > 1) duplicated++;
+      // 与「识别失败」筛选项同一个口径：附属材料本来就不该识别出发票信息。
+      if (row.status === '识别失败' && !supporting) failed++;
     }
-    return { invoices, incomplete, duplicated };
+    return { invoices, incomplete, duplicated, failed };
   }, [rows]);
 
   const empty = !loading && rows.length === 0;
@@ -122,7 +126,9 @@ export function LibraryPage(): JSX.Element {
             ? `发票 ${counts.invoices} · 待补充 ${counts.incomplete} · 重复 ${counts.duplicated}`
             : '正在读取本机数据'
         }
-        actions={<LibraryActions visible={visible} onDedupe={() => setDedupeOpen(true)} />}
+        actions={
+          <LibraryActions visible={visible} failed={counts.failed} onDedupe={() => setDedupeOpen(true)} />
+        }
       />
 
       <div className="mfh-scroll" style={empty ? { alignItems: 'center', justifyContent: 'center' } : undefined}>

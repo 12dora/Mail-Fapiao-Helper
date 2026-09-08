@@ -1,8 +1,11 @@
 /**
  * 发票库页头的操作区。
  *
- * 会写盘的三个动作（识别、整理、清理重复）在有任务运行时一律置灰——长任务在主
- * 进程是互斥的，抢跑只会拿到一条失败回执。
+ * 会写盘的动作（识别、仅重试失败项、整理、清理重复）在有任务运行时一律置灰——
+ * 长任务在主进程是互斥的，抢跑只会拿到一条失败回执。
+ *
+ * 「仅重试失败项」只在有识别失败的发票时出现：它只重跑失败的那些行，已经识别
+ * 好的结果不动，所以和会清空全部结果的重新识别不是一回事。
  *
  * 「导出 CSV」走系统保存框落盘；主进程没有这个通道时退回复制到剪贴板。
  */
@@ -10,30 +13,45 @@ import { FolderOpenOutlined } from '@ant-design/icons';
 import { Button, Popconfirm, Space } from 'antd';
 import { useState } from 'react';
 import { bridge, primeSummary, reloadSummary } from '../../bridge/index.js';
-import type { InvoiceRow } from '../../bridge/index.js';
+import type { InvoiceRow, TerminalResult } from '../../bridge/index.js';
 import { notify, notifyResult, useBusy } from '../../components/index.js';
 import { rowsToCsv } from './csv.js';
+
+type WriteAction = 'ocr' | 'retry' | 'organize';
+
+/** 每个写盘动作的调用方式和提示文案放在一起，改一处不会漏另一处。 */
+const WRITE_ACTIONS: Record<
+  WriteAction,
+  { call: () => Promise<TerminalResult>; copy: { success: string; failure: string } }
+> = {
+  ocr: { call: () => bridge.runOcr({}), copy: { success: '识别完成', failure: '识别未完成' } },
+  retry: {
+    call: () => bridge.runOcr({ retryFailed: true }),
+    copy: { success: '重试完成', failure: '重试未完成' },
+  },
+  organize: {
+    call: () => bridge.organize({ applyRename: false }),
+    copy: { success: '已整理归档文件', failure: '整理未完成' },
+  },
+};
 
 export interface LibraryActionsProps {
   /** 当前列表里可见的行，导出 CSV 用。 */
   visible: readonly InvoiceRow[];
+  /** 识别失败的发票数（不含附属材料）；大于 0 才给「仅重试失败项」。 */
+  failed: number;
   onDedupe: () => void;
 }
 
-export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.Element {
+export function LibraryActions({ visible, failed, onDedupe }: LibraryActionsProps): JSX.Element {
   const { busy } = useBusy();
-  const [action, setAction] = useState<'' | 'ocr' | 'organize' | 'export'>('');
+  const [action, setAction] = useState<'' | WriteAction | 'export'>('');
 
-  async function run(kind: 'ocr' | 'organize'): Promise<void> {
+  async function run(kind: WriteAction): Promise<void> {
     setAction(kind);
     try {
-      const result = kind === 'ocr' ? await bridge.runOcr({}) : await bridge.organize({ applyRename: false });
-      notifyResult(
-        result,
-        kind === 'ocr'
-          ? { success: '识别完成', failure: '识别未完成' }
-          : { success: '已整理归档文件', failure: '整理未完成' },
-      );
+      const result = await WRITE_ACTIONS[kind].call();
+      notifyResult(result, WRITE_ACTIONS[kind].copy);
       primeSummary(result.summary);
       await reloadSummary();
     } finally {
@@ -101,6 +119,11 @@ export function LibraryActions({ visible, onDedupe }: LibraryActionsProps): JSX.
           整理文件
         </Button>
       </Popconfirm>
+      {failed > 0 && (
+        <Button size="small" disabled={busy} loading={action === 'retry'} onClick={() => void run('retry')}>
+          仅重试失败项
+        </Button>
+      )}
       <Button
         size="small"
         type="primary"

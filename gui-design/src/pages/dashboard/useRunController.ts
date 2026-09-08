@@ -8,7 +8,7 @@
 import { type Dayjs } from 'dayjs';
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { bridge, primeSummary, reloadSummary, useProgress } from '../../bridge/index.js';
-import type { BatchRow, LogLine, RunningOp } from '../../bridge/index.js';
+import type { BatchRow, LogLine, RunningOp, TerminalResult } from '../../bridge/index.js';
 import { notify, notifyResult, useBusy } from '../../components/index.js';
 import { appendRunNote, getRunState, patchRun, subscribeRun, type RangePreset } from '../../store/run.js';
 
@@ -25,6 +25,18 @@ const PHASE_TEXT: Record<string, string> = {
   recognize: '识别发票',
   done: '已完成',
 };
+
+/** 识别没跑完时，除了后端给的原因，还要指一条路：失败项能单独重跑。 */
+const RETRY_HINT = '失败的文件可以在发票库里单独重试。';
+
+function notifyOcrResult(files: TerminalResult, ocr: TerminalResult): void {
+  if (ocr.ok) {
+    notifyResult(files, { success: '处理完成', failure: '识别未完成' });
+    return;
+  }
+  const reason = ocr.detail?.trim() || ocr.error?.trim() || '';
+  notify.error(ocr.message?.trim() || '识别未完成', reason ? `${reason} ${RETRY_HINT}` : RETRY_HINT);
+}
 
 export interface RunController {
   preset: RangePreset;
@@ -83,7 +95,7 @@ async function runOnce(): Promise<void> {
   const ocr = await bridge.runOcr({});
   primeSummary(ocr.summary);
   if (ocr.code === 'ocr_no_work') appendRunNote('没有待识别的文件');
-  notifyResult(ocr.ok ? files : ocr, { success: '处理完成', failure: '识别未完成' });
+  notifyOcrResult(files, ocr);
 }
 
 async function start(): Promise<void> {

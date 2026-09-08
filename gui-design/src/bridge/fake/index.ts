@@ -19,6 +19,7 @@ import type {
   ListMailboxesResult,
   MailDetailResult,
   MfhBridge,
+  OcrFailureReason,
   OpenMailResult,
   OpenResult,
   OperationProgress,
@@ -28,6 +29,7 @@ import type {
   PendingManualArchiveResult,
   PickDirectoryResult,
   RunningOp,
+  RunOcrPayload,
   SaveConfigResult,
   StartFetchPayload,
   TerminalResult,
@@ -40,6 +42,7 @@ import {
   CONFLICT_PAIR,
   dataset,
   DUPLICATE_PAIRS,
+  retryFailedRows,
   UNREADABLE_INDEX,
   type FakeVariant,
 } from './data.js';
@@ -130,6 +133,20 @@ function createEvents(): Events {
 
 type RunMethods = Pick<MfhBridge, 'startFetch' | 'runPipeline' | 'runOcr' | 'stopOcr' | 'organize'>;
 
+/** 当前还失败着的行，按份数降序取前 3 条——形状与主进程收尾事件里的一致。 */
+function failureReasons(variant: FakeVariant): OcrFailureReason[] {
+  const counts = new Map<string, number>();
+  for (const row of dataset(variant).library) {
+    if (row.status !== '识别失败') continue;
+    const reason = row.error || '识别失败';
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3);
+}
+
 function runMethods(variant: FakeVariant, events: Events): RunMethods {
   const summary = () => buildSummary(variant);
   return {
@@ -171,13 +188,30 @@ function runMethods(variant: FakeVariant, events: Events): RunMethods {
       };
     },
 
-    async runOcr(): Promise<TerminalResult> {
-      await events.simulate('ocr', ocrFrames(), (f) => events.op?.(f));
+    async runOcr(payload: RunOcrPayload = {}): Promise<TerminalResult> {
+      // 契约上两者互斥：全量重跑会把成功的结果一并清掉，不能和只重试失败项同时来。
+      if (payload.retryFailed && payload.force) {
+        return { ok: false, code: 'ocr_conflicting_options', message: '重跑全部与只重试失败项不能同时进行。' };
+      }
+      // 失败原因要在翻面之前数：重试成功之后就没有失败行可数了。
+      const reasons = failureReasons(variant);
+      const frames = ocrFrames({ retryFailed: payload.retryFailed, failureReasons: reasons });
+      await events.simulate('ocr', frames, (f) => events.op?.(f));
+      if (!payload.retryFailed) {
+        return {
+          ok: true,
+          status: 'partial',
+          started: true,
+          message: '识别 12 份，3 份信息不完整。',
+          summary: summary(),
+        };
+      }
+      const fixed = retryFailedRows(variant);
       return {
         ok: true,
-        status: 'partial',
+        status: 'success',
         started: true,
-        message: '识别 12 份，3 份信息不完整。',
+        message: fixed > 0 ? `已重试 ${fixed} 份，全部识别成功。` : '没有需要重试的文件。',
         summary: summary(),
       };
     },
