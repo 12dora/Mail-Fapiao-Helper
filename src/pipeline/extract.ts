@@ -121,7 +121,13 @@ export async function runExtractors(mail: ParsedMail, ctx: Ctx, hash: string): P
     }
     if (result.kind === 'manual') {
       const safeReason = sanitizePendingReason(result.reason);
-      issues.push({ reason: safeReason, retryable: safeReason.includes('network_retry_failed') });
+      // 保留首条 issue 自带的元数据（发票号等）：pipeline 要靠它判断票是否其实已归档。
+      const detail = result.issues?.find((issue) => issue.reason === result.reason);
+      issues.push({
+        ...detail,
+        reason: safeReason,
+        retryable: detail?.retryable === true || safeReason.includes('network_retry_failed'),
+      });
       continue;
     }
 

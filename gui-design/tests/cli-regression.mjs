@@ -1724,15 +1724,22 @@ async function testIncidentalLinkFailuresDoNotHoldArchivedMailInQueue() {
     const withLandingPage = pdfMail('<incidental-landing@example.com>', '电子发票（含平台首页）')
       .replace('发票见附件。', '发票见附件。\nhttp://127.0.0.1:9/index_email.html');
 
+    // 真实案例：附件已归档发票号 N，正文还有税务局交付页 /v/…N… 打不通（511）。
+    // 失败目标带的发票号已在本封产出里，只是同一张票的另一个入口，不得进待确认。
+    const withCoveredLink = pdfMail('<incidental-covered@example.com>', '电子发票（含交付页）')
+      .replaceAll('invoice.pdf', 'dzfp_26312000001432309111_test.pdf')
+      .replace('发票见附件。', '发票见附件。\nhttp://127.0.0.1:9/invoice/view/2_26312000001432309111_2026');
+
     await writeFile(join(tmp, 'raw', 'noise.eml'), withNoiseLinks);
     await writeFile(join(tmp, 'raw', 'real.eml'), withInvoiceLink);
     await writeFile(join(tmp, 'raw', 'landing.eml'), withLandingPage);
+    await writeFile(join(tmp, 'raw', 'covered.eml'), withCoveredLink);
 
     await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'])
       .catch((err) => err); // 对照组会以非 0 退出（仍有待确认），退出码不是本用例的断言点
 
     const ledger = await readFile(cfg.output.csv, 'utf8');
-    for (const id of ['<incidental-noise@example.com>', '<incidental-real@example.com>', '<incidental-landing@example.com>']) {
+    for (const id of ['<incidental-noise@example.com>', '<incidental-real@example.com>', '<incidental-landing@example.com>', '<incidental-covered@example.com>']) {
       if (!ledger.includes(id)) fail(`attachment invoice for ${id} must be archived regardless of link failures`);
     }
 
@@ -1743,6 +1750,9 @@ async function testIncidentalLinkFailuresDoNotHoldArchivedMailInQueue() {
     }
     if (pendingText.includes('incidental-landing@example.com')) {
       fail('a platform landing page that fails to probe must not hold an archived mail in the pending queue');
+    }
+    if (pendingText.includes('incidental-covered@example.com')) {
+      fail('a failing link whose invoice number is already archived from the same mail must not stay in the pending queue');
     }
     if (!pendingText.includes('incidental-real@example.com')) {
       fail('a failing link that does look like an invoice entry must still leave a pending record');

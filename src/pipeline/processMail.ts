@@ -6,7 +6,8 @@ import type { Logger } from '../log.js';
 import type { State } from '../state.js';
 import { resolveMailIdentity } from '../util/hash.js';
 import { testFaultEnabled } from '../util/testFaults.js';
-import type { Ctx } from '../extract/types.js';
+import type { Ctx, ExtractIssue } from '../extract/types.js';
+import { invoiceNumbersIn } from '../extract/assetEvidence.js';
 import { classifyDocument, supportingOnlyReason, supportingReason } from '../extract/classify.js';
 import { stageDocuments } from '../download/downloader.js';
 import {
@@ -371,14 +372,29 @@ function dropIncidentalIssues(
   hash: string,
 ): AggregatedExtraction {
   if (extraction.artifacts.length === 0) return extraction;
-  const kept = extraction.issues.filter((issue) => issue.incidental !== true);
+  // 失败目标里带的发票号如果已经在本封邮件的产出里，这条失败只是同一张票的另一个
+  // 入口（税务局交付页、平台查看页），票并没有少。
+  const archivedNumbers = new Set(
+    extraction.artifacts.flatMap((artifact) => invoiceNumbersIn(`${artifact.source} ${artifact.suggestedName ?? ''}`)),
+  );
+  const coveredByArchived = (issue: ExtractIssue): boolean => {
+    const numbers = issue.invoiceNumbers ?? invoiceNumbersIn(issue.reason);
+    return numbers.length > 0 && numbers.every((no) => archivedNumbers.has(no));
+  };
+  const kept: ExtractIssue[] = [];
+  for (const issue of extraction.issues) {
+    if (issue.incidental === true) {
+      // 被丢掉的是什么必须留痕：判错一次就是一张票无声消失，而现场只剩一个计数。
+      log.debug(`  incidental issue for ${hash}: ${issue.reason}`);
+    } else if (coveredByArchived(issue)) {
+      log.debug(`  issue covered by archived invoice for ${hash}: ${issue.reason}`);
+    } else {
+      kept.push(issue);
+    }
+  }
   const dropped = extraction.issues.length - kept.length;
   if (dropped === 0) return extraction;
   log.info(`Ignored ${dropped} incidental issue(s) for ${hash}: invoices archived, failures were on non-invoice targets`);
-  // 被丢掉的是什么必须留痕：判错一次就是一张票无声消失，而现场只剩一个计数。
-  for (const issue of extraction.issues) {
-    if (issue.incidental === true) log.debug(`  incidental issue for ${hash}: ${issue.reason}`);
-  }
   return { ...extraction, issues: kept };
 }
 

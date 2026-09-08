@@ -2,7 +2,13 @@ import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { extractMailUrls } from './mailLinks.js';
-import { linkedImageHasInvoiceEvidence, looksLikeEmailChrome, probeFailureCouldBeInvoice } from './assetEvidence.js';
+import {
+  invoiceNumbersIn,
+  isProbeNoise,
+  linkedImageHasInvoiceEvidence,
+  looksLikeEmailChrome,
+  probeFailureCouldBeInvoice,
+} from './assetEvidence.js';
 import { handlers } from '../sites/registry.js';
 import { preferPdfOverDuplicateOfd } from './documentIdentity.js';
 import {
@@ -93,14 +99,6 @@ function isKnownPdfCandidate(url: string): boolean {
   return false;
 }
 
-function isProbeNoise(url: string): boolean {
-  try {
-    return new URL(url).hostname.toLowerCase() === 'inv-veri.chinatax.gov.cn';
-  } catch {
-    return true;
-  }
-}
-
 /** 发票语义信号：用于探测排序，优先检查更像发票的链接（EXT-02）。 */
 function invoiceProbeScore(url: string): number {
   let score = 0;
@@ -122,6 +120,12 @@ function invoiceProbeScore(url: string): number {
     return 0;
   }
   return score;
+}
+
+/** 失败目标里的发票号随 issue 一起上报，供 pipeline 判断「票是否其实已归档」。 */
+function withInvoiceNumbers(url: string): { invoiceNumbers?: string[] } {
+  const invoiceNumbers = invoiceNumbersIn(url);
+  return invoiceNumbers.length > 0 ? { invoiceNumbers } : {};
 }
 
 /** 取 URL 的路径部分用于物料判定；解析不了就退回原串。 */
@@ -490,6 +494,7 @@ async function probeCandidates(
         reason: `directLink:probe_failed:${msg}`,
         retryable: true,
         incidental,
+        ...withInvoiceNumbers(link),
       });
       ctx.log.warn(`PDF probe failed after retries for ${safeUrl}: ${msg}`);
       return null;
@@ -534,7 +539,7 @@ async function downloadCandidates(
     } catch (err) {
       const msg = redactErrorDetail(err instanceof Error ? err.message : String(err));
       networkFailures.push(msg);
-      issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true });
+      issues.push({ reason: `directLink:download_failed:${msg}`, retryable: true, ...withInvoiceNumbers(url) });
       ctx.log.warn(`PDF download failed after retries for ${safeUrl}: ${msg}`);
       continue;
     }
@@ -544,7 +549,7 @@ async function downloadCandidates(
       // 「下载 OFD 阅读器」`…/public/ofd_read.zip` 就这样混进来，而且长期 404
       // ——它不是票，不该把整封邮件按缺票挂进待确认（EXT-15）。
       const chrome = looksLikeEmailChrome(safePathOf(url));
-      issues.push({ reason: `directLink:download_rejected:${outcome.rejected}`, incidental: chrome });
+      issues.push({ reason: `directLink:download_rejected:${outcome.rejected}`, incidental: chrome, ...withInvoiceNumbers(url) });
       ctx.log.warn(`Failed to download ${safeUrl}: ${outcome.rejected}`);
       continue;
     }
@@ -589,7 +594,7 @@ function buildExtractResult(
     if (unprobedLinks.length === 0 && issues.length > 0 && issues.every((issue) => issue.incidental === true)) {
       return { kind: 'not_applicable', reason: issues[0]?.reason ?? 'directLink:no_pdf_links' };
     }
-    return { kind: 'manual', reason: issues[0]?.reason ?? 'directLink:download_failed' };
+    return { kind: 'manual', reason: issues[0]?.reason ?? 'directLink:download_failed', issues };
   }
 
   // incidental issue 的过滤统一由 pipeline 的 dropIncidentalIssues() 负责：
@@ -638,7 +643,7 @@ const directLinkExtractor: Extractor = {
       if (classified.unprobedLinks.length > 0 || invoiceProbeFailures.length > 0) {
         const first = issues[0]?.reason
           ?? (probeFailures[0] ? `directLink:probe_unavailable:${probeFailures[0]}` : 'directLink:probe_budget_exceeded');
-        return { kind: 'manual', reason: first };
+        return { kind: 'manual', reason: first, issues };
       }
       // EXT-13：只有追踪像素 / 旺旺挂件 / 邮箱首页这类链接探测失败时，directLink
       // 依旧是「与本邮件无关」——附件里那张票不该因为它们被压进待确认。

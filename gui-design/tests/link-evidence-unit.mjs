@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { probeFailureCouldBeInvoice } from '../../dist/extract/assetEvidence.js';
+import { invoiceNumbersIn, isProbeNoise, probeFailureCouldBeInvoice } from '../../dist/extract/assetEvidence.js';
 
 // EXT-13 补充：弱语义词只看路径/查询串，站点首页与邮件落地页一律不算发票入口。
 const notInvoice = [
@@ -25,4 +25,21 @@ const couldBeInvoice = [
 ];
 for (const url of notInvoice) assert.equal(probeFailureCouldBeInvoice(url), false, `should be incidental: ${url}`);
 for (const url of couldBeInvoice) assert.equal(probeFailureCouldBeInvoice(url), true, `should count as invoice entry: ${url}`);
+
+// 税务局查验 / 数电票交付页从来不是直接下载，探测都不必做。
+for (const url of [
+  'https://inv-veri.chinatax.gov.cn/',
+  'https://dppt.shanghai.chinatax.gov.cn:8443/v/2_26312000001432309111_202603092029050078C17E',
+  'not a url',
+]) assert.equal(isProbeNoise(url), true, `should be probe noise: ${url}`);
+for (const url of [
+  'https://etd.kpbyd.com/hub/files/download?code=abc',
+  'https://chinatax.example.com/x.pdf',
+]) assert.equal(isProbeNoise(url), false, `should be probed: ${url}`);
+
+assert.deepEqual(invoiceNumbersIn('directLink:probe_failed:HEAD:https://dppt.shanghai.chinatax.gov.cn:8443/v/2_26312000001432309111_2026:http_511'), ['26312000001432309111']);
+assert.deepEqual(invoiceNumbersIn('dzfp_26952000003588694681_%E6%B5%99%E6%B1%9F_20260824.pdf'), ['26952000003588694681']);
+assert.deepEqual(invoiceNumbersIn('/v/2_26312000001432309111_26312000001432309111'), ['26312000001432309111']);
+assert.deepEqual(invoiceNumbersIn('123456789012345678901'), []);
+assert.deepEqual(invoiceNumbersIn(undefined), []);
 console.log('link-evidence-unit: passed');
