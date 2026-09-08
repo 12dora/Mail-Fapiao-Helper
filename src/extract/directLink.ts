@@ -2,7 +2,7 @@ import type { ParsedMail } from 'mailparser';
 import { createHash } from 'node:crypto';
 import type { Ctx, ExtractIssue, Extractor, ExtractResult, PdfArtifact } from './types.js';
 import { extractMailUrls } from './mailLinks.js';
-import { linkedImageHasInvoiceEvidence, looksLikeEmailChrome } from './assetEvidence.js';
+import { linkedImageHasInvoiceEvidence, looksLikeEmailChrome, probeFailureCouldBeInvoice } from './assetEvidence.js';
 import { handlers } from '../sites/registry.js';
 import { preferPdfOverDuplicateOfd } from './documentIdentity.js';
 import {
@@ -122,31 +122,6 @@ function invoiceProbeScore(url: string): number {
     return 0;
   }
   return score;
-}
-
-/**
- * 探测失败的这条链接，*有没有可能*真的是发票入口？（EXT-13）
- *
- * 只在「同一封邮件已经归档到票」时用于决定是否还要留待确认记录。判据刻意与
- * `invoiceProbeScore` 分开：排序分给「带 id/token 参数」加 25 分，而追踪像素
- * （`s23.cnzz.com/z_stat.php?id=…`）、旺旺挂件（`amos.alicdn.com/msg.aw`）
- * 恰好也带这类参数——拿排序分当发票证据会把整封邮件永远钉在待确认里。
- *
- * 这里只认真正的发票语义：发票相关词、文档后缀、下载/票据类路径。host 也参与
- * 匹配，`ticket.download.<vendor>.com` 这种确实可能是发票入口，宁可留下记录。
- */
-function probeFailureCouldBeInvoice(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const target = `${parsed.hostname}${parsed.pathname}`.toLowerCase();
-    if (/(invoice|fapiao|fpjf|einvoice|dzfp|kpfw|vat|发票|行程单|itinerary|e-?ticket)/i.test(target)) return true;
-    if (/\.(pdf|ofd|zip)$/i.test(parsed.pathname)) return true;
-    if (/(download|export|bill|receipt|ticket|reimburse)/i.test(target)) return true;
-    return false;
-  } catch {
-    // 解析不了的 URL 本来也进不了候选：当作与发票无关。
-    return false;
-  }
 }
 
 /** 取 URL 的路径部分用于物料判定；解析不了就退回原串。 */

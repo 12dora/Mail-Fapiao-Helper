@@ -64,6 +64,38 @@ export function looksLikeEmailChrome(text: string | undefined): boolean {
   return NON_DOCUMENT_ASSET.test(text);
 }
 
+/** 弱语义词：只在路径 / 查询串里算数。`ticket.download.<平台>` 这种 host 只说明是谁家的域名。 */
+const INVOICE_ENTRY_HINT = /(download|export|bill|receipt|ticket|reimburse)/i;
+/** 站点首页 / 邮件落地页：`/`、`/index_email.html`、`/home.php` 之类，不管域名叫什么都不是票的入口。 */
+const LANDING_PAGE = /^\/?$|^\/(?:index|home|main|default|e?mail|landing)(?:[_-][a-z0-9]+)*\.(?:html?|php|aspx?|jsp)$/i;
+
+/**
+ * 探测失败的这条链接，*有没有可能*真的是发票入口？（EXT-13）
+ *
+ * 只在「同一封邮件已经归档到票」时用于决定是否还要留待确认记录，所以宁可放过。
+ * 判据刻意与探测排序分分开：排序分给「带 id/token 参数」加分，而追踪像素、旺旺挂件
+ * 恰好也带这类参数——拿排序分当发票证据会把整封邮件永远钉在待确认里。
+ * 弱语义词同样**不看 host**：`ticket.download.xiaowangtech.com/index_email.html` 是开票
+ * 平台放在邮件页脚的首页链接，票早已从附件归档，它打不通不该把整封邮件压进待确认。
+ */
+export function probeFailureCouldBeInvoice(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // 解析不了的 URL 本来也进不了候选：当作与发票无关。
+    return false;
+  }
+  const { hostname, pathname, search } = parsed;
+  const target = `${pathname}${search}`;
+  if (looksLikeEmailChrome(pathname)) return false;
+  if (INVOICE_NO.test(target)) return true;
+  if (/\.(pdf|ofd|zip)$/i.test(pathname)) return true;
+  if (LANDING_PAGE.test(pathname)) return false;
+  if (INVOICE_WORD.test(`${hostname}${target}`) || /\bvat\b/i.test(target)) return true;
+  return INVOICE_ENTRY_HINT.test(target);
+}
+
 /**
  * 直链图片是否有「真是发票」的独立证据。
  *
