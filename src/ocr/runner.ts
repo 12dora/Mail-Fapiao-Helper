@@ -5,9 +5,9 @@ import type { Config } from '../config.js';
 import type { DocumentFormat, DocumentType } from '../extract/types.js';
 import type { Logger } from '../log.js';
 import { getOcrProvider } from './registry.js';
-import { OCR_CSV_HEADER } from '../pipeline/csvDurability.js';
+import { OCR_CSV_HEADER, withCsvRetry } from '../pipeline/csvDurability.js';
 import type { OcrProvider, OcrResult } from './types.js';
-import { csvCell, parseCsv, readCsvRows } from '../util/csv.js';
+import { csvCell, parseCsv, readCsvRows, rewriteCsvRows } from '../util/csv.js';
 import { contentHash as hashBytes } from '../util/hash.js';
 import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
 
@@ -239,6 +239,22 @@ function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void
   fs.appendFileSync(csvPath, resultLine(row, result), 'utf8');
 }
 
+const RESULT_HEADER_LINE = RESULT_HEADER.join(',') + '\n';
+
+/**
+ * 原子重写 results CSV，丢掉全部 status=error 行，保留 header 与列序。
+ * 这样后续 readResultIndex 看不到失败身份，失败项会按普通 pending 再跑一遍。
+ */
+function dropErrorResultRows(csvPath: string): number {
+  const rows = readCsvRows(csvPath);
+  if (rows.length === 0) return 0;
+  const kept = rows.filter((row) => row.status !== 'error');
+  const dropped = rows.length - kept.length;
+  if (dropped === 0) return 0;
+  withCsvRetry(() => rewriteCsvRows(csvPath, RESULT_HEADER_LINE, kept));
+  return dropped;
+}
+
 /**
  * 校验归档字节是否仍与 pending 行记录的 contentHash 一致（APP-06B）。
  * 通过返回空字符串，否则返回 `content_hash_mismatch:...` 原因。
@@ -290,6 +306,7 @@ function applyOcrResult(
 
 interface OcrRunOptions {
   force?: boolean;
+  retryFailed?: boolean;
   singleItem?: boolean;
   concurrency?: number;
 }
@@ -461,7 +478,7 @@ async function processPendingRow(
 export async function runOcrPending(
   cfg: Config,
   log: Logger,
-  opts: { force?: boolean; singleItem?: boolean; concurrency?: number } = {},
+  opts: { force?: boolean; retryFailed?: boolean; singleItem?: boolean; concurrency?: number } = {},
 ): Promise<OcrRunSummary> {
   if (!cfg.ocr.enabled) {
     throw new Error('config.ocr.enabled=false; set it to true to run OCR');
@@ -471,6 +488,10 @@ export async function runOcrPending(
   const resultCsv = cfg.ocr.resultsCsv;
   // 整次 run 只迁移/准备 results CSV 一次，避免每个结果 O(N) 重读（OCR-13）。
   ensureResultCsvReady(resultCsv);
+  if (opts.retryFailed) {
+    const dropped = dropErrorResultRows(resultCsv);
+    log.info(`OCR retry-failed: dropped ${dropped} failed result rows`);
+  }
   const rows = supportingQueueRows(pendingCsv, resultCsv);
   const nextRows = rows.map((row) => ({ ...row }));
   const seenResults = opts.force ? new ArtifactIndex<ResultStatus>() : readResultIndex(resultCsv);
@@ -528,6 +549,12 @@ export async function runOcrPending(
     flushBatch,
     flushConcurrent,
   };
+
+  if (opts.retryFailed) {
+    for (const row of nextRows) {
+      if (row.status === 'failed') markRow(row, 'pending', 'retry_failed');
+    }
+  }
 
   for (let i = 0; i < nextRows.length; i++) {
     const row = nextRows[i];

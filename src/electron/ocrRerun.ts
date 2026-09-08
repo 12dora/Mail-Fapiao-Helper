@@ -238,21 +238,24 @@ function installPreparedState(
   pendingCsv: string,
   nextQueue: string | undefined,
   preparation: OcrRerunPreparation,
+  copyResults = false,
 ): InstallPreparedStateResult {
   const { stamp, resultsBackup, queueBackup, journalPath, journal } = preparation;
   let resultsMoved = false;
   let queueMoved = false;
 
   try {
-    // 先落 journal（空操作意图），再移动文件。
+    // 先落 journal（空操作意图），再移动或复制文件。
     writeOcrRerunJournal(journalPath, journal);
     if (fs.existsSync(resultsCsv)) {
-      fs.renameSync(resultsCsv, resultsBackup);
+      // retryFailed：复制备份，保留现有成功/部分结果，交给 CLI 丢掉 error 行。
+      if (copyResults) fs.copyFileSync(resultsCsv, resultsBackup);
+      else fs.renameSync(resultsCsv, resultsBackup);
       resultsMoved = true;
       journal.resultsMoved = true;
       writeOcrRerunJournal(journalPath, journal);
     }
-    if (nextQueue !== undefined && fs.existsSync(pendingCsv)) {
+    if (fs.existsSync(pendingCsv) && (nextQueue !== undefined || copyResults)) {
       fs.copyFileSync(pendingCsv, queueBackup);
       queueMoved = true;
       journal.queueMoved = true;
@@ -303,9 +306,10 @@ function installPreparedState(
  * 先准备并校验全部替代物，再把旧结果「移动到备份」（而不是直接删除），最后原子
  * 安装新队列。全程写 durable journal；任何一步失败都可以完整恢复（ELEC-03）。
  */
-function prepareOcrRerun(): PrepareRerunResult {
+function prepareOcrRerun(opts?: { preserveResults?: boolean }): PrepareRerunResult {
   const resultsCsv = ocrResultsCsvPath();
   const pendingCsv = ocrPendingCsvPath();
+  const preserveResults = opts?.preserveResults === true;
 
   // dataDir 之外的绝对 results 路径是**明确支持**的：改成「移动到同目录备份」，
   // 既不静默跳过，也不会真正删除任何用户文件（失败时还能原样恢复）。
@@ -320,12 +324,16 @@ function prepareOcrRerun(): PrepareRerunResult {
     };
   }
 
-  const queueResult = readAndTransformQueue(pendingCsv);
+  const queueResult = preserveResults
+    ? { ok: true as const, nextQueue: undefined }
+    : readAndTransformQueue(pendingCsv);
   if (!queueResult.ok) return queueResult;
 
   const preparation = createRerunJournal(resultsCsv, pendingCsv);
   const { resultsBackup, queueBackup, journalPath, journal } = preparation;
-  const installResult = installPreparedState(resultsCsv, pendingCsv, queueResult.nextQueue, preparation);
+  const installResult = installPreparedState(
+    resultsCsv, pendingCsv, queueResult.nextQueue, preparation, preserveResults,
+  );
   if (!installResult.ok) return installResult;
 
   let discarded = false;

@@ -16,6 +16,7 @@ import {
   parseRunCompleteCounts,
   sendFilePhase,
   sendOcrPhase,
+  createOcrProgressState,
   terminalGuard,
   terminalLineFailureMarkers,
   type FetchProgressState,
@@ -118,7 +119,7 @@ function createRunState(
   const emitOcr = terminalGuard(sendOperationProgress);
   const emitFiles = terminalGuard(sendFileProgress);
   const current: FetchProgressState = { seen: 0, saved: 0, skipped: 0, repaired: 0 };
-  const ocrCurrent: OcrProgressState = { total: opts.initialTotal ?? 0, parsed: 0, failed: 0, skipped: 0, processed: 0, initialized: false };
+  const ocrCurrent: OcrProgressState = createOcrProgressState(opts.initialTotal ?? 0);
   const fileCurrent: FileProgressState = {
     total: 0, processed: 0, archived: 0, pending: 0, skipped: 0, failed: 0, partial: 0,
   };

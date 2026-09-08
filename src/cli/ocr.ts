@@ -46,7 +46,12 @@ export async function cmdOcr(argv: string[]): Promise<number> {
     }
     assertArchiveTransactionsRecovered(resolve(cfg.paths.invoices));
     writeOcrRuntimePid(cfg);
-    const summary = await runOcrPending(cfg, log, { force: parsed.force, singleItem: parsed.singleItem, concurrency: parsed.concurrency });
+    const summary = await runOcrPending(cfg, log, {
+      force: parsed.force,
+      retryFailed: parsed.retryFailed,
+      singleItem: parsed.singleItem,
+      concurrency: parsed.concurrency,
+    });
     log.info(`OCR complete: scanned=${summary.scanned}, parsed=${summary.parsed}, skipped=${summary.skipped}, failed=${summary.failed}, updated=${summary.updated}`);
     if (summary.failed > 0 && !parsed.allowParseFailures) return 1;
     return 0;
