@@ -113,8 +113,39 @@ const RECOGNIZED_DOC_EXT = new Set([
   '.zip',
 ]);
 
+/** 文件夹里给人看的类型名：整理时 `{typeLabel}` 比 `{documentType}` 的英文更顺手。 */
+function typeLabelOf(row: OcrResultRow): string {
+  if (row.documentType === 'supporting') return '附属材料';
+  if (row.documentType === 'invoice' || row.documentType === '') return '发票';
+  return row.documentType;
+}
+
+const DOC_EXT = /\.(pdf|ofd|png|jpe?g|gif|webp|bmp)$/i;
+
+/**
+ * 原始文件名：附件 / 压缩包条目取 source 的最后一段（`通行费电子发票.zip/汇总单.pdf` → `汇总单.pdf`），
+ * 下载链接取 URL 末段（要像个文件名），否则退回归档文件名。附属材料没有 OCR 字段，
+ * 整理时靠它保留「通行费电子票据汇总单(票据).pdf」这类有意义的名字。
+ */
+function originalNameOf(row: OcrResultRow): string {
+  const source = row.source.trim();
+  if (/^https?:\/\//i.test(source)) {
+    try {
+      const last = decodeURIComponent(new URL(source).pathname.split('/').filter(Boolean).at(-1) ?? '');
+      if (DOC_EXT.test(last)) return path.basename(last);
+    } catch {
+      // 解析不了就退回归档文件名
+    }
+    return row.filename;
+  }
+  const leaf = path.basename(source.replace(/\\/g, '/'));
+  return leaf && leaf !== '.' && leaf !== '..' ? leaf : row.filename;
+}
+
 function templateValues(row: OcrResultRow): Record<string, string> {
   return {
+    typeLabel: typeLabelOf(row),
+    originalName: originalNameOf(row),
     hash: row.hash,
     messageId: row.messageId,
     date: row.date,
@@ -151,7 +182,11 @@ function renderTemplate(template: string, row: OcrResultRow): { value: string; c
  */
 function renderFilename(row: OcrResultRow, cfg: Config, log?: Logger): string {
   const rule = renderTemplate(cfg.rename.rule, row);
-  const rendered = rule.complete ? rule.value : renderTemplate(cfg.rename.fallback, row).value;
+  // 附属材料没有卖方 / 金额，命名规则必然不完整：直接沿用原始文件名，
+  // 而不是套到 `{date}-{messageId}` 那种谁也认不出的回退名上。
+  const rendered = rule.complete
+    ? rule.value
+    : row.documentType === 'supporting' ? originalNameOf(row) : renderTemplate(cfg.rename.fallback, row).value;
   const realExt = extFor(row);
   const templateExt = path.extname(rendered);
   let stem: string;
@@ -351,10 +386,12 @@ export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { results
   const invoicesDir = path.resolve(cfg.paths.invoices);
   const organizedDir = path.resolve(opts.outDir ?? cfg.rename.organizedDir);
   const applyRename = opts.applyRename ?? cfg.rename.applyAfterOcr;
+  // 按类型分文件夹时附属材料自然有自己的文件夹，一并整理；平铺模式仍默认跳过。
+  const includeSupporting = opts.includeSupporting === true || cfg.rename.organizeByType;
   const auditCsv = path.join(organizedDir, 'organize-results.csv');
   const supportingCsv = !opts.resultsCsv
     ? path.join(invoicesDir, 'ocr', 'ocr-pending.csv') : undefined;
-  const rows = readOrganizeRows(resultsCsv, supportingCsv, opts.includeSupporting);
+  const rows = readOrganizeRows(resultsCsv, supportingCsv, includeSupporting);
   const summary: OrganizeSummary = { scanned: rows.length, copied: 0, skipped: 0, failed: 0 };
 
   if (rows.length === 0) {
@@ -385,7 +422,7 @@ export function organizeFromOcrResults(cfg: Config, log: Logger, opts: { results
   }
 
   for (const row of rows) {
-    const skipReason = organizeSkipReason(row, opts.includeSupporting);
+    const skipReason = organizeSkipReason(row, includeSupporting);
     if (skipReason) {
       summary.skipped++;
       safeAudit(row, '', 'skipped', skipReason);
