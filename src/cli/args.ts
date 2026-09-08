@@ -44,7 +44,7 @@ export interface RunOpts {
 }
 
 export interface DedupeOpts {
-  by: 'container' | 'invoice-no';
+  by: 'container' | 'invoice-no' | 'source';
   configPath: string;
   /** 默认 dry-run；只有显式 `--apply` 才动磁盘。 */
   apply: boolean;
@@ -239,7 +239,9 @@ export function parseDedupeArgs(argv: string[]): DedupeOpts | 'help' {
     if (a === '--config') { opts.configPath = requireValue(argv, ++i, a); continue; }
     if (a === '--by') {
       const by = requireValue(argv, ++i, a);
-      if (by !== 'container' && by !== 'invoice-no') throw new Error('--by must be container or invoice-no');
+      if (by !== 'container' && by !== 'invoice-no' && by !== 'source') {
+        throw new Error('--by must be container or invoice-no or source');
+      }
       opts.by = by;
       continue;
     }
