@@ -157,4 +157,26 @@ await withOcrFixture(async ({ cfg, queue }) => {
   assert.equal(queueRows['bad.pdf'].status, 'recognized');
 });
 
+// codex 复审两例：队列里没有的失败结果不能被删；同一身份先 partial 后 error 时要整体丢掉再重跑。
+await withOcrFixture(async ({ cfg, queue }) => {
+  const orphan = { ...resultRow('bad.pdf', 'error'), hash: 'hash-gone', filename: 'gone.pdf', source: 'gone.pdf' };
+  const stalePartial = { ...resultRow('bad.pdf', 'partial'), error: 'missing_amount' };
+  fs.writeFileSync(cfg.ocr.resultsCsv, csv(RESULT_HEADER, [
+    resultRow('ok.pdf', 'success'),
+    orphan,
+    stalePartial,
+    resultRow('bad.pdf', 'error'),
+  ]));
+  const lines = [];
+  const summary = await runOcrPending(cfg, silentLog(lines), { retryFailed: true });
+  assert.equal(summary.parsed, 1, 'bad.pdf 必须被重跑，而不是被更早的 partial 挡住');
+  assert.ok(lines.includes('OCR retry-failed: dropped 2 failed result rows'), JSON.stringify(lines));
+  const results = readCsvRows(cfg.ocr.resultsCsv);
+  assert.deepEqual(
+    results.map((row) => [row.filename, row.status]),
+    [['ok.pdf', 'success'], ['gone.pdf', 'error'], ['bad.pdf', 'success']],
+  );
+  assert.equal(readCsvRows(queue).find((row) => row.filename === 'bad.pdf').status, 'recognized');
+});
+
 console.log('OCR retry-failed unit tests passed');
