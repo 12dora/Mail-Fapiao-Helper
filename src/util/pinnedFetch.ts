@@ -13,6 +13,7 @@ import {
   serviceHopPolicyOf,
 } from './urlPolicy.js';
 import type { PublicUrlResolution, ServiceHopPolicy } from './urlPolicy.js';
+import { applyPreparedBodyHeaders, prepareRequestBody } from './requestBody.js';
 
 /** Per-document / per-response memory cap. Mirrors the 50MB invariant in ARCHITECTURE.md (R4). */
 export const MAX_DOC_BYTES = 50 * 1024 * 1024;
@@ -209,30 +210,6 @@ function sanitizeRedirectHeaders(
 
 function defaultPort(protocol: string): string {
   return protocol === 'https:' ? '443' : '80';
-}
-
-async function bodyToBuffer(body: RequestInit['body'] | undefined): Promise<Buffer | undefined> {
-  if (body === null || body === undefined) return undefined;
-  if (Buffer.isBuffer(body)) return body;
-  if (body instanceof ArrayBuffer) return Buffer.from(body);
-  if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
-  if (typeof body === 'string') return Buffer.from(body);
-  if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
-    return Buffer.from(body.toString());
-  }
-  if (typeof Blob !== 'undefined' && body instanceof Blob) {
-    return Buffer.from(await body.arrayBuffer());
-  }
-  // ReadableStream / FormData 等：退回 Response 物化。
-  if (typeof body === 'object' && body !== null && 'getReader' in (body as object)) {
-    const res = new Response(body as never);
-    return Buffer.from(await res.arrayBuffer());
-  }
-  if (typeof FormData !== 'undefined' && body instanceof FormData) {
-    const res = new Response(body as never);
-    return Buffer.from(await res.arrayBuffer());
-  }
-  throw new Error('safe_fetch_unsupported_body');
 }
 
 function incomingToHeaders(incoming: IncomingMessage): Headers {
@@ -542,7 +519,9 @@ async function controlledFetch(
   let hop = 0;
   // 303 以及部分 302 习惯上把方法改成 GET；307/308 保留原方法。
   let method = (restInit.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-  let body: RequestInit['body'] | undefined = restInit.body;
+  // 请求体只物化一次：FormData 每次序列化都会换 boundary，跨跳必须复用同一份字节。
+  const prepared = await prepareRequestBody(restInit.body);
+  let bodyBuf = prepared.buffer;
   // 可变请求头：跨跳时可能剥离敏感字段 / 实体字段。
   let headerRecord: Record<string, string> | undefined;
   // 整链共用同一 abort signal，deadline 覆盖全部 redirect hop。
@@ -570,17 +549,15 @@ async function controlledFetch(
     } else {
       headerRecord = { ...headerRecord, host: hostHeader };
     }
-    const bodyBuf = method === 'GET' || method === 'HEAD' ? undefined : await bodyToBuffer(body);
-    if (bodyBuf && !headerRecord['content-length'] && !headerRecord['Content-Length']) {
-      headerRecord['content-length'] = String(bodyBuf.length);
-    }
+    const hopBody = method === 'GET' || method === 'HEAD' ? undefined : bodyBuf;
+    if (hopBody) applyPreparedBodyHeaders(headerRecord, prepared);
 
     const response = await pinnedRequest(
       resolved.url,
       resolved.addresses,
       method,
       headerRecord,
-      bodyBuf,
+      hopBody,
       signal,
       bodyCapBytes,
     );
@@ -599,7 +576,7 @@ async function controlledFetch(
       location,
     );
     if (discardBody) {
-      body = undefined;
+      bodyBuf = undefined;
     }
     // 跨源 / HTTPS→HTTP / 方法改写：剥离敏感头与陈旧实体头（NEW-DEFECT 2）。
     headerRecord = sanitizeRedirectHeaders(headerRecord, resolved.url, nextParsed, nextMethod);
