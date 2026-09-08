@@ -93,6 +93,11 @@ function isKnownPdfCandidate(url: string): boolean {
         && parsed.pathname.includes('/inv-file/')) {
       return true;
     }
+    // 税务局数电票导出接口：PDF 形态直接就是票，OFD/XML 形态由 pdfVariantUrl 改写。
+    if (parsed.pathname.includes('/kpfw/fpjfzz/v1/exportDzfpwjEwm')
+        && parsed.searchParams.get('Wjgs')?.toUpperCase() === 'PDF') {
+      return true;
+    }
   } catch {
     return false;
   }

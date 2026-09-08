@@ -28,6 +28,11 @@ export interface DownloadOptions {
    * `-1/-2` 碰撞副本。
    */
   alreadyArchived?: Map<string, string>;
+  /**
+   * 来源 -> 最早归档的文件与其 contentHash。仅对 http(s) 来源生效：下载接口每次
+   * 重新生成的 PDF 字节不同，但仍是同一张票，复用既有文件而不是再归档一份。
+   */
+  alreadyArchivedBySource?: Map<string, { filename: string; contentHash: string }>;
 }
 
 type ArtifactExt = 'pdf' | 'ofd' | 'png' | 'jpg' | 'jpeg' | 'gif' | 'webp' | 'bmp';
@@ -324,6 +329,11 @@ function stageInputs(
       }
       // 映射损坏或不匹配：落入重新 staging/归档路径。
     }
+    const regenerated = reuseRegeneratedDownload(state, pdf, i, ext, hash);
+    if (regenerated) {
+      state.reused.push(regenerated);
+      continue;
+    }
 
     const stagingPath = path.join(state.stagingDir, `${i}.${ext}`);
     fs.writeFileSync(stagingPath, pdf.data, { mode: isPosix() ? FILE_MODE : undefined });
@@ -419,6 +429,35 @@ function commitBatch(state: ArchiveBatchState): DownloadResult[] {
   }
   results.sort((a, b) => a.sourceIndex - b.sourceIndex);
   return results;
+}
+
+/**
+ * 同一 http(s) 来源已归档、但这次下载的字节变了：接口每次重新生成 PDF（时间戳 /
+ * 二维码不同），票还是那一张。既有文件仍与台账 contentHash 一致就直接复用。
+ */
+function reuseRegeneratedDownload(
+  state: ArchiveBatchState,
+  pdf: PdfArtifact,
+  sourceIndex: number,
+  ext: ArtifactExt,
+  hash: string,
+): DownloadResult | null {
+  if (!/^https?:\/\//i.test(pdf.source)) return null;
+  const entry = state.opts.alreadyArchivedBySource?.get(pdf.source);
+  if (!entry || entry.contentHash === hash) return null;
+  const hit = tryReuseArchived(state.invoicesDir, entry.filename, entry.contentHash, state.log);
+  if (!hit) return null;
+  state.log.info(`Download regenerated with different bytes; reusing archived ${hit.filename} for ${pdf.source}`);
+  return {
+    sourceIndex,
+    finalPath: hit.path,
+    filename: hit.filename,
+    format: pdf.format ?? formatForExt(ext),
+    documentType: pdf.documentType ?? 'invoice',
+    requiresOcr: pdf.requiresOcr ?? true,
+    contentHash: entry.contentHash,
+    reused: true,
+  };
 }
 
 export function stageDocuments(

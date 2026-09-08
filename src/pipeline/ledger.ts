@@ -16,6 +16,22 @@ interface ArchivedIndex {
   byKey: Map<string, string>;
   /** 本邮件已归档的 contentHash -> 文件名，用于归档前的幂等协调。 */
   byContentHash: Map<string, string>;
+  /**
+   * 本邮件已归档的 http(s) 下载来源 -> 最早归档的文件与其 contentHash。
+   * 有些开票接口每次下载都重新生成 PDF（字节不同），重放时按来源复用既有文件，
+   * 否则每点一次「全部重试」台账就多一份同一张票。
+   */
+  bySource: Map<string, ArchivedSourceEntry>;
+}
+
+export interface ArchivedSourceEntry {
+  filename: string;
+  contentHash: string;
+}
+
+/** 只有网络下载才会「同一来源、字节不同」；附件同名不同内容是两份文档。 */
+export function isRegenerableSource(source: string): boolean {
+  return /^https?:\/\//i.test(source);
 }
 
 /**
@@ -47,7 +63,8 @@ function hashArchivedFile(invoicesDir: string, filename: string): string {
 export function readArchivedIndex(csvPath: string, messageId: string, invoicesDir: string): ArchivedIndex {
   const byKey = new Map<string, string>();
   const byContentHash = new Map<string, string>();
-  if (!fs.existsSync(csvPath)) return { byKey, byContentHash };
+  const bySource = new Map<string, ArchivedSourceEntry>();
+  if (!fs.existsSync(csvPath)) return { byKey, byContentHash, bySource };
   const content = fs.readFileSync(csvPath, 'utf8').replace(/^\uFEFF/, '');
   const records = parseCsv(content);
   const header = records[0] ?? [];
@@ -69,9 +86,13 @@ export function readArchivedIndex(csvPath: string, messageId: string, invoicesDi
     byKey.set(`${rowMessageId}\0${source}\0${hash}`, filename);
     if (rowMessageId === messageId && filename.length > 0) {
       byContentHash.set(hash, filename);
+      // 同一来源保留最早的一行：后来的都是重放时多出来的副本。
+      if (isRegenerableSource(source) && !bySource.has(source)) {
+        bySource.set(source, { filename, contentHash: hash });
+      }
     }
   }
-  return { byKey, byContentHash };
+  return { byKey, byContentHash, bySource };
 }
 
 /** 读取 OCR 队列里已存在的 `${hash}\0${contentHash}`，用于追加去重。 */
