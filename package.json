@@ -22,7 +22,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.renderer.json",
     "pretest:cli": "node scripts/check-test-prereqs.mjs cli",
-    "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs && node --test scripts/efapiao-binary.test.mjs && node gui-design/tests/ocr-retry-failed-unit.mjs && node gui-design/tests/link-evidence-unit.mjs",
+    "test:cli": "node gui-design/tests/cli-regression.mjs && node gui-design/tests/cli-integration.mjs && node --test scripts/efapiao-binary.test.mjs && node gui-design/tests/ocr-retry-failed-unit.mjs && node gui-design/tests/dedupe-by-source-unit.mjs && node gui-design/tests/link-evidence-unit.mjs",
     "pretest:electron": "node scripts/check-test-prereqs.mjs electron",
     "test:electron": "node gui-design/tests/electron-smoke.mjs && node gui-design/tests/electron-ipc-fixture.mjs && node gui-design/tests/summary-unit.mjs && node gui-design/tests/detail-unit.mjs && node gui-design/tests/dedupe-ipc-unit.mjs && node gui-design/tests/shell-ipc-unit.mjs && node gui-design/tests/ocr-supporting-unit.mjs && node gui-design/tests/supporting-archive-regression.mjs && node gui-design/tests/ocr-failure-reasons-unit.mjs && node gui-design/tests/pinned-fetch-unit.mjs",
     "pretest:browser": "node scripts/check-test-prereqs.mjs browser",

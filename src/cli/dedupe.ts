@@ -35,6 +35,7 @@ interface LedgerRow {
   index: number;
   row: Record<string, string>;
   mailHash: string;
+  messageId: string;
   source: string;
   filename: string;
   contentHash: string;
@@ -42,7 +43,7 @@ interface LedgerRow {
 }
 
 export interface DedupeReport {
-  mode: 'container' | 'invoice-no';
+  mode: 'container' | 'invoice-no' | 'source';
   applied: boolean;
   recovered: number;
   quarantineDir: string | null;
@@ -53,6 +54,8 @@ export interface DedupeReport {
   ocrRowsRemoved: number;
   groups: Array<{
     invoiceNo: string;
+    messageId?: string;
+    source?: string;
     kept: { filename: string; date: string; seller: string; amount: string; format: string };
     removed: Array<{ filename: string; date: string; seller: string; amount: string; format: string; reason: string }>;
     conflict: boolean;
@@ -82,6 +85,7 @@ function toLedgerRow(row: Record<string, string>, index: number): LedgerRow {
     index,
     row,
     mailHash: (row.mailHash ?? '').trim().toLowerCase(),
+    messageId: (row.messageId ?? '').trim(),
     source,
     filename: row.filename ?? '',
     contentHash: (row.contentHash ?? '').trim().toLowerCase(),
@@ -139,7 +143,9 @@ export function runDedupe(cfg: Config, opts: { apply: boolean; by?: DedupeOpts['
   const recovered = recoverDedupePlans(cfg, cwd);
   const report = opts.by === 'invoice-no'
     ? runInvoiceNoDedupe(cfg, opts.apply, cwd)
-    : runContainerDedupe(cfg, opts.apply, cwd);
+    : opts.by === 'source'
+      ? runSourceDedupe(cfg, opts.apply, cwd)
+      : runContainerDedupe(cfg, opts.apply, cwd);
   report.recovered = recovered;
   return report;
 }
@@ -311,8 +317,141 @@ function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
   return report;
 }
 
+/** 仅对下载链接去重；附件同名不能当作同一份文件。 */
+function isHttpSource(source: string): boolean {
+  return source.startsWith('http://') || source.startsWith('https://');
+}
+
+/** 归档文件名开头的序号，如 `0918.pdf` → 918。 */
+function archiveSeq(filename: string): number | null {
+  const match = /^(\d+)/.exec(filename);
+  return match ? Number(match[1]) : null;
+}
+
+/** 序号小的先归档；无法比较时退回台账行序。 */
+function compareArchiveOrder(a: LedgerRow, b: LedgerRow): number {
+  const left = archiveSeq(a.filename);
+  const right = archiveSeq(b.filename);
+  const leftN = left === null ? Number.POSITIVE_INFINITY : left;
+  const rightN = right === null ? Number.POSITIVE_INFINITY : right;
+  if (leftN !== rightN) return leftN - rightN;
+  return a.index - b.index;
+}
+
+function httpSourceGroups(rows: LedgerRow[]): Map<string, LedgerRow[]> {
+  const groups = new Map<string, LedgerRow[]>();
+  for (const item of rows) {
+    if (!isHttpSource(item.source)) continue;
+    const key = `${item.messageId}\0${item.source}`;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  }
+  return groups;
+}
+
+function sourceFileDetail(item: LedgerRow): DedupeReport['groups'][number]['kept'] {
+  return {
+    filename: item.filename,
+    date: item.row.date ?? '',
+    seller: '',
+    amount: '',
+    format: item.ext.slice(1),
+  };
+}
+
+/**
+ * 同一封邮件反复下载同一条 http(s) 链接时，每次都会得到新的 contentHash，
+ * 台账里便留下多行。按 (messageId, source) 分组，只留归档序号最小的那份。
+ */
+function runSourceDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport {
+  const report: DedupeReport = {
+    mode: 'source', applied: apply, recovered: 0, quarantineDir: null,
+    pairs: 0, redundant: 0, quarantined: 0, ledgerRowsRemoved: 0, ocrRowsRemoved: 0,
+    groups: [], conflicts: 0, skipped: [],
+  };
+  const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
+  const rawRows = readCsvRows(path.resolve(cwd, cfg.output.csv));
+  if (rawRows.length === 0) return report;
+  const actionable = new Map<string, { item: LedgerRow; file: string }>();
+  for (const members of httpSourceGroups(rawRows.map(toLedgerRow)).values()) {
+    if (members.length < 2) continue;
+    members.sort(compareArchiveOrder);
+    const keeper = members[0]!;
+    const group: DedupeReport['groups'][number] = {
+      invoiceNo: '',
+      messageId: keeper.messageId,
+      source: keeper.source,
+      kept: sourceFileDetail(keeper),
+      removed: [],
+      conflict: false,
+      conflictReason: '',
+    };
+    report.groups.push(group);
+    for (const item of members.slice(1)) {
+      if (item.filename === keeper.filename) {
+        report.skipped.push({ filename: item.filename, reason: 'same filename as keeper' });
+        continue;
+      }
+      const check = fileMatchesRow(invoicesDir, item);
+      if (!check.ok) {
+        report.skipped.push({ filename: item.filename, reason: check.why });
+        continue;
+      }
+      group.removed.push({ ...sourceFileDetail(item), reason: '同一邮件同一下载地址的重复归档' });
+      actionable.set(fileKey(item.row), { item, file: check.file });
+    }
+  }
+  report.pairs = report.groups.length;
+  report.redundant = actionable.size;
+  if (!apply || actionable.size === 0) return report;
+  const planDir = path.join(
+    invoicesDir, '.dedupe-quarantine',
+    `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`,
+  );
+  const quarantineDir = path.join(planDir, 'by-source');
+  fs.mkdirSync(quarantineDir, { recursive: true });
+  report.quarantineDir = quarantineDir;
+  Object.assign(report, applyDedupePlan(cfg, cwd, planDir, [...actionable.values()].map(({ item, file }) => ({
+    source: file,
+    target: path.join(quarantineDir, item.filename),
+    filename: item.filename,
+    contentHash: item.contentHash,
+    csvKeys: { filename: item.filename, contentHash: item.contentHash },
+  }))));
+  return report;
+}
+
+function truncateSource(source: string, max = 80): string {
+  return source.length <= max ? source : `${source.slice(0, max - 1)}…`;
+}
+
+function printSourceReport(report: DedupeReport): void {
+  const count = report.applied ? report.quarantined : report.redundant;
+  const verb = report.applied ? 'quarantined' : 'would quarantine';
+  process.stdout.write(
+    `Source groups: ${report.groups.length}; kept: ${report.groups.length}; ${verb}: ${count}; skipped: ${report.skipped.length}.\n`,
+  );
+  if (report.quarantineDir) process.stdout.write(`Quarantine: ${report.quarantineDir}\n`);
+  for (const group of report.groups) {
+    const quarantined = group.removed.map((row) => row.filename).join(', ');
+    process.stdout.write(
+      `  ${group.messageId ?? ''} | ${truncateSource(group.source ?? '')} | ${group.kept.filename} | ${quarantined}\n`,
+    );
+  }
+  if (!report.applied) process.stdout.write('Dry run — no new cleanup applied. Re-run with --apply to perform the cleanup.\n');
+  if (report.skipped.length === 0) return;
+  process.stdout.write(`Skipped ${report.skipped.length} row(s) whose ledger entry does not match the file on disk:\n`);
+  for (const item of report.skipped.slice(0, 20)) process.stdout.write(`  ${item.filename}: ${item.reason}\n`);
+  if (report.skipped.length > 20) process.stdout.write(`  … and ${report.skipped.length - 20} more\n`);
+}
+
 function printReport(report: DedupeReport): void {
   if (report.recovered) process.stdout.write(`Recovered pending dedupe moves: ${report.recovered}.\n`);
+  if (report.mode === 'source') {
+    printSourceReport(report);
+    return;
+  }
   if (report.mode === 'invoice-no') {
     process.stdout.write(`Invoice-number groups: ${report.groups.length}; ${report.applied ? 'removed' : 'would remove'}: ${report.applied ? report.quarantined : report.redundant}; conflicts: ${report.conflicts}; skipped: ${report.skipped.length}.\n`);
     if (report.quarantineDir) process.stdout.write(`Quarantine: ${report.quarantineDir}\n`);

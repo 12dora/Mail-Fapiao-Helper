@@ -9,7 +9,7 @@ Commands:
   ocr            Run OCR for archived documents
   pending        Inspect manual processing queue
   organize       Copy archived invoices into optional OCR-based names/folders
-  dedupe         Quarantine duplicate invoices by container or invoice number
+  dedupe         Quarantine duplicate invoices by container, invoice number, or download source
   rebuild-state  Rebuild state.json from INDEX/cache/invoices.csv (no data deleted)
 
 Options:
@@ -146,7 +146,7 @@ Usage:
 
 Options:
   --config <path>       Path to config.json (default: ./config.json)
-  --by <mode>           container or invoice-no (default: container)
+  --by <mode>           container、invoice-no 或 source（默认 container）
   --apply               Quarantine duplicates and prune matching CSV rows
   --json                Print the full report as JSON
   -h, --help            Show this help
@@ -157,10 +157,14 @@ Modes:
               Supporting documents are excluded.
               Keep PDF first, then earliest date, then smallest filename.
               Skip groups with conflicting amounts or sellers.
+  source      按同一封邮件的同一下载地址去重（仅 source 以 http:// 或 https:// 开头的行）。
+              每组保留归档序号最小的文件（如 0918.pdf 优先于 0940.pdf），其余隔离。
+              附件来源不参与：同一封邮件里同名附件可能是不同文件。
 
 Safety:
   Dry-run by default. Files must match their recorded contentHash.
   Files move to invoices/.dedupe-quarantine/<timestamp>/ (invoice-no adds
-  by-invoice-no/). Matching ledger and OCR rows are pruned only after moving.
+  by-invoice-no/; source adds by-source/). Matching ledger and OCR rows
+  are pruned only after moving.
   Repeated --apply runs leave already processed files unchanged.
 `;
