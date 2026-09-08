@@ -33,6 +33,7 @@ await withTempDir('mfh-organize-types-', async (dir) => {
     { ...base('0001.pdf', 'dzfp_26312000000000000001_国家电网.pdf', 'invoice'), seller: '国家电网有限公司', amount: '318.42', invoiceNo: '26312000000000000001' },
     { ...base('0002.pdf', 'https://cdn.example.com/files/elfp123.pdf?token=abc', 'invoice'), seller: '', amount: '', invoiceNo: '' },
     { ...base('0003.pdf', '通行费电子发票.zip/通行费电子票据汇总单(票据).pdf', 'supporting') },
+    { ...base('0004.pdf', 'https://cdn.example.com/x/26317000001452019848.pdf', 'invoice'), date: '', seller: '', amount: '', invoiceNo: '' },
   ];
   const ledger = []; const pending = []; const results = [];
   for (const doc of docs) {
@@ -42,7 +43,7 @@ await withTempDir('mfh-organize-types-', async (dir) => {
     ledger.push({ messageId: doc.messageId, date: doc.date, from: doc.from, subject: doc.subject, filename: doc.filename, source: doc.source, contentHash: hash, mailHash: 'mh1' });
     pending.push({ ...doc, status: doc.documentType === 'supporting' ? 'ignored' : 'recognized', reason: doc.documentType === 'supporting' ? 'supporting_document:toll_summary' : '', contentHash: hash });
     if (doc.documentType !== 'supporting') {
-      results.push({ ...doc, invoiceType: 'digital_general', dateValue: '2026-04-22', transport: 'http', extractedBy: 'text_layer', parserVersion: '0.1.0', ocrVendor: '', status: 'success', error: '', contentHash: hash });
+      results.push({ ...doc, invoiceType: 'digital_general', dateValue: doc.date ? '2026-04-22' : '', transport: 'http', extractedBy: 'text_layer', parserVersion: '0.1.0', ocrVendor: '', status: 'success', error: '', contentHash: hash });
     }
   }
   rewriteCsvRows(cfg.output.csv, INVOICE_CSV_HEADER, ledger);
@@ -50,19 +51,20 @@ await withTempDir('mfh-organize-types-', async (dir) => {
   rewriteCsvRows(cfg.ocr.resultsCsv, RESULT_HEADER, results);
 
   const summary = organizeFromOcrResults(cfg, silent);
-  assert.equal(summary.copied, 3, JSON.stringify(summary));
+  assert.equal(summary.copied, 4, JSON.stringify(summary));
   const out = cfg.rename.organizedDir;
+  assert.equal(fs.existsSync(path.join(out, '发票', '26317000001452019848.pdf')), true, '日期为空时不留开头的短横线');
   assert.equal(fs.existsSync(path.join(out, '发票', '国家电网有限公司-318.42.pdf')), true, '发票按卖方-金额命名进「发票」');
   assert.equal(fs.existsSync(path.join(out, '发票', '2026-04-22-elfp123.pdf')), true, '缺字段的发票走回退名，原始名取自链接末段');
-  assert.equal(fs.existsSync(path.join(out, '附属材料', '通行费电子票据汇总单(票据).pdf')), true, '附属材料保留原始文件名');
+  assert.equal(fs.existsSync(path.join(out, '附属材料', '2026-04-22-通行费电子票据汇总单(票据).pdf')), true, '附属材料 = 邮件日期 + 原始文件名');
   assert.equal(fs.existsSync(path.join(out, 'supporting')), false);
 
   // 平铺模式：附属材料仍默认跳过
   cfg.rename.organizeByType = false;
   cfg.rename.organizedDir = path.join(dir, 'flat');
   const flat = organizeFromOcrResults(cfg, silent);
-  assert.equal(flat.copied, 2);
-  assert.equal(fs.existsSync(path.join(cfg.rename.organizedDir, '通行费电子票据汇总单(票据).pdf')), false, '平铺模式不整理附属材料');
+  assert.equal(flat.copied, 3);
+  assert.equal(fs.existsSync(path.join(cfg.rename.organizedDir, '2026-04-22-通行费电子票据汇总单(票据).pdf')), false, '平铺模式不整理附属材料');
 });
 
 console.log('organize-type-folders-unit: passed');
