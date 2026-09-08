@@ -64,6 +64,36 @@ export function looksLikeEmailChrome(text: string | undefined): boolean {
   return NON_DOCUMENT_ASSET.test(text);
 }
 
+/**
+ * 探测都不必做的链接：税务局的查验 / 数电票交付页（`inv-veri.chinatax.gov.cn`、
+ * `dppt.<省>.chinatax.gov.cn:8443/v/…`）。它们是需要浏览器 + 验证码的网页，从来不是
+ * 直接的文件下载，还常回 302/511；票本身由开票平台的下载链接或附件提供。
+ */
+export function isProbeNoise(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'chinatax.gov.cn' || host.endsWith('.chinatax.gov.cn');
+  } catch {
+    return true;
+  }
+}
+
+/** 文本里出现的全部 20 位发票号（去重，保序）。 */
+export function invoiceNumbersIn(text: string | undefined): string[] {
+  if (!text) return [];
+  let decoded = text;
+  try {
+    decoded = decodeURIComponent(text);
+  } catch {
+    // 非法转义就按原文匹配
+  }
+  const seen = new Set<string>();
+  for (const match of decoded.matchAll(/(?:^|\D)(\d{20})(?=\D|$)/g)) {
+    if (match[1]) seen.add(match[1]);
+  }
+  return [...seen];
+}
+
 /** 弱语义词：只在路径 / 查询串里算数。`ticket.download.<平台>` 这种 host 只说明是谁家的域名。 */
 const INVOICE_ENTRY_HINT = /(download|export|bill|receipt|ticket|reimburse)/i;
 /** 站点首页 / 邮件落地页：`/`、`/index_email.html`、`/home.php` 之类，不管域名叫什么都不是票的入口。 */
