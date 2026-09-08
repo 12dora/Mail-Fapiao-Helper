@@ -178,7 +178,7 @@ function validateRecoveryMove(
   }
 }
 
-/** Called before either mode, while cmdDedupe holds the pipeline command lock. */
+/** Called before any mode, while cmdDedupe holds the pipeline command lock. */
 export function recoverDedupePlans(cfg: Config, cwd: string): number {
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
   const root = path.join(invoicesDir, '.dedupe-quarantine');
