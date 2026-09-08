@@ -142,13 +142,26 @@ function originalNameOf(row: OcrResultRow): string {
   return leaf && leaf !== '.' && leaf !== '..' ? leaf : row.filename;
 }
 
+/** `{date}` 只要年月日：ISO 时间戳里的冒号进不了文件名，也没人想在文件名里看到毫秒。 */
+function dateStampOf(row: OcrResultRow): string {
+  const value = row.date.trim();
+  return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : value;
+}
+
+/** 附属材料的名字：邮件日期 + 原始文件名。212 份「通行费电子票据汇总单(票据).pdf」靠日期区分。 */
+function supportingNameOf(row: OcrResultRow): string {
+  const stamp = dateStampOf(row);
+  const original = originalNameOf(row);
+  return stamp ? `${stamp}-${original}` : original;
+}
+
 function templateValues(row: OcrResultRow): Record<string, string> {
   return {
     typeLabel: typeLabelOf(row),
     originalName: originalNameOf(row),
     hash: row.hash,
     messageId: row.messageId,
-    date: row.date,
+    date: dateStampOf(row),
     from: row.from,
     subject: row.subject,
     filename: row.filename,
@@ -186,7 +199,7 @@ function renderFilename(row: OcrResultRow, cfg: Config, log?: Logger): string {
   // 而不是套到 `{date}-{messageId}` 那种谁也认不出的回退名上。
   const rendered = rule.complete
     ? rule.value
-    : row.documentType === 'supporting' ? originalNameOf(row) : renderTemplate(cfg.rename.fallback, row).value;
+    : row.documentType === 'supporting' ? supportingNameOf(row) : renderTemplate(cfg.rename.fallback, row).value;
   const realExt = extFor(row);
   const templateExt = path.extname(rendered);
   let stem: string;
@@ -206,6 +219,8 @@ function renderFilename(row: OcrResultRow, cfg: Config, log?: Logger): string {
   } else {
     stem = rendered;
   }
+  // 模板里的空字段会留下开头的 `-` / `_`（如日期为空的 `{date}-{originalName}`），去掉。
+  stem = stem.replace(/^[-_\s.]+/, '');
   // stem 可能仍含路径分隔符：safePathSegment 会 basename 清洗。
   const withExt = `${stem}${realExt}`;
   return safePathSegment(withExt, safePathSegment(row.filename || `${row.hash || 'document'}${realExt}`, `document${realExt}`));
