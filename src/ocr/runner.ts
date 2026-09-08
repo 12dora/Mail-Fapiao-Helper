@@ -9,7 +9,7 @@ import { OCR_CSV_HEADER, withCsvRetry } from '../pipeline/csvDurability.js';
 import type { OcrProvider, OcrResult } from './types.js';
 import { csvCell, parseCsv, readCsvRows, rewriteCsvRows } from '../util/csv.js';
 import { contentHash as hashBytes } from '../util/hash.js';
-import { ArtifactIndex, type ArtifactIdentity } from '../util/identity.js';
+import { ArtifactIndex, artifactIdentityForRow, type ArtifactIdentity } from '../util/identity.js';
 
 interface PendingRow {
   hash: string;
@@ -242,13 +242,23 @@ function appendResult(csvPath: string, row: PendingRow, result: OcrResult): void
 const RESULT_HEADER_LINE = RESULT_HEADER.join(',') + '\n';
 
 /**
- * 原子重写 results CSV，丢掉全部 status=error 行，保留 header 与列序。
- * 这样后续 readResultIndex 看不到失败身份，失败项会按普通 pending 再跑一遍。
+ * 原子重写 results CSV，只丢掉「有效状态为 error 且队列里仍有对应行」的身份的全部行，
+ * 保留 header 与列序。
+ * - 有效状态按 readResultIndex 的口径取（success 不被后来的 error 覆盖）；
+ * - 丢掉该身份的**全部**行而不只是 error 行：否则一条更早的 partial 会在 error 被删后
+ *   露出来，让本该重试的文件被当作「已有结果」跳过；
+ * - 队列里已经没有的身份不动：那些结果没法重跑，删了只会凭空丢记录。
  */
-function dropErrorResultRows(csvPath: string): number {
+function dropRetryableErrorRows(csvPath: string, queueRows: PendingRow[]): number {
   const rows = readCsvRows(csvPath);
   if (rows.length === 0) return 0;
-  const kept = rows.filter((row) => row.status !== 'error');
+  const queued = new ArtifactIndex<boolean>();
+  for (const row of queueRows) queued.set(rowIdentity(row), true);
+  const effective = readResultIndex(csvPath);
+  const kept = rows.filter((row) => {
+    const id = artifactIdentityForRow(row);
+    return !(effective.get(id)?.status === 'error' && queued.has(id));
+  });
   const dropped = rows.length - kept.length;
   if (dropped === 0) return 0;
   withCsvRetry(() => rewriteCsvRows(csvPath, RESULT_HEADER_LINE, kept));
@@ -489,7 +499,7 @@ export async function runOcrPending(
   // 整次 run 只迁移/准备 results CSV 一次，避免每个结果 O(N) 重读（OCR-13）。
   ensureResultCsvReady(resultCsv);
   if (opts.retryFailed) {
-    const dropped = dropErrorResultRows(resultCsv);
+    const dropped = dropRetryableErrorRows(resultCsv, supportingQueueRows(pendingCsv, resultCsv));
     log.info(`OCR retry-failed: dropped ${dropped} failed result rows`);
   }
   const rows = supportingQueueRows(pendingCsv, resultCsv);
