@@ -267,6 +267,7 @@ function archiveExtraction(
   const batch = stageDocuments(extraction.artifacts, hash, cfg.paths.invoices, log, {
     avoidConflictBeforeOcr: cfg.rename.avoidConflictBeforeOcr,
     alreadyArchived: archived.byContentHash,
+    alreadyArchivedBySource: archived.bySource,
   });
 
   // 从这里到 tx.commit() 之间没有任何 await：同进程的其他 worker 不会插进来

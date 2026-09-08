@@ -35,6 +35,8 @@ for (const url of [
 for (const url of [
   'https://etd.kpbyd.com/hub/files/download?code=abc',
   'https://chinatax.example.com/x.pdf',
+  // 同一税务局域名下的导出接口是真下载，不能当噪音
+  'https://dppt.shanghai.chinatax.gov.cn:8443/kpfw/fpjfzz/v1/exportDzfpwjEwm?Wjgs=PDF&Fphm=26312000001432309111',
 ]) assert.equal(isProbeNoise(url), false, `should be probed: ${url}`);
 
 assert.deepEqual(invoiceNumbersIn('directLink:probe_failed:HEAD:https://dppt.shanghai.chinatax.gov.cn:8443/v/2_26312000001432309111_2026:http_511'), ['26312000001432309111']);

@@ -1,5 +1,5 @@
 import net from 'node:net';
-import { lookup as dnsLookup } from 'node:dns/promises';
+import { lookup as dnsLookup, resolve4 as dnsResolve4, resolve6 as dnsResolve6 } from 'node:dns/promises';
 import { ipv6ToBytes, isBlockedIp, isLoopbackHost, isLoopbackIp } from './ipPolicy.js';
 import { isResolverPlaceholder, loadResolverProfile } from './resolverProfile.js';
 import { log } from '../log.js';
@@ -17,6 +17,61 @@ let placeholderNoticeEmitted = false;
  * 该放宽**只对域名解析结果生效**——URL 里写死的 IP 字面量在调用方就已判掉，
  * 走不到这里。
  */
+/** 解析结果的最小形状：与 `dns.lookup({ all: true })` 对齐。 */
+export interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+export interface LookupDeps {
+  lookup(host: string): Promise<ResolvedAddress[]>;
+  resolveDirect(host: string): Promise<ResolvedAddress[]>;
+  sleep(ms: number): Promise<void>;
+}
+
+const defaultLookupDeps: LookupDeps = {
+  lookup: (host) => dnsLookup(host, { all: true }),
+  async resolveDirect(host) {
+    const [v4, v6] = await Promise.allSettled([dnsResolve4(host), dnsResolve6(host)]);
+    const out: ResolvedAddress[] = [];
+    if (v4.status === 'fulfilled') out.push(...v4.value.map((address) => ({ address, family: 4 })));
+    if (v6.status === 'fulfilled') out.push(...v6.value.map((address) => ({ address, family: 6 })));
+    return out;
+  },
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** getaddrinfo 失败后的重试间隔；总计约 1.2 秒，不会把死域名拖成分钟级等待。 */
+const LOOKUP_RETRY_DELAYS_MS = [400, 800];
+
+/**
+ * 解析主机名，失败时先重试、再直接问配置的 DNS 服务器，最后才报 `blocked_url:dns`。
+ *
+ * 本机跑 Surge / Clash 这类代理时，getaddrinfo 会对同一个域名时好时坏（几秒内一次
+ * ENOTFOUND、下一次正常）。以前解析失败不在 network retry 之内，一次抽风就把整封
+ * 邮件按 `blocked_url:dns` 压进待确认，用户手动打开却什么问题都没有。
+ */
+export async function lookupAddresses(host: string, deps: LookupDeps = defaultLookupDeps): Promise<ResolvedAddress[]> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const addrs = await deps.lookup(host);
+      if (addrs.length > 0) return addrs;
+    } catch {
+      // 继续重试 / 回退
+    }
+    const delay = LOOKUP_RETRY_DELAYS_MS[attempt];
+    if (delay === undefined) break;
+    await deps.sleep(delay);
+  }
+  try {
+    const direct = await deps.resolveDirect(host);
+    if (direct.length > 0) return direct;
+  } catch {
+    // 直接解析也失败：按 DNS 失败处理
+  }
+  throw new Error(`blocked_url:dns:${host}`);
+}
+
 async function screenResolvedAddresses(host: string, addresses: string[]): Promise<string[]> {
   const blocked = addresses.filter((address) => isBlockedIp(address));
   if (blocked.length === 0) return [...addresses];
@@ -70,11 +125,7 @@ export async function resolvePublicUrl(urlStr: string): Promise<PublicUrlResolut
     return { url, addresses: [host] };
   }
   let addrs: { address: string; family: number }[];
-  try {
-    addrs = await dnsLookup(host, { all: true });
-  } catch {
-    throw new Error(`blocked_url:dns:${host}`);
-  }
+  addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
   return { url, addresses: await screenResolvedAddresses(host, addrs.map((a) => a.address)) };
 }
@@ -114,11 +165,7 @@ export async function resolveServiceUrl(urlStr: string): Promise<PublicUrlResolu
     return { url, addresses: [host] };
   }
   let addrs: { address: string; family: number }[];
-  try {
-    addrs = await dnsLookup(host, { all: true });
-  } catch {
-    throw new Error(`blocked_url:dns:${host}`);
-  }
+  addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
 
   if (isLoopbackHost(host)) {
@@ -176,11 +223,7 @@ export async function resolveLoopbackServiceUrl(urlStr: string): Promise<PublicU
     throw new Error(`blocked_url:redirect_policy:loopback_only:${host}`);
   }
   let addrs: { address: string; family: number }[];
-  try {
-    addrs = await dnsLookup(host, { all: true });
-  } catch {
-    throw new Error(`blocked_url:dns:${host}`);
-  }
+  addrs = await lookupAddresses(host);
   if (addrs.length === 0) throw new Error(`blocked_url:dns_empty:${host}`);
   const loopbackAddrs: string[] = [];
   for (const a of addrs) {

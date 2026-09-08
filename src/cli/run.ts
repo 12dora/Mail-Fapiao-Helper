@@ -12,6 +12,7 @@ import { identityMatches, isMailHash, resolveMailIdentity } from '../util/hash.j
 import { parseRunArgs, type RunOpts } from './args.js';
 import { launchBrowser } from './browser.js';
 import { acquireCommandLock } from './lock.js';
+import { selectPendingReplayPaths } from './pendingReplay.js';
 import { backfillProcessedFromLedgers, collectEmlPaths, recoverQuarantinedState } from './rebuildState.js';
 import { RUN_USAGE } from './usage.js';
 
@@ -277,8 +278,15 @@ export async function runWorkers(context: RunContext): Promise<void> {
   // CORE-09：--only-mail 优先使用 pending/<hash>.eml（待确认页重试的权威副本）。
   let emlPaths: string[];
   if (context.opts.pendingRetry === true) {
-    // 待确认队列自带每封邮件的 `.eml` 副本，samples 缓存被清理过也照样能重放。
-    emlPaths = await collectEmlPaths(context.pendingDir);
+    // 待确认队列自带每封邮件的 `.eml` 副本，samples 缓存被清理过也照样能重放；
+    // 但只重放 pending.csv 里仍待确认的那些，已出队的历史副本不再反复重跑。
+    const selection = selectPendingReplayPaths(
+      await collectEmlPaths(context.pendingDir),
+      join(context.pendingDir, 'pending.csv'),
+    );
+    emlPaths = selection.paths;
+    if (selection.stale > 0) log.info(`Pending retry: skipped ${selection.stale} already-resolved queue copies`);
+    if (selection.missing > 0) log.warn(`Pending retry: ${selection.missing} pending row(s) have no .eml copy in the queue directory`);
   } else if (context.opts.onlyMail !== undefined && isMailHash(context.opts.onlyMail)) {
     const target = context.opts.onlyMail.trim().toLowerCase();
     const pendingEml = join(context.pendingDir, `${target}.eml`);

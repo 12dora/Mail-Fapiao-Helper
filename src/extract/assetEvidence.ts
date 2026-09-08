@@ -65,14 +65,17 @@ export function looksLikeEmailChrome(text: string | undefined): boolean {
 }
 
 /**
- * 探测都不必做的链接：税务局的查验 / 数电票交付页（`inv-veri.chinatax.gov.cn`、
- * `dppt.<省>.chinatax.gov.cn:8443/v/…`）。它们是需要浏览器 + 验证码的网页，从来不是
+ * 探测都不必做的链接：税务局的查验页（`inv-veri.chinatax.gov.cn`）与数电票交付页
+ * （`dppt.<省>.chinatax.gov.cn:8443/v/…`）。它们是需要浏览器 + 验证码的网页，从来不是
  * 直接的文件下载，还常回 302/511；票本身由开票平台的下载链接或附件提供。
  */
 export function isProbeNoise(url: string): boolean {
   try {
-    const host = new URL(url).hostname.toLowerCase();
-    return host === 'chinatax.gov.cn' || host.endsWith('.chinatax.gov.cn');
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'inv-veri.chinatax.gov.cn') return true;
+    // 只否决交付页 `/v/…`：同一域名下 `/kpfw/fpjfzz/v1/exportDzfpwjEwm?Wjgs=PDF` 是真下载。
+    return host.endsWith('.chinatax.gov.cn') && /^\/v\//.test(parsed.pathname);
   } catch {
     return true;
   }
