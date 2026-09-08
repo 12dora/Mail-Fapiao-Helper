@@ -1,5 +1,5 @@
 /** 假任务的进度帧。抽出来只是为了让 fake/index.ts 里的每个方法都读得完。 */
-import type { FetchProgress, FileProgress, OperationProgress } from '../types.js';
+import type { FetchProgress, FileProgress, OcrFailureReason, OperationProgress } from '../types.js';
 
 export function fetchFrames(dryRun: boolean): FetchProgress[] {
   return [
@@ -65,7 +65,56 @@ export function fileFrames(): FileProgress[] {
   ];
 }
 
-export function ocrFrames(): OperationProgress[] {
+export interface OcrFrameOptions {
+  /** 只重试失败项：队列里只剩失败的那几份，文案与帧数都要跟着变。 */
+  retryFailed?: boolean;
+  /** 收尾帧要带回的失败原因，主进程只给前 3 条。 */
+  failureReasons?: OcrFailureReason[];
+}
+
+/** 只重试失败项时的进度帧：队列短，收尾时不再有失败。 */
+function retryFrames(total: number): OperationProgress[] {
+  const half = Math.max(1, Math.ceil(total / 2));
+  return [
+    {
+      operation: 'ocr',
+      phase: 'queue',
+      percent: 18,
+      total,
+      message: `队列中 ${total} 份上次失败的文件`,
+      kind: 'info',
+      done: false,
+    },
+    {
+      operation: 'ocr',
+      phase: 'recognize',
+      percent: 64,
+      total,
+      processed: half,
+      parsed: half,
+      message: `已重试 ${half} 份`,
+      kind: 'info',
+      done: false,
+    },
+    {
+      operation: 'ocr',
+      phase: 'done',
+      percent: 100,
+      total,
+      processed: total,
+      parsed: total,
+      failed: 0,
+      message: `已完成，重试 ${total} 份，全部识别成功`,
+      kind: 'success',
+      done: true,
+    },
+  ];
+}
+
+export function ocrFrames(options: OcrFrameOptions = {}): OperationProgress[] {
+  const reasons = options.failureReasons ?? [];
+  const failed = reasons.reduce((n, item) => n + item.count, 0);
+  if (options.retryFailed) return retryFrames(Math.max(1, failed));
   return [
     {
       operation: 'ocr',
@@ -110,6 +159,7 @@ export function ocrFrames(): OperationProgress[] {
       message: '已完成，识别 12 份，3 份信息不完整',
       kind: 'success',
       done: true,
+      ...(reasons.length > 0 ? { failureReasons: reasons } : {}),
     },
   ];
 }

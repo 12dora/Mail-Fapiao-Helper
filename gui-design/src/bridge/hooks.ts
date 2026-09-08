@@ -210,6 +210,18 @@ interface ChannelState {
 
 const EMPTY_CHANNEL: ChannelState = { latest: null, lines: [], active: false };
 
+/**
+ * 识别收尾时把失败原因逐条摊到日志里。
+ *
+ * 单条失败只发 `ocr_item_failed`（「文件识别失败，请查看技术详情」），几百份一起
+ * 失败时日志里就是同一句话刷屏，看不出到底是哪儿坏了。收尾事件带回的这几条才
+ * 说得清原因，所以单独落成日志行。
+ */
+function failureNotes(data: FetchProgress | OperationProgress | FileProgress): string[] {
+  if (!('operation' in data) || data.operation !== 'ocr' || !data.done) return [];
+  return (data.failureReasons ?? []).map((item) => `主要失败原因：${item.reason}（${item.count} 个）`);
+}
+
 /** 一条进度通道的累积状态。 */
 interface ChannelStore {
   get(): ChannelState;
@@ -246,7 +258,8 @@ function createChannelStore(channel: ProgressChannel): ChannelStore {
   }
 
   subscribe(CHANNEL_MAP[channel], (data) => {
-    const lines = data.message ? push(state.lines, data.message, data.kind ?? 'info') : state.lines;
+    let lines = data.message ? push(state.lines, data.message, data.kind ?? 'info') : state.lines;
+    for (const note of failureNotes(data)) lines = push(lines, note, 'warn');
     commit({ latest: data, active: !data.done, lines });
   });
 
