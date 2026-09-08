@@ -18,6 +18,7 @@ function deps(script) {
         return script.direct;
       },
       async sleep(ms) { calls.sleeps.push(ms); },
+      withDeadline: (promise) => promise,
     },
   };
 }
@@ -46,5 +47,17 @@ const ok = [{ address: '1.2.3.4', family: 4 }];
   assert.deepEqual(await lookupAddresses('healthy.example', t.deps), ok);
   assert.equal(t.calls.lookup, 1);
   assert.deepEqual(t.calls.sleeps, []);
+}
+{
+  // 卡住的解析按超时失败，不会无限等。
+  const calls = { direct: 0 };
+  const hanging = {
+    lookup: () => new Promise(() => {}),
+    resolveDirect: async () => { calls.direct++; return ok; },
+    sleep: async () => {},
+    withDeadline: (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`dns_timeout:${ms}`)), 5))]),
+  };
+  assert.deepEqual(await lookupAddresses('hanging.example', hanging), ok);
+  assert.equal(calls.direct, 1);
 }
 console.log('dns-retry-unit: passed');

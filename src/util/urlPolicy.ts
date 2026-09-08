@@ -27,22 +27,41 @@ export interface LookupDeps {
   lookup(host: string): Promise<ResolvedAddress[]>;
   resolveDirect(host: string): Promise<ResolvedAddress[]>;
   sleep(ms: number): Promise<void>;
+  /** 给单次解析加上限；超时按失败处理。 */
+  withDeadline<T>(promise: Promise<T>, ms: number): Promise<T>;
+}
+
+function raceDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`dns_timeout:${ms}`)), ms);
+    timer.unref();
+  });
+  return Promise.race([promise, deadline]).finally(() => { if (timer) clearTimeout(timer); });
 }
 
 const defaultLookupDeps: LookupDeps = {
   lookup: (host) => dnsLookup(host, { all: true }),
   async resolveDirect(host) {
-    const [v4, v6] = await Promise.allSettled([dnsResolve4(host), dnsResolve6(host)]);
-    const out: ResolvedAddress[] = [];
-    if (v4.status === 'fulfilled') out.push(...v4.value.map((address) => ({ address, family: 4 })));
-    if (v6.status === 'fulfilled') out.push(...v6.value.map((address) => ({ address, family: 6 })));
-    return out;
+    // 先 A 记录再 AAAA：一个成功就够，不为卡住的 AAAA 查询白等。
+    try {
+      const v4 = await raceDeadline(dnsResolve4(host), DIRECT_RESOLVE_DEADLINE_MS);
+      if (v4.length > 0) return v4.map((address) => ({ address, family: 4 }));
+    } catch {
+      // 继续试 AAAA
+    }
+    const v6 = await raceDeadline(dnsResolve6(host), DIRECT_RESOLVE_DEADLINE_MS);
+    return v6.map((address) => ({ address, family: 6 }));
   },
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  withDeadline: raceDeadline,
 };
 
 /** getaddrinfo 失败后的重试间隔；总计约 1.2 秒，不会把死域名拖成分钟级等待。 */
 const LOOKUP_RETRY_DELAYS_MS = [400, 800];
+/** 单次 getaddrinfo / 直连解析的上限：坏域名最坏约 3×3s + 1.2s + 2×2s，不会拖到分钟级。 */
+const LOOKUP_ATTEMPT_DEADLINE_MS = 3000;
+const DIRECT_RESOLVE_DEADLINE_MS = 2000;
 
 /**
  * 解析主机名，失败时先重试、再直接问配置的 DNS 服务器，最后才报 `blocked_url:dns`。
@@ -54,7 +73,7 @@ const LOOKUP_RETRY_DELAYS_MS = [400, 800];
 export async function lookupAddresses(host: string, deps: LookupDeps = defaultLookupDeps): Promise<ResolvedAddress[]> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const addrs = await deps.lookup(host);
+      const addrs = await deps.withDeadline(deps.lookup(host), LOOKUP_ATTEMPT_DEADLINE_MS);
       if (addrs.length > 0) return addrs;
     } catch {
       // 继续重试 / 回退
@@ -64,7 +83,7 @@ export async function lookupAddresses(host: string, deps: LookupDeps = defaultLo
     await deps.sleep(delay);
   }
   try {
-    const direct = await deps.resolveDirect(host);
+    const direct = await deps.withDeadline(deps.resolveDirect(host), DIRECT_RESOLVE_DEADLINE_MS * 2 + 100);
     if (direct.length > 0) return direct;
   } catch {
     // 直接解析也失败：按 DNS 失败处理

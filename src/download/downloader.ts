@@ -5,6 +5,7 @@ import type { DocumentFormat, PdfArtifact } from '../extract/types.js';
 import { withDocumentClassification } from '../extract/classify.js';
 import { contentHash } from '../util/hash.js';
 import type { Logger } from '../log.js';
+import { invoiceNumbersIn } from '../extract/assetEvidence.js';
 import type { ArchivePlannedFile } from './archiveJournal.js';
 
 export interface DownloadResult {
@@ -434,6 +435,7 @@ function commitBatch(state: ArchiveBatchState): DownloadResult[] {
 /**
  * 同一 http(s) 来源已归档、但这次下载的字节变了：接口每次重新生成 PDF（时间戳 /
  * 二维码不同），票还是那一张。既有文件仍与台账 contentHash 一致就直接复用。
+ * 前提是链接里带着发票号——那才说明「同一链接 = 同一张票」。
  */
 function reuseRegeneratedDownload(
   state: ArchiveBatchState,
@@ -443,6 +445,9 @@ function reuseRegeneratedDownload(
   hash: string,
 ): DownloadResult | null {
   if (!/^https?:\/\//i.test(pdf.source)) return null;
+  // 只认「链接本身钉死了发票号」的来源（如 …exportDzfpwjEwm?Fphm=<20 位>）：同一链接
+  // 同一发票号，字节不同只能是重新生成；没有发票号的链接换了内容就当新文档归档。
+  if (invoiceNumbersIn(pdf.source).length === 0) return null;
   const entry = state.opts.alreadyArchivedBySource?.get(pdf.source);
   if (!entry || entry.contentHash === hash) return null;
   const hit = tryReuseArchived(state.invoicesDir, entry.filename, entry.contentHash, state.log);
