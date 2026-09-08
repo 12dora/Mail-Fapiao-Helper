@@ -233,6 +233,30 @@ function normalizeAmount(value: string): string {
   return `${sign}${integer}${fraction ? `.${fraction}` : ''}`;
 }
 
+/**
+ * 按身份索引识别结果（success 不被后来的失败覆盖）。
+ * 早期识别出来的结果行没有 contentHash（历史数据约百行）：拿它去校验文件必然失败，
+ * 整组被跳成 keeper_unverified。台账里有同一文件的 contentHash，以台账为准回填。
+ */
+function indexOcrResults(cfg: Config, cwd: string): ArtifactIndex<Record<string, string>> {
+  const ledgerHash = new Map<string, string>();
+  for (const row of readCsvRows(path.resolve(cwd, cfg.output.csv))) {
+    const hash = (row.contentHash ?? '').trim().toLowerCase();
+    if (row.filename && hash && !ledgerHash.has(row.filename)) ledgerHash.set(row.filename, hash);
+  }
+  const withLedgerHash = (row: Record<string, string>): Record<string, string> => {
+    if ((row.contentHash ?? '').trim()) return row;
+    const hash = ledgerHash.get(row.filename ?? '');
+    return hash ? { ...row, contentHash: hash } : row;
+  };
+  const index = new ArtifactIndex<Record<string, string>>();
+  for (const row of readCsvRows(path.resolve(cwd, cfg.ocr.resultsCsv))) {
+    index.set(row, withLedgerHash(row), (existing, next) =>
+      !((existing.status ?? '').toLowerCase() === 'success' && (next.status ?? '').toLowerCase() !== 'success'));
+  }
+  return index;
+}
+
 function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeReport {
   const report: DedupeReport = {
     mode: 'invoice-no', applied: apply, recovered: 0, quarantineDir: null,
@@ -240,12 +264,7 @@ function runInvoiceNoDedupe(cfg: Config, apply: boolean, cwd: string): DedupeRep
     groups: [], conflicts: 0, skipped: [],
   };
   const invoicesDir = path.resolve(cwd, cfg.paths.invoices);
-  const resultsCsv = path.resolve(cwd, cfg.ocr.resultsCsv);
-  const index = new ArtifactIndex<Record<string, string>>();
-  for (const row of readCsvRows(resultsCsv)) {
-    index.set(row, row, (existing, next) =>
-      !((existing.status ?? '').toLowerCase() === 'success' && (next.status ?? '').toLowerCase() !== 'success'));
-  }
+  const index = indexOcrResults(cfg, cwd);
   const groups = new Map<string, Record<string, string>[]>();
   const supporting = supportingFilenames(cfg, cwd);
   for (const row of index.values()) {
