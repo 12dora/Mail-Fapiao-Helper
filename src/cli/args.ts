@@ -22,6 +22,8 @@ export interface OcrOpts {
   command: 'run' | 'summary';
   configPath: string;
   force: boolean;
+  /** 仅重试 results CSV 中 status=error 的行，保留 success/partial。 */
+  retryFailed: boolean;
   singleItem: boolean;
   concurrency: number;
   allowParseFailures: boolean;
@@ -118,30 +120,53 @@ export function parseOrganizeArgs(argv: string[]): OrganizeOpts | 'help' {
   return opts;
 }
 
+/** 解析单个 OCR 选项；返回消耗后的下标。遇到 --help 返回 'help'。 */
+function consumeOcrOption(opts: OcrOpts, rest: string[], i: number): number | 'help' {
+  const a = rest[i];
+  if (a === '-h' || a === '--help') return 'help';
+  if (a === '--force') { opts.force = true; return i; }
+  if (a === '--retry-failed') { opts.retryFailed = true; return i; }
+  if (a === '--single-item') { opts.singleItem = true; return i; }
+  if (a === '--allow-parse-failures') { opts.allowParseFailures = true; return i; }
+  if (a === '--json') { opts.json = true; return i; }
+  if (a === '--config') {
+    opts.configPath = requireValue(rest, i + 1, a);
+    return i + 1;
+  }
+  if (a === '--concurrency') {
+    const v = Number(requireValue(rest, i + 1, a));
+    if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
+    opts.concurrency = v;
+    return i + 1;
+  }
+  throw new Error(`unknown option: ${a}`);
+}
+
+function assertOcrOpts(opts: OcrOpts): void {
+  if (opts.retryFailed && opts.force) {
+    throw new Error('--retry-failed cannot be combined with --force');
+  }
+  if (opts.command !== 'summary') return;
+  if (opts.force || opts.retryFailed || opts.singleItem || opts.concurrency !== 1 || opts.allowParseFailures) {
+    throw new Error('--force, --retry-failed, --single-item, --concurrency and --allow-parse-failures are only valid for mfh ocr run');
+  }
+}
+
 export function parseOcrArgs(argv: string[]): OcrOpts | 'help' {
   if (argv.length === 0) return 'help';
   const [subcmd, ...rest] = argv;
   if (subcmd === '-h' || subcmd === '--help') return 'help';
   if (subcmd !== 'run' && subcmd !== 'summary') throw new Error(`unknown ocr command: ${subcmd}`);
-  const opts: OcrOpts = { command: subcmd, configPath: './config.json', force: false, singleItem: false, concurrency: 1, allowParseFailures: false, json: false };
+  const opts: OcrOpts = {
+    command: subcmd, configPath: './config.json', force: false, retryFailed: false,
+    singleItem: false, concurrency: 1, allowParseFailures: false, json: false,
+  };
   for (let i = 0; i < rest.length; i++) {
-    const a = rest[i];
-    if (a === '-h' || a === '--help') return 'help';
-    if (a === '--force') { opts.force = true; continue; }
-    if (a === '--single-item') { opts.singleItem = true; continue; }
-    if (a === '--concurrency') {
-      const v = Number(requireValue(rest, ++i, a));
-      if (!Number.isInteger(v) || v <= 0) throw new Error('--concurrency expects a positive integer');
-      opts.concurrency = v; continue;
-    }
-    if (a === '--allow-parse-failures') { opts.allowParseFailures = true; continue; }
-    if (a === '--json') { opts.json = true; continue; }
-    if (a === '--config') { opts.configPath = requireValue(rest, ++i, a); continue; }
-    throw new Error(`unknown option: ${a}`);
+    const next = consumeOcrOption(opts, rest, i);
+    if (next === 'help') return 'help';
+    i = next;
   }
-  if (opts.command === 'summary' && (opts.force || opts.singleItem || opts.concurrency !== 1 || opts.allowParseFailures)) {
-    throw new Error('--force, --single-item, --concurrency and --allow-parse-failures are only valid for mfh ocr run');
-  }
+  assertOcrOpts(opts);
   return opts;
 }
 
