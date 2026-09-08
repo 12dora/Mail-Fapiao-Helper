@@ -1719,14 +1719,20 @@ async function testIncidentalLinkFailuresDoNotHoldArchivedMailInQueue() {
     const withInvoiceLink = pdfMail('<incidental-real@example.com>', '电子发票（含发票链接）')
       .replace('发票见附件。', '发票见附件。\nhttp://127.0.0.1:9/invoice/download?id=1');
 
+    // 真实案例（2026-09-08）：开票平台页脚的首页链接 `ticket.download.<平台>/index_email.html`，
+    // host 里带 ticket/download 但路径只是落地页；票已从附件归档，它打不通不得进待确认。
+    const withLandingPage = pdfMail('<incidental-landing@example.com>', '电子发票（含平台首页）')
+      .replace('发票见附件。', '发票见附件。\nhttp://127.0.0.1:9/index_email.html');
+
     await writeFile(join(tmp, 'raw', 'noise.eml'), withNoiseLinks);
     await writeFile(join(tmp, 'raw', 'real.eml'), withInvoiceLink);
+    await writeFile(join(tmp, 'raw', 'landing.eml'), withLandingPage);
 
     await runMfh(['run', '--config', configPath, '--state', join(tmp, 'state.json'), '--concurrency', '1'])
       .catch((err) => err); // 对照组会以非 0 退出（仍有待确认），退出码不是本用例的断言点
 
     const ledger = await readFile(cfg.output.csv, 'utf8');
-    for (const id of ['<incidental-noise@example.com>', '<incidental-real@example.com>']) {
+    for (const id of ['<incidental-noise@example.com>', '<incidental-real@example.com>', '<incidental-landing@example.com>']) {
       if (!ledger.includes(id)) fail(`attachment invoice for ${id} must be archived regardless of link failures`);
     }
 
@@ -1734,6 +1740,9 @@ async function testIncidentalLinkFailuresDoNotHoldArchivedMailInQueue() {
     const pendingText = existsSync(pendingPath) ? await readFile(pendingPath, 'utf8') : '';
     if (pendingText.includes('incidental-noise@example.com')) {
       fail('an archived mail whose only failures were non-invoice links must not stay in the pending queue');
+    }
+    if (pendingText.includes('incidental-landing@example.com')) {
+      fail('a platform landing page that fails to probe must not hold an archived mail in the pending queue');
     }
     if (!pendingText.includes('incidental-real@example.com')) {
       fail('a failing link that does look like an invoice entry must still leave a pending record');
