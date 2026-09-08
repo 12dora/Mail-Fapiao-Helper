@@ -234,6 +234,37 @@ function buildLibrary(inbox: InboxRow[]): InvoiceRow[] {
   return rows;
 }
 
+/**
+ * 预览模式下的「仅重试失败项」：把识别失败的行翻成完整，其余行原样留着。
+ *
+ * 真机上这是主进程重跑一遍 OCR 之后的结果，这里直接把结果摆出来——重点是让界面
+ * 能看到「成功的没被清掉、失败的补上了」这件事。返回补上的份数。
+ *
+ * 换掉整个数组、也换掉改过的那些行对象，不在原对象上改字段：真实 IPC 每次回的
+ * 都是新对象，页面的筛选结果是按引用记忆的，原地改字段界面不会跟着变。
+ */
+export function retryFailedRows(variant: FakeVariant): number {
+  const rng = makeRng(778899);
+  const data = dataset(variant);
+  let fixed = 0;
+  data.library = data.library.map((row, index) => {
+    if (row.status !== '识别失败') return row;
+    const kind = DOC_KINDS[index % DOC_KINDS.length] as (typeof DOC_KINDS)[number];
+    fixed++;
+    return {
+      ...row,
+      status: '完整',
+      error: '',
+      seller: pick(rng, SELLERS),
+      invoiceType: kind.invoiceType,
+      // 附属材料本来就没有发票号和金额，补上反而与其余附属材料对不上。
+      invoiceNo: kind.documentType === 'supporting' ? row.invoiceNo : invoiceNumber(index),
+      amount: kind.documentType === 'supporting' ? row.amount : (12 + rng() * 4200).toFixed(2),
+    };
+  });
+  return fixed;
+}
+
 // ---------------------------------------------------------------------------
 // 待确认
 // ---------------------------------------------------------------------------

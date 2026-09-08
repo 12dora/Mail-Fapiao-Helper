@@ -352,6 +352,8 @@ export interface RunOcrPayload {
   force?: boolean;
   resetResults?: boolean;
   concurrency?: number;
+  /** 只重跑上次识别失败的那些行，成功的一律不动。与 force 互斥。 */
+  retryFailed?: boolean;
 }
 
 export interface OrganizePayload {
@@ -608,6 +610,12 @@ export interface FetchProgress {
   done: boolean;
 }
 
+/** 一条失败原因和它命中的份数。 */
+export interface OcrFailureReason {
+  reason: string;
+  count: number;
+}
+
 export interface OperationProgress {
   operation: 'ocr';
   phase: string;
@@ -621,6 +629,8 @@ export interface OperationProgress {
   message: string;
   kind: ProgressKind;
   done: boolean;
+  /** 只有收尾事件（done）才有：按份数降序的前 3 条失败原因；message 里已经带了第一条。 */
+  failureReasons?: OcrFailureReason[];
 }
 
 export interface FileProgress {
