@@ -46,7 +46,7 @@ try {
   const file = path.join(cwd, `samples/${large}.eml`);
   const fd = fs.openSync(file, 'w'); fs.ftruncateSync(fd, 32 * 1024 * 1024 + 1); fs.closeSync(fd);
   const handlers = new Map();
-  registerDetailHandlers({ handleTrusted: (name, fn) => handlers.set(name, fn), readConfigForPaths: () => cfg, realDataDir: () => cwd, ledgerCsvPath: () => path.join(cwd, 'invoices.csv'), invoicesDirPath: () => root, appSummary: () => { throw new Error('Details must not build a summary'); }, issueOpenableHandle: target => path.relative(cwd, target), resolveOpenTarget: target => ({ ok: true, path: target }) });
+  registerDetailHandlers({ handleTrusted: (name, fn) => handlers.set(name, fn), readConfigForPaths: () => cfg, realDataDir: () => cwd, ledgerCsvPath: () => path.join(cwd, 'invoices.csv'), invoicesDirPath: () => root, appSummary: () => { throw new Error('Details must not build a summary'); }, issueOpenableHandle: target => path.relative(cwd, target).split(path.sep).join('/'), resolveOpenTarget: target => ({ ok: true, path: target }) });
   assert.equal((await handlers.get('mfh:mail-detail')({}, { hash: large })).code, 'eml_unreadable');
   const many = '9'.repeat(32);
   const parts = Array.from({ length: 55 }, (_, i) => `--boundary\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename="${i}.pdf"\r\n\r\npdf${i}\r\n`).join('');
