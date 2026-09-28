@@ -46,3 +46,10 @@ release-notes.md
 # logs
 *.log
 npm-debug.log*
+
+# 构建/测试产物与 AI agent 工作记录(可能含本机路径、主机名等)不入库
+coverage/
+.nyc_output/
+prompt-archives/
+.omo/
+**/scratchpad/
