@@ -63,7 +63,7 @@ function writeCsvAtomic(target: string, text: string): void {
   const temp = `${target}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
     fs.writeFileSync(temp, text, { encoding: 'utf8', mode: 0o600 });
-    const fd = fs.openSync(temp, 'r');
+    const fd = fs.openSync(temp, 'r+');
     try {
       fs.fsyncSync(fd);
     } finally {
