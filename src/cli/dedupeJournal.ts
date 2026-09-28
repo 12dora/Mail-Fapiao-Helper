@@ -37,7 +37,7 @@ export function writeAtomicJson(file: string, value: unknown): void {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-    const fd = fs.openSync(temp, 'r');
+    const fd = fs.openSync(temp, 'r+');
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temp, file);
     syncDirectory(path.dirname(file));
@@ -123,7 +123,7 @@ function finishPlan(planFile: string, plan: DedupePlan): PlanCounts {
         // Publish only complete copies, so an interrupted copy cannot poison recovery.
         const temp = `${move.target}.copying`;
         fs.copyFileSync(move.source, temp);
-        const fd = fs.openSync(temp, 'r');
+        const fd = fs.openSync(temp, 'r+');
         try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
         fs.renameSync(temp, move.target);
         fs.unlinkSync(move.source);
