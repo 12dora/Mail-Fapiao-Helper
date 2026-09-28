@@ -35,8 +35,8 @@ function zipEntries(archive) {
 
 function tarEntries(archivePath) {
   const options = { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 };
-  const names = execFileSync('tar', ['-tzf', archivePath], options).trimEnd().split('\n');
-  const listing = execFileSync('tar', ['-tvzf', archivePath], options).trimEnd().split('\n');
+  const names = execFileSync('tar', ['-tzf', archivePath], options).trimEnd().split(/\r?\n/);
+  const listing = execFileSync('tar', ['-tvzf', archivePath], options).trimEnd().split(/\r?\n/);
   if (names.length !== listing.length || listing.some((line) => !['-', 'd'].includes(line[0]))) {
     throw new Error('Archive links and special files are not allowed');
   }
