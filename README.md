@@ -392,7 +392,8 @@ ESLint 覆盖后端、脚本、渲染层 TS/TSX 与 GUI 测试；现有结构性
 ### 跑测试
 
 ```bash
-npm test                  # lint + 工具检查 + build + typecheck + CLI 回归 + Electron 端到端
+npm test                  # 发版前全量检查：lint + 工具检查 + build + typecheck + CLI 回归 + Electron 端到端
+node gui-design/tests/<name>-unit.mjs   # 开发中只跑改动相关的测试脚本（清单见 package.json 的 test:*；先 npm run build）
 npm run test:cli          # CLI 回归与集成
 npm run test:electron     # 真 Electron 冒烟 + IPC fixture + 单元套件
 npm run test:browser      # 渲染层浏览器 E2E，需要 Playwright Chromium，单独跑
