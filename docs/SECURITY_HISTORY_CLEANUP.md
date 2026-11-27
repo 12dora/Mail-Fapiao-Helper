@@ -17,7 +17,7 @@
 | `docs/EFAPIAO_UPSTREAM_FEEDBACK.md` | 票号、hash、发件人、本机 `.mfh-cache` 路径 |
 | `gui-design/tests/cli-regression.mjs` | 真实商户 + 金额 + 发票号码 组合（OCR 去重 fixture） |
 
-当前树中的上述内容已替换为明显虚构值。历史净化是独立的后续动作。
+当前树中的上述内容已替换为明显虚构值；其中 `docs/SAMPLE_ANALYSIS.md`、`docs/PROGRESS.md` 已从当前树删除（仅历史中仍有），`docs/EFAPIAO_UPSTREAM_FEEDBACK.md` 保留匿名版。历史净化是独立的后续动作。
 
 ## 执行前检查清单
 
@@ -91,7 +91,7 @@ git filter-repo --force \
 
 说明：
 
-- `--invert-paths` 从 **全部历史** 中删除三份敏感过程文档（当前树若需保留匿名版，应在重写后重新添加 scrub 后的版本并单独 commit）。
+- `--invert-paths` 从 **全部历史** 中删除三份敏感过程文档；其中 `docs/EFAPIAO_UPSTREAM_FEEDBACK.md` 当前树仍保留匿名版，重写后需重新添加并单独 commit。
 - `--replace-text` 替换测试 fixture 中的票面字符串，避免仅删文档后历史仍残留测试行。
 
 ### 3. 重写 tag

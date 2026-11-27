@@ -14,8 +14,6 @@
 - 不做发票真伪校验、不做财务报表
 - 不抽象“将来可能用到”的空接口
 
-> 历史说明：早期 v1 曾规划“仅 CLI + pkg/SEA 打包”。当前产品形态为 Electron + electron-builder，并保留完整 CLI。
-
 ## 3. 技术栈
 
 | 项 | 选择 | 理由 |
@@ -58,10 +56,6 @@
 | 设置 | 邮箱 / 保存 / 识别 / 关于 四个标签页 |
 | CLI | `mfh fetch` / `run` / `ocr run` / `organize` / `pending` / `dedupe` 等 |
 
-## 7. 信任与发布（产品承诺）
+## 7. 信任与发布
 
-- **稳定 Release**：签名 +（macOS）公证；仅 `vMAJOR.MINOR.PATCH`
-- **未签名 prerelease**：明确标记、文件名含 `-unsigned`，不保证 Gatekeeper/SmartScreen 静默通过
-- **开发 artifact**：workflow 上传，默认不进 Releases
-
-详见 README 下载与发布章节。
+发布通道（稳定 / 未签名 prerelease / 开发 artifact）见 [ARCHITECTURE.md §2.7](ARCHITECTURE.md) 与 README「首次打开」「发布到 GitHub Release」。

@@ -47,6 +47,10 @@ flowchart LR
 - 归档协调键：`(messageId, source, contentHash)`，不是单独的 `messageId + source`。
 - 票据身份：`hash + filename + contentHash`（见 `util/identity.ts`）。
 
+### 2.1.1 单文档内存上限（R4）
+
+单个文档 / 单个响应的缓冲上限为 50 MiB（`MAX_DOC_BYTES`，`src/util/pinnedFetch.ts`）；超限按失败处理，不截断入库。
+
 ### 2.2 归档事务（APP-03）
 
 阶段（`<invoicesDir>/.journal/<txId>.json`，fsync）：
@@ -86,8 +90,8 @@ esbuild 打包成 `gui-design/dist/app.js` + `app.css`。不走 CDN，CSP 只允
 - **假桥接**：`bridge/fake/` 在没有 `window.mfhBridge` 或带 `?fake=…` 时接管全部通道，
   用于浏览器预览、截图与浏览器 E2E：`?fake=1` 正常一屏，`?fake=empty` 空状态，
   `?fake=broken` 配置损坏。**只在渲染层，主进程里没有对应物。**
-- **新增 IPC 通道**：`mfh:open-mail`、`mfh:mail-detail`、`mfh:invoice-detail`、`mfh:dedupe`、
-  `mfh:open-external`、`mfh:pick-directory`、`mfh:export-csv`。主进程未实现时
+- **按需入口**：`mfh:open-mail`、`mfh:mail-detail`、`mfh:invoice-detail`、`mfh:dedupe`、
+  `mfh:open-external`、`mfh:pick-directory`、`mfh:export-csv` 等通道在主进程未实现时，
   `bridge.supports(name)` 返回 false，界面隐藏入口而不是摆一个点不动的按钮。
 
 ### 2.6 浏览器策略
@@ -133,19 +137,20 @@ CLI **不会**自动 `npx playwright install`。桌面版也不“随应用准�
 
 发布 workflow 必须跑 `test:core` **与** `test:browser`。
 
-## 5. 历史决策（ADR 摘要）
+## 5. 仍然约束实现的决策
 
-| 日期 | 决策 |
+| 决策 | 要点 |
 |---|---|
-| 2026-05 | 文件型状态，无数据库 |
-| 2026-07 | Electron 桌面壳；schema v3；archive journal；data-dir 锁 token 继承 |
-| 2026-07 | mock OCR 需 `MFH_ALLOW_MOCK_OCR=1`；邮件 hash 扩至 32 hex（有 raw 时） |
-| 2026-09 | SSRF 判定引入解析器画像（`src/util/resolverProfile.ts`）：fake-IP 代理把公网域名映射进 `198.18.0.0/15` 等占位段时，仅放行**域名解析结果**；内网段与 IP 字面量始终拒绝，`MFH_RESERVED_IP_POLICY=strict` 可关闭 |
-| 2026-09 | `ExtractIssue.incidental`：票已归档时，仅由「本来就不是发票」的目标（追踪链接、数电 XML 副本）造成的失败不再降级为部分成功；`mfh pending retry` 批量重放待确认队列 |
-| 2026-09 | ZIP 解包支持一层嵌套（`MAX_ZIP_NESTING_DEPTH=2`，票根网通行费「包中包」），预算跨层共享；同容器内 `<stem>.pdf` + `<stem>.ofd` 只留 PDF；附件流程里「压缩包零产出」必须记 issue，不得静默通过 |
-| 2026-09 | 待确认页新增「全部重试」：`mfh:run-pipeline` 带 `pendingRetry` 标志转跑 `mfh pending retry`，与整轮管线共用 pipeline 锁与 MUTEX_GROUPS |
-| 2026-09 | `src/extract/assetEvidence.ts`：票面证据只看**路径**不看 host——开票平台 CDN 同时供应自家 logo/广告/二维码/阅读器安装包，旧的 host 判据把 99 张物料图当成发票归档 |
-| 2026-09 | 图片附件按 MIME 语义判定：`multipart/related` 且非 `Content-Disposition: attachment` = 正文内联物料；仅在同封另有真文档时才静默丢弃 |
-| 2026-09 | `containerStemKey()` 统一 PDF/OFD 同票判据（同一次投递 + 同容器 + 非通用词干），压缩包内条目与同封附件共用；`mfh dedupe` 复用同一函数回溯清理，规则一致才不会来回抖动 |
-| 2026-09 | 渲染层重写为 React 18 + Ant Design 5 单页（esbuild 打包，hash 路由，桥接中心统一订阅）；旧的多页静态 HTML 渲染层整体删除 |
-| 2026-09 | 「只归档到附属材料」报警（`supportingOnlyReason()`）：一封邮件的产出**全是**汇总单 / 订单明细 / 结账单时判为部分成功并进待确认。汇总单归档成功会让整封邮件按 archived 干净收尾，票根网通行费 34 张票、星星充电 2 张票就是这样静默丢的——待确认队列里一条都看不到 |
+| 文件型状态，无数据库 | `state.json` + CSV 台账 + 归档目录 |
+| Electron 桌面壳 + 数据目录锁 | schema v3、archive journal；锁所有权靠 token 继承 |
+| mock OCR 需 `MFH_ALLOW_MOCK_OCR=1` | 只在可证明的开发树生效，发布包 fail closed |
+| 邮件 hash | 有 raw 时 32 位 hex；无 raw 时保留历史 12 位 sha1 |
+| SSRF 解析器画像（`src/util/resolverProfile.ts`） | fake-IP 代理把公网域名映射进 `198.18.0.0/15` 等占位段时，仅放行**域名解析结果**；内网段与 IP 字面量始终拒绝；`MFH_RESERVED_IP_POLICY=strict` 关闭自动判断 |
+| `ExtractIssue.incidental` | 票已归档时，仅由「本来就不是发票」的目标（追踪链接、数电 XML 副本）造成的失败不降级为部分成功 |
+| 批量重放 | `mfh pending retry`；GUI「全部重试」经 `mfh:run-pipeline` 的 `pendingRetry` 标志转跑它，与整轮管线共用 pipeline 锁与互斥组 |
+| ZIP 解包 | 支持一层嵌套（`MAX_ZIP_NESTING_DEPTH=2`，`src/sites/common.ts`），预算跨层共享；压缩包零产出必须记 issue，不得静默通过 |
+| PDF/OFD 同票判据 | `containerStemKey()`（同一次投递 + 同容器 + 非通用词干）；压缩包内条目、同封附件与 `mfh dedupe` 共用，规则一致才不会来回抖动；同票只留 PDF |
+| 票面证据只看**路径**不看 host（`src/extract/assetEvidence.ts`） | 开票平台 CDN 同时供应自家 logo / 广告 / 二维码 / 阅读器安装包 |
+| 图片附件按 MIME 语义判定 | `multipart/related` 且非 `Content-Disposition: attachment` = 正文内联物料；仅在同封另有真文档时才静默丢弃 |
+| 「只归档到附属材料」报警（`supportingOnlyReason()`） | 一封邮件的产出**全是**汇总单 / 订单明细 / 结账单时判为部分成功并进待确认，否则汇总单归档成功会让整封邮件静默按已完成收尾 |
+| 渲染层 | React 18 + Ant Design 5 单页（esbuild 打包、hash 路由、桥接中心统一订阅） |

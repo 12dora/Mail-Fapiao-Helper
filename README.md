@@ -42,8 +42,8 @@
 
 | 操作系统 | 推荐文件 | 备用 |
 |---|---|---|
-| macOS（Apple Silicon / M 系芯片） | `发票助手-<version>-arm64.dmg` | `发票助手-<version>-arm64-mac.zip` |
-| Windows 10 / 11（x64） | `发票助手 Setup <version>.exe`（带安装向导） | `发票助手-<version>-win.zip`（解压即用） |
+| macOS（Apple Silicon / M 系芯片） | `mail-fapiao-helper-<version>-arm64-unsigned.dmg` | `mail-fapiao-helper-<version>-arm64-unsigned.zip` |
+| Windows 10 / 11（x64） | `mail-fapiao-helper-setup-<version>-x64-unsigned.exe`（带安装向导） | `mail-fapiao-helper-<version>-x64-unsigned.zip`（解压即用） |
 
 **未提供发行版的平台**：
 
@@ -55,7 +55,7 @@
 
 ## 三、首次打开
 
-### 两种发布通道（请先认准再下载）
+### 发布通道（请先认准再下载）
 
 GitHub [Releases](../../releases) 上可能同时存在：
 
@@ -71,7 +71,7 @@ GitHub [Releases](../../releases) 上可能同时存在：
 
 | 通道 | 如何识别 | 签名 | 适用场景 |
 |---|---|---|---|
-| **正式 Release（当前）** | GitHub 标记为 Latest；tag 形如 `v0.0.7`；标题含「未签名」；资产名含 `-unsigned` | **未签名、未公证** | 个人本机使用 |
+| **正式 Release（当前）** | GitHub 标记为 Latest；tag 形如 `vX.Y.Z`；标题含「未签名」；资产名含 `-unsigned` | **未签名、未公证** | 个人本机使用 |
 | **未签名 prerelease** | GitHub 标记为 **Pre-release**；tag 含 `-unsigned.N` | **未签名、未公证** | 内测 |
 | **开发构建 artifact** | 不在 Releases；只在 Actions workflow 产物里（约 14 天） | 未签名 | 本地联调 |
 
@@ -80,25 +80,21 @@ GitHub [Releases](../../releases) 上可能同时存在：
 与 Authenticode 校验，任一项不过就拒绝发布。等证书 secrets 配好后，把该 workflow 顶部
 被注释掉的 `push.tags` 触发器恢复，正式通道即可重新签名发布；届时本节需要同步更新。
 
-### 如果你拿到的是未签名包（prerelease、开发构建，或本项目早期版本）
+### 放行未签名安装包
 
-未签名包意味着**系统无法替你验证来源和完整性**，Gatekeeper / SmartScreen 的警告是真实有效的信号，不是误报。
+Gatekeeper / SmartScreen 的警告是真实信号。请只从本仓库 Releases 下载并核对 SHA-256，不要从转发的网盘、群文件安装；受管设备、公司电脑、处理敏感票据的机器请按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
 
-- 请只从本仓库下载，并核对 commit；不要从转发的网盘、群文件安装。
-- **受管设备、公司电脑、处理敏感票据的机器不要安装未签名构建**——当前没有已签名的安装包可用，请按 [第八节](#八从源码运行--自行打包) 自行从源码构建。
-- macOS：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），弹窗里再点 **打开**。系统记住这一次授权后即可正常使用。
+- macOS：在"应用程序"里 **按住 Control 点击图标 → 打开**（不要直接双击），弹窗里再点 **打开**。系统记住这一次授权后即可正常使用。若提示"已损坏"，先核对校验值：`shasum -a 256 <下载的 .dmg>`，一致则按上面的方法放行；不一致说明文件在传输中被截断或改动，删掉重新下载。
 - Windows：SmartScreen 提示时，先确认文件来源，再点 **更多信息 → 仍要运行**。
 
-> **不要**执行 `xattr -dr com.apple.quarantine` 之类的递归命令去"修好"它。那会把整个目录下所有文件的隔离标记一起清掉——包括你并不打算信任的东西——而且会掩盖掉真正的损坏/篡改提示。上面的"右键 → 打开"只对这一个 app 生效，是范围最小的做法。
->
-> 如果右键打开后系统仍然坚持"已损坏"，请把下载的文件删掉重新下载：这通常说明文件在传输中被截断或被改动过。
+> **不要**执行 `xattr -dr com.apple.quarantine` 之类的递归命令去"修好"它：它会把整个目录下所有文件的隔离标记一起清掉（包括你并不打算信任的东西），并掩盖真正的损坏/篡改提示。
 
 ### 安装步骤
 
 - **macOS**：双击 `.dmg`，把"发票助手"拖进 **应用程序**，然后双击打开。
-- **Windows**：双击 `发票助手 Setup <version>.exe`，按引导安装，从开始菜单打开。
+- **Windows**：双击 `*-setup-*.exe`，按引导安装，从开始菜单打开。
 
-> 免安装方案：下载 `发票助手-<version>-win.zip`，解压到任意目录，双击 `发票助手.exe`，第一次同样会触发 SmartScreen。
+> 免安装方案：下载 Windows 的 `.zip`，解压到任意目录，双击 `发票助手.exe`，第一次同样会触发 SmartScreen。
 
 ---
 
@@ -184,34 +180,9 @@ pending/               # 待确认邮件（含原 .eml 与索引）
 ## 七、常见问题
 
 <details>
-<summary>macOS 提示"无法打开'发票助手'，因为它来自身份不明的开发者"</summary>
+<summary>macOS 提示"身份不明的开发者"/"应用已损坏"，Windows SmartScreen 阻止运行</summary>
 
-应用程序文件夹里**按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。系统记住后再双击就不会拦。
-</details>
-
-<details>
-<summary>macOS 提示"应用已损坏，无法打开"</summary>
-
-当前所有安装包都未签名（见 [第二节](#两种发布通道请先认准再下载)），因此这个提示是**预期会出现的**，
-并不代表文件一定损坏。但它同时也是"文件在下载中被改动"的真实信号——**先核对发布说明里的
-SHA-256 校验值再放行**：
-
-```bash
-shasum -a 256 ~/Downloads/mail-fapiao-helper-0.0.7-arm64-unsigned.dmg
-```
-
-校验值一致后，正确做法是：在"应用程序"里 **按住 Control 点击图标 → 打开**，弹窗里再点 **打开**。
-这只对这一个 app 放行。
-
-**请不要**用 `xattr -dr com.apple.quarantine <目录>` 递归清除隔离标记：它会连带信任你没打算信任的文件，并且会让真正的"文件损坏/被篡改"提示也一并消失。
-
-如果右键打开仍然失败，说明文件很可能在下载中损坏或被改动——删掉重新从 [Releases](../../releases) 下载，并核对发布说明里的 commit。
-</details>
-
-<details>
-<summary>Windows SmartScreen 阻止运行</summary>
-
-点 **更多信息 → 仍要运行**。
+安装包均未签名，这些提示是预期会出现的，处理方法见 [放行未签名安装包](#放行未签名安装包)。
 </details>
 
 <details>
@@ -271,10 +242,6 @@ node dist/index.js pending retry --config <config.json> --state <state.json>
 
 随包附带的 **通行费电子票据汇总单**（票据 / 行程）会被识别为「支撑材料」，
 照常归档但不进 OCR 队列。
-
-> **v0.0.7 之前的版本**只解一层压缩包，「包中包」格式会一份票都取不到，而且同封
-> 邮件里的汇总单归档成功会让整封邮件按"已完成"收尾——丢票在界面上看不出来。
-> 升级后请到 **待确认** 页点「全部重试」，或对缓存邮件重跑一次「获取发票文件」。
 </details>
 
 <details>
@@ -294,42 +261,25 @@ node dist/index.js pending retry --config <config.json> --state <state.json>
 <details>
 <summary>发票库里混进了平台 logo、广告图、二维码</summary>
 
-v0.0.7 之前，「是不是发票」这件事会看图片所在的**域名**。可开票平台的 CDN
-同时也放自家的页眉、下载按钮、广告位、公众号二维码——它们和发票同域，于是
-全被当成发票入库，还占着识别队列。
+判据只看图片的**路径**（不看域名），并先否决物料命名（logo / banner / ad / qrcode / ewm /
+阅读器安装包……）；邮件里的 `multipart/related` 内联图（页眉、按钮、广告位）按 MIME 语义识别为
+版式物料，只要同封邮件另有真发票文件就直接丢弃。
 
-现在判据只看**路径**，并且先否决物料命名（logo / banner / ad / qrcode / ewm /
-阅读器安装包……）；邮件里的 `multipart/related` 内联图（页眉、按钮、广告位）
-按 MIME 语义识别为版式物料，只要同封邮件另有真发票文件就直接丢弃。
-
-已经入库的那些不会自动消失。升级后到 **待确认** 页点「全部重试」，或对缓存邮件
-重跑一次「获取发票文件」即可；旧的物料记录可以在发票库里手动删掉。
+已经入库的物料记录不会自动消失，可在发票库里手动删除；也可到 **待确认** 页点「全部重试」重新处理。
 </details>
 
 <details>
 <summary>同一张票被归档了两份（一份 PDF、一份 OFD）</summary>
 
-开票方常常在同一个压缩包 / 同一封邮件里同时给 PDF 和 OFD。旧版本只在两边文件名
-都带 20 位发票号时才认得出是同一张票，通行费和携程这类用订单号命名的就会各存一份。
-
-现在同一次投递里 `<相同词干>.pdf` + `<相同词干>.ofd` 只归档 PDF。已经重复入库的
-历史数据用这条命令清理（关掉应用后运行）：
+同一次投递里 `<相同词干>.pdf` + `<相同词干>.ofd` 只归档 PDF。已经重复入库的数据用下面的命令清理（先关掉应用）：
 
 ```bash
-cd ~/Library/Application\ Support/mail-fapiao-helper
-node <仓库路径>/dist/index.js dedupe --config ./config.json          # 先看会删什么
+cd ~/Library/Application\ Support/发票助手
+node <仓库路径>/dist/index.js dedupe --config ./config.json          # 先看会移出什么
 node <仓库路径>/dist/index.js dedupe --config ./config.json --apply  # 确认后执行
 ```
 
-它只处理「同一封邮件、同一容器、同一非通用词干」的 PDF/OFD 配对，判据与归档时
-完全一致；台账与磁盘对不上的行会被跳过并报出来；文件是**移进**
-`invoices/.dedupe-quarantine/<时间戳>/` 而不是删除，确认无误后自行删掉该目录。
-</details>
-
-<details>
-<summary>Intel Mac / Linux 怎么用</summary>
-
-目前没有发行版，请按下一节"从源码运行"自行构建。
+它只处理「同一封邮件、同一容器、同一非通用词干」的 PDF/OFD 配对，判据与归档时一致；台账与磁盘对不上的行会被跳过并报出来；文件是**移进** `invoices/.dedupe-quarantine/<时间戳>/` 而不是删除，确认无误后自行删掉该目录。
 </details>
 
 ---
@@ -377,17 +327,7 @@ npm run smells -- --json  # JSON 报告
 MFH_INSTALL_GIT_HOOKS=1 npm run postinstall  # 自愿启用本地提交钩子
 ```
 
-启用后的 pre-commit 钩子执行 `npm run lint -- --max-warnings 0 && npm run typecheck`。
-
-安装依赖时也可设置 `MFH_INSTALL_GIT_HOOKS=1` 启用 simple-git-hooks；CI 中不会安装钩子。
-提交前依次执行 `npm run lint -- --max-warnings 0` 与 `npm run typecheck`。
-确需跳过本次本地检查时使用 `SKIP_SIMPLE_GIT_HOOKS=1 git commit ...`，CI 仍会检查。
-Windows PowerShell 可先用 `$env:MFH_INSTALL_GIT_HOOKS="1"` 设置环境变量，再运行 `npm run postinstall`。
-
-ESLint 覆盖后端、脚本、渲染层 TS/TSX 与 GUI 测试；现有结构性超限记录在
-`eslint.config.mjs`，仅为指定文件或具名工厂保留有限额度，后续重构时应收紧。
-文件上限只计非空、非注释行；体积报告使用源文件的物理行数，方便定位。
-本次基线、死代码清理和完整文案对照见 [质量门禁记录](docs/QUALITY_GATES.md)。
+规则、本地提交钩子（`MFH_INSTALL_GIT_HOOKS=1 npm run postinstall`，自愿启用）与跳过方法见 [代码质量门禁](docs/QUALITY_GATES.md)。
 
 ### 跑测试
 
@@ -428,7 +368,7 @@ macOS 签名用的 entitlements 在 [build/entitlements.mac.plist](build/entitle
 ### 持续集成
 
 - [.github/workflows/ci.yml](.github/workflows/ci.yml) — 每个 PR 和 push 到 main：在 macOS + Windows 上跑 `npm audit --omit=dev` 与 `npm run test:core`；Chromium 浏览器 E2E 为独立 job。
-- 分支保护：CI  alone 不能阻止失败合并——需在 GitHub 配置 required checks，见 [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md)（需 owner 操作）。
+- 分支保护：CI 本身不能阻止失败合并——需在 GitHub 配置 required checks，见 [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md)（需 owner 操作）。
 - [.github/workflows/dev-build.yml](.github/workflows/dev-build.yml) — 手动触发的**未签名开发构建**。`permissions: contents: read`，产物只上传为 workflow artifact（保留 14 天）。
 - [.github/workflows/unsigned-prerelease.yml](.github/workflows/unsigned-prerelease.yml) — tag `vX.Y.Z-unsigned.N` 的**明确未签名 Pre-release**。
 - [.github/workflows/release.yml](.github/workflows/release.yml) — **正式签名发布**，见下。
@@ -496,11 +436,13 @@ docker compose --profile cli run --rm mfh run   --config /data/config.json
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 当前模块边界、事务、锁、schema v3
 - [docs/DESIGN.md](docs/DESIGN.md) — 产品目标、四类邮件对照、配置指引
+- [docs/SUPPORTING_DOCUMENTS.md](docs/SUPPORTING_DOCUMENTS.md) — 附属材料（汇总单、订单明细等）的分类与统计口径
+- [docs/QUALITY_GATES.md](docs/QUALITY_GATES.md) — 代码质量门禁与本地提交钩子
 - [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md) — main 必过检查（需 owner 配置）
 - [docs/SECURITY_NOTES.md](docs/SECURITY_NOTES.md) — 已知残留风险与接受理由
 - [docs/SECURITY_HISTORY_CLEANUP.md](docs/SECURITY_HISTORY_CLEANUP.md) — 历史隐私净化步骤（**未执行**，需人工批准）
+- [docs/EFAPIAO_UPSTREAM_FEEDBACK.md](docs/EFAPIAO_UPSTREAM_FEEDBACK.md) — 向上游 OCR 引擎反馈的待办线索
 - [gui-design/README.md](gui-design/README.md) — 桌面界面：目录、路由、静态预览与测试套件；渲染层约定见 [gui-design/src/README.md](gui-design/src/README.md)
-- 过程性/历史文档已移至 `docs/archive/` 与 `docs/audit-2026-07-29/`，不作为现行规约
 
 ---
 
